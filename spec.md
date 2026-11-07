@@ -90,16 +90,16 @@ Other model stop reasons are handled and logged:
 
 ### Limits
 
-Turn, time and budget limits are part of the core, not extensions. `max_turns` and `timeout` have defaults (50 turns, 10 minutes); a budget cap has no default and must be given, or explicitly set to unlimited. Before each model call the driver checks the limits as a pure function over the state: `check_limits(state, limits, month_to_date, worst_case, now) → Allow | Stop(reason)`.
+Turn, time and budget limits are part of the core, not extensions. `max_turns` and `timeout` have defaults (50 turns, 10 minutes). The budget has two caps, `run_cap` (this run) and `month_cap` (all runs this UTC month); neither has a default, and each must be given or explicitly set to `None` for unlimited. The check stops with `budget` when either would be crossed. Before each model call the driver checks the limits as a pure function over the state: `check_limits(state, limits, month_to_date, worst_case, now) → Allow | Stop(reason)`.
 
 - **Per-run spend** is a fold over the `model_call` events in the state whose `runId` equals this run. A forked run inherits its parent's events for context but not for spend.
-- **`month_to_date`** is read from the spend log at the edge and passed in: the sum of entries whose `at` falls in the current UTC month, excluding this run's own lines. The check adds it to the per-run spend, so nothing is counted twice across a pause.
+- **`month_to_date`** is read from the spend log at the edge and passed in: the sum of entries whose `at` falls in the current UTC month, excluding this run's own lines. The check compares per-run spend plus `worst_case` with `run_cap`, and `month_to_date` plus per-run spend plus `worst_case` with `month_cap`, so nothing is counted twice across a pause.
 - **`worst_case`** prices the next call at its `max_tokens` ceiling, which every `ModelRequest` carries.
 - **`timeout`** counts active time: wall-clock time from `run_started` to `now` (the `Clock` port) minus the time between each `run_paused` and the resume, taken from event timestamps. A run waiting an hour for approval does not time out.
 
-**Retries** are a pure policy, `(attempt, error, random) → Delay | GiveUp`, with the random source passed in. 429 and 529, other 5xx, connection errors and timeouts get exponential backoff with full jitter (`random() * min(cap, base * 2**attempt)`) and honour `retry-after`; any other 4xx is never retried. Every model and tool call has a timeout.
+**Retries** are a pure policy, `(attempt, error, random) → Delay | GiveUp`, with the random source passed in. 429 and 529, other 5xx, connection errors and timeouts get exponential backoff with full jitter (`random() * min(cap, base * 2**attempt)`) and honour `retry-after`; any other 4xx is never retried. Every model and tool call has a timeout. A tool timeout abandons the call: it is logged as failed with `timeout` and the loop moves on, but Python cannot kill a thread, so the call may keep running. A tool that writes must therefore run through the sandbox (a subprocess, killed on timeout) or accept a cancel event; a late write from an abandoned call still bumps the workspace generation counter, so the cache stays correct.
 
-**Two identifiers, two jobs.** A replay or a retry does not re-run a completed call: tool completions are matched by `tool_use_id`, and if the log already holds a `tool_completed` for it, the result is reused. Delivery is at-least-once. If the process dies after a tool runs but before its completion is appended, `resume` re-runs a read-only tool, and turns a call to a tool that declares `writes` into an `Ask` before running it again. Separately, `call_hash` is `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()`, stored on `tool_requested`; it identifies a repeated call for the repeat detector and the cache, and a deliberate repeat (running the tests again after an edit) is still allowed.
+**Two identifiers, two jobs.** A replay or a retry does not re-run a completed call: tool completions are matched by `tool_use_id`, and if the log already holds a `tool_completed` for it, the result is reused. Delivery is at-least-once. If the process dies after a tool runs but before its completion is appended, `resume` re-runs a tool registered `read_only=True`, and turns a call to any other tool, declared or not, into an `Ask` before running it again. A tool that does not say it is read-only is treated as one that has side effects. Separately, `call_hash` is `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()`, stored on `tool_requested`; it identifies a repeated call for the repeat detector and the cache, and a deliberate repeat (running the tests again after an edit) is still allowed.
 
 ### Escalation ladder
 
@@ -121,9 +121,8 @@ An extension plugs into a seam that already exists and never changes the core. E
 
 **Named interfaces only, not built.** Each is a `Protocol` with a docstring and no implementation. The links are the public work each one is named after:
 
-- `PlannerExecutor`: one call writes a plan, a loop carries it out. 
-  - Wang et al., [Plan-and-Solve Prompting](https://arxiv.org/abs/2305.04091); 
-  - Anthropic, [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (orchestrator-workers).
+- `PlannerExecutor`: plan once, run the tools with no model call in between, then one call to combine the results. 
+  - Xu et al., [ReWOO: Decoupling Reasoning from Observations for Efficient Augmented Language Models](https://arxiv.org/abs/2305.18323).
 - `ScriptAction`: the model acts by writing code, not one tool call at a time. 
   - Wang et al., [Executable Code Actions Elicit Better LLM Agents](https://arxiv.org/abs/2402.01030) (CodeAct).
 - `ModelRouter`: pick a model per request. 
@@ -132,12 +131,13 @@ An extension plugs into a seam that already exists and never changes the core. E
   - Anthropic, [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system).
 - `BestOfN`: sample several attempts and keep the best. 
   - Brown et al., [Large Language Monkeys: Scaling Inference Compute with Repeated Sampling](https://arxiv.org/abs/2407.21787).
-- `TreeSearch`: explore and back up over branches of reasoning. 
-  - Yao et al., [Tree of Thoughts](https://arxiv.org/abs/2305.10601).
+- `TreeSearch`: explore branches of actions, score them and back up the values. 
+  - Zhou et al., [Language Agent Tree Search Unifies Reasoning Acting and Planning in Language Models](https://arxiv.org/abs/2310.04406) (LATS); 
+  - Yao et al., [Tree of Thoughts](https://arxiv.org/abs/2305.10601) for the search over reasoning steps it builds on.
 - `DirectRoute`: a request that matches a known route runs plain code, with no model call. 
   - Anthropic, [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (the routing workflow).
 
-**Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to `seq` and then its own, and every model call is counted once. The old run is untouched. Rewind restores conversation state, not files: what the old run wrote after `seq` is still on disk, and the fork starts from that workspace.
+**Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to `seq` and then its own, and every model call is counted once. The old run is untouched. A fork has no `run_started` of its own: its configuration is the parent's, taken from the parent's `run_started`, and `resume` compares that digest. Its `timeout` clock starts at its `run_forked` timestamp and its turn count starts at 0, so neither includes the parent's time or turns, and its per-run spend counts only its own `model_call` events. Rewind restores conversation state, not files: what the old run wrote after `seq` is still on disk, and the fork starts from that workspace.
 
 ## 2. The event log
 
@@ -169,8 +169,8 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash` |
 | `tool_completed` | driver | `tool_use_id`, `ok`, `content`, `duration_ms`, `cached` |
 | `guard_decision` | guards | `stage` (`pre`/`post`), `tool_use_id`, `decision` (`allow`/`deny`/`ask`), `reason` |
-| `approval_requested` | guards | `tool_use_id`, `question` |
-| `approval_granted`, `approval_denied` | driver | `tool_use_id`, `by`, `note` |
+| `approval_requested` | guards, driver | `tool_use_id` (null when the escalation ladder asks), `question` |
+| `approval_granted`, `approval_denied` | driver | `tool_use_id` (null likewise), `by`, `note` |
 | `sandbox_denied` | sandbox, workspace | `action`, `target`, `reason` |
 | `context_packed` | context store | `selected`, `dropped`, `tokens`, `budget` |
 | `context_compacted` | context store | `strategy`, `tokens_before`, `tokens_after` |
@@ -230,7 +230,7 @@ Token counts are the source of truth and cost is derived. `cost_usd` on an event
 
 ### Run spend line
 
-Whenever a run stops (finished or paused), `loomcore` appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the spend since that run's previous line, counting only events whose `runId` is that run. The month-to-date total passed to `check_limits` is the sum of this log. If a process dies before it writes its line, `resume` recomputes the missing amount from the run's `model_call` events and writes it first.
+After each `model_call`, `loomcore` appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the cost of that call, counting only events whose `runId` is that run. Writing per call, not at the end, means a crashed run and a run still in progress are both already in the log, so the month cap sees them. One line is a single small append, so concurrent runs can share the file. `month_to_date` for `check_limits` is read from this log as defined in section 1: the current UTC month, excluding the run's own lines. If a process dies between a `model_call` and its spend line, `resume` sums the run's `model_call` events, subtracts the run's lines, and writes the difference first. Concurrent runs can overshoot a cap by at most one call each, because the worst case is priced before every call but another run may spend in the meantime.
 
 ## 3. The eight components
 
@@ -250,19 +250,20 @@ Tests: byte-identical output for the same inputs (a snapshot test); a changed pa
 
 ```python
 class ToolRegistry(Protocol):
-    def register(self, fn: Callable[..., Any], *, cacheable: bool = False) -> None: ...
+    def register(self, fn: Callable[..., Any], *, read_only: bool = False, cacheable: bool = False,
+                 reads: Sequence[str] = (), writes: Sequence[str] = ()) -> None: ...   # cacheable needs read_only
     def schemas(self) -> list[ToolSchema]: ...
     def execute(self, name: str, input: Mapping[str, Any]) -> ToolResult: ...
 ```
 
-Plain typed functions become tools; the type hints are the only source of the JSON Schema (via `pydantic.TypeAdapter`) and the docstring is the description. `execute` is the one interface every "hand" shares and returns `ToolResult(ok, content)`. Invalid input and failures come back as `ok=False` with a short message that says how to fix the call, an observation the model can act on. `execute` is synchronous. Within one model turn the driver runs independent calls in threads; a tool may declare the resources it `reads` and `writes` (for example a path), and calls that conflict (a write after a read of the same resource) get an edge in the order the model emitted them. Edges are ordered by `graphlib.TopologicalSorter`, and a cycle becomes a clean error. Read-only tools opt into an LRU cache keyed by `call_hash` plus a workspace generation counter, held by the `Workspace` itself (not derived from the log) and incremented on every write, so a read after a write is never served stale. Emits none: it returns the result, and the driver appends `tool_completed` after the post guards have run, so a redacted result is never written raw.
-Tests: schemas for nested types; invalid input gives a useful error; independent calls overlap, dependent calls run in order; a cycle is reported; cache hits and eviction order; no caching for tools that write.
+Plain typed functions become tools; the type hints are the only source of the JSON Schema (via `pydantic.TypeAdapter`) and the docstring is the description. `execute` is the one interface every "hand" shares and returns `ToolResult(ok, content)`. Invalid input and failures come back as `ok=False` with a short message that says how to fix the call, an observation the model can act on. `execute` is synchronous. Within one model turn the driver runs independent calls in threads; a tool may declare the resources it `reads` and `writes` (for example a path), and a tool not registered `read_only=True` is treated as having side effects when a run is resumed after a crash; calls that conflict (a write after a read of the same resource) get an edge in the order the model emitted them. Edges are ordered by `graphlib.TopologicalSorter`, and a cycle becomes a clean error. Read-only tools opt into an LRU cache keyed by `call_hash` plus a workspace generation counter, held by the `Workspace` itself (not derived from the log) and incremented on every write, including a write made by a sandboxed command (the registry bumps it when any non-read-only call returns or is abandoned), so a read after a write is never served stale. Emits none: it returns the result, and the driver appends `tool_completed` after the post guards have run, so a redacted result is never written raw.
+Tests: schemas for nested types; invalid input gives a useful error; independent calls overlap, dependent calls run in order; a cycle is reported; cache hits and eviction order; no caching for tools that write; a resumed run asks before re-running a tool that is not `read_only`; a timed-out call is abandoned and logged, and a late write still invalidates the cache.
 
 ### 3.3 Sandbox boundary (`sandbox.py`)
 
 ```python
 class Sandbox(Protocol):
-    def run(self, cmd: Sequence[str], *, cwd: Path, env_allow: Set[str], limits: Limits) -> RunResult: ...
+    def run(self, cmd: Sequence[str], *, cwd: Path, env_allow: Set[str], limits: ResourceLimits) -> ProcessResult: ...
 
 def evaluate(rules: Rules, request: Request) -> Allow | Deny: ...   # pure
 ```
@@ -280,7 +281,7 @@ class Workspace(Protocol):
     def delete(self, path: str) -> None: ...
 ```
 
-Every operation goes through one `resolve_inside(root, path)`: resolve first (which follows symlinks), then require `is_relative_to(root)`. Emits `sandbox_denied` on an escape and `note_written` for notes.
+The root is resolved once at construction (`root = root.resolve()`, so a symlinked root such as `/tmp` on macOS does not make every path fail). Every operation then goes through one `resolve_inside(root, path)`: resolve first (which follows symlinks), then require `is_relative_to(root)`. Emits `sandbox_denied` on an escape and `note_written` for notes.
 Tests, written first: `../`, absolute paths, a symlink out of the workspace, a symlinked parent directory.
 
 ### 3.5 Memory and context store (`context.py`)
@@ -294,7 +295,7 @@ class Formatter(Protocol):
     def render(self, events: Sequence[Event]) -> list[Message]: ...
 ```
 
-`pack` is pure: pinned items (system prompt, tool definitions, the latest user turn and tool results) are always in; the rest are chosen greedily by value per token with a heap, ties broken deterministically. Compaction runs at a threshold (for example 80% of the budget): clear old tool results first, then summarise. A notes file in the workspace holds what the agent wants to keep outside the window. Resolved errors and failed calls are hidden from later windows. The formatter is swappable, so the same log can render as messages or as tagged blocks. Tokens are counted, not estimated. Emits `context_packed` and `context_compacted`.
+`pack` is pure: each `Item` carries its token count, measured at the edge, so `pack` does no counting itself. Pinned items (system prompt, tool definitions, the latest user turn and tool results) are always in; the rest are chosen greedily by value per token with a heap, ties broken deterministically. Compaction runs at a threshold (for example 80% of the budget): clear old tool results first, then summarise. A notes file in the workspace holds what the agent wants to keep outside the window. Resolved errors and failed calls are hidden from later windows. The formatter is swappable, so the same log can render as messages or as tagged blocks. Tokens are counted, not estimated. Emits `context_packed` and `context_compacted`.
 Tests: packing respects the budget and always includes pinned items; compaction fires at the threshold; the stable prefix is identical across turns.
 
 ### 3.6 Feedback and self-verification hook (`verify.py`)
@@ -309,12 +310,15 @@ Tests: a failing verifier prevents `finished` and feeds back; a passing one ends
 ### 3.7 Guardrails and the human-in-the-loop seam (`guards.py`)
 
 ```python
-class Guard(Protocol):
-    def check(self, request: ToolRequest, state: RunState) -> Allow | Deny | Ask | Redact: ...
+class Guard(Protocol):                                    # stage "pre": before the tool runs
+    def check(self, request: ToolRequest, state: RunState) -> Allow | Deny | Ask: ...
+
+class PostGuard(Protocol):                                # stage "post": on the result, before it is logged
+    def check(self, request: ToolRequest, result: ToolResult, state: RunState) -> Allow | Deny | Redact: ...
 ```
 
-Guards form a pipeline of pure checks run in order, stopping at the first `Deny` or `Ask`, before a tool runs (`pre`) and on its output after (`post`, for example a secret in a result, which `Redact` removes, or an oversized one). Tool results are untrusted data, wrapped and marked as data in the prompt. `Ask` appends `approval_requested`, the run pauses (`run_paused`, `awaiting_approval`), and `resume(ref, decision)` appends `approval_granted` or `approval_denied` and continues from the log. The pause sits between choosing a tool and running it, so nothing executes before approval. Budget enforcement is not a guard: it is the pure `check_limits` over the state in section 1. Emits `guard_decision` and the approval events.
-Tests: a deny stops the tool and is logged; an ask pauses the run; kill the process, resume, and the run continues; `check_limits` stops at the cap boundary with exact decimal arithmetic, counts a run's own spend, and prices the worst case.
+`Redact(content)` carries the replacement content, which the driver logs and shows the model in place of the original. A post `Deny` replaces the result with an `ok=False` observation that says why. A post guard cannot `Ask`, because the tool has already run. Guards form two pipelines of pure checks run in order, stopping at the first `Deny` or `Ask` (`pre`, before a tool runs) or the first `Deny` (`post`, on its output: for example a secret in a result, which `Redact` removes, or an oversized one). Tool results are untrusted data, wrapped and marked as data in the prompt. `Ask` appends `approval_requested`, the run pauses (`run_paused`, `awaiting_approval`), and `resume(ref, decision)` appends `approval_granted` or `approval_denied` and continues from the log. The pause sits between choosing a tool and running it, so nothing executes before approval. Budget enforcement is not a guard: it is the pure `check_limits` over the state in section 1. Emits `guard_decision` and the approval events.
+Tests: a deny stops the tool and is logged; a post guard redacts a secret and the raw result never reaches the log or the model; an ask pauses the run; kill the process, resume, and the run continues; `check_limits` stops at the cap boundary with exact decimal arithmetic, counts a run's own spend, and prices the worst case.
 
 ### 3.8 Observability (`observability/`)
 
@@ -348,7 +352,7 @@ evals/           # the scripted three-step task
 
 ## 5. Tests and the eval
 
-Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; and `resume` after a crash recomputes the missing spend line.
+Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; `resume` after a crash recomputes the missing spend line; a second run's spend counts against `month_cap`; and a fork's clock and turn count start at its `run_forked`.
 
 The eval is a scripted three-step task driven by a fake model that replays canned responses. It runs in CI like a test and must reach `finished` with a complete, replayable log.
 

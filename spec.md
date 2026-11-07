@@ -12,14 +12,14 @@ The core is one pure function:
 def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]: ...
 ```
 
-`step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Nothing about a run lives outside the log, so a new process can load the log and continue.
+`step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt, tool schemas, limits) is logged once in `run_started`, and `resume` refuses to continue if its digest differs.
 
 ```python
 Effect = CallModel | RunTool | AskHuman | Stop
 
 class Driver(Protocol):
     def run(self, task: Task, log: EventLog) -> RunResult: ...
-    def resume(self, run_id: str, decision: Decision | None = None) -> RunResult: ...
+    def resume(self, ref: RunRef, decision: Decision | None = None) -> RunResult: ...   # RunRef = (session_id, run_id)
 ```
 
 Every component below works without the driver: a user may call the registry, the sandbox, the guards and the context store from their own loop.
@@ -30,31 +30,37 @@ Every component below works without the driver: a user may call the registry, th
 ModelCall = Callable[[ModelRequest], ModelResponse]       # wraps the Anthropic SDK; tests use a scripted fake
 Clock = Callable[[], datetime]                            # wall-clock UTC
 Monotonic = Callable[[], float]                           # durations
+Random = Callable[[], float]                              # jitter; tests pass a fixed one
 ```
 
 ### Ending a run
 
-A run ends on purpose, and the reason is logged as `run_finished.reason`:
+A run ends on purpose. `run_finished` is terminal and carries the reason; a run that waits for a human writes `run_paused` instead and is later resumed, so a run has at most one `run_finished`.
 
-| Reason | Meaning |
-|---|---|
-| `finished` | the model called the typed `finish(result)` tool |
-| `end_turn` | the model stopped without calling `finish` and no tool was pending |
-| `max_turns`, `budget`, `timeout` | a harness limit; the stop is graceful and records what was done and where to resume |
-| `awaiting_approval` | a guard returned `Ask`; resume with a decision |
-| `stuck` | the escalation ladder ran out |
-| `killed` | the kill switch (a budget cap or an external signal) |
-| `error` | an unrecoverable error, with the message |
+| Event | Reason | Meaning |
+|---|---|---|
+| `run_finished` | `finished` | the model called the typed `finish(result)` tool and verification passed |
+| `run_finished` | `end_turn` | the model stopped without `finish` and no tool was pending; the verifier runs here too, and a failure continues the loop |
+| `run_finished` | `max_turns`, `timeout`, `budget` | a harness limit was reached; the stop is graceful and records what was done and where to resume |
+| `run_finished` | `refused` | the model's `stop_reason` was `refusal` |
+| `run_finished` | `stuck` | the escalation ladder ran out |
+| `run_finished` | `killed` | an external signal or the kill switch; a budget cap gives `budget`, not `killed` |
+| `run_finished` | `error` | an unrecoverable error, with the message |
+| `run_paused` | `awaiting_approval` | a guard returned `Ask`; `resume` with a decision continues the same run |
 
-Model stop reasons are handled and logged: `end_turn`, `tool_use`, `max_tokens` (continue or stop by policy), `stop_sequence`, `pause_turn` (resume by sending the response back) and `refusal`.
+Other model stop reasons are handled and logged: `tool_use` continues the loop, `max_tokens` continues or stops by policy, `stop_sequence` ends the turn, and `pause_turn` resumes by sending the response back.
 
-**Retries** are a pure policy, `(attempt, error) → Delay | GiveUp`. 429 and 529 get exponential backoff with full jitter (`uniform(0, min(cap, base * 2**attempt))`) and honour `retry-after`; request errors (400-class) are never retried. Every model and tool call has a timeout.
+### Limits
 
-**Idempotency key.** `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")))`. It is stored on `tool_requested`, so a retry or a replay never runs a side effect twice.
+Turn, time and budget limits are part of the core, not extensions. `max_turns` and `timeout` have defaults (50 turns, 10 minutes); a budget cap has no default and must be given, or explicitly set to unlimited. Before each model call the driver checks the limits as a pure function over the state: `check_limits(state, limits, month_to_date, worst_case) → Allow | Stop(reason)`. Per-run spend is a fold over the `model_call` events already in the state; `month_to_date` is read from the spend log at the edge and passed in; `worst_case` prices the next call at its `max_tokens` ceiling, which every `ModelRequest` carries.
+
+**Retries** are a pure policy, `(attempt, error, random) → Delay | GiveUp`, with the random source passed in. 429 and 529, other 5xx, connection errors and timeouts get exponential backoff with full jitter (`random() * min(cap, base * 2**attempt)`) and honour `retry-after`; any other 4xx is never retried. Every model and tool call has a timeout.
+
+**Two identifiers, two jobs.** A retry or a replay never runs a side effect twice because tool completions are matched by `tool_use_id`: if the log already holds a `tool_completed` for it, the result is reused. Separately, `call_hash` is `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()`, stored on `tool_requested`; it identifies a repeated call for the repeat detector and the cache, and a deliberate repeat (running the tests again after an edit) is still allowed.
 
 ### Escalation ladder
 
-The repeat detector counts the same idempotency key in a run. Past a threshold the ladder climbs one rung at a time: nudge (a short corrective message), switch strategy (a different prompt or tool set), ask a human (an `Ask`), stop with the best partial result (`stuck`). Each rung is an event.
+The repeat detector counts the same `call_hash` in a run. Past a threshold the ladder climbs one rung at a time: nudge (a short corrective message), switch strategy (a different prompt or tool set), ask a human (an `Ask`), stop with the best partial result (`stuck`). Each rung is an event.
 
 ### Extension seams
 
@@ -63,17 +69,18 @@ An extension plugs into a seam that already exists and never changes the core. E
 | Seam | Examples |
 |---|---|
 | A tool | the plan tool (a plan file always kept in context), `finish`, note-taking |
+| A route matched before `CallModel` | direct dispatch |
 | A hook around `step` | verify then reflect, a periodic critique, replan on failure |
-| A stop policy | turn, budget and time limits, the escalation ladder |
+| A stop policy | the escalation ladder, custom stop conditions |
 | An alternative driver reusing the core | bring your own loop |
 
-**Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. **Named interfaces only, not built:** `PlannerExecutor`, `ScriptAction`, `ModelRouter`, `SubAgent`, `BestOfN`, `TreeSearch`. Each is a `Protocol` with a docstring and no implementation.
+**Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. **Named interfaces only, not built:** `PlannerExecutor`, `ScriptAction`, `ModelRouter`, `SubAgent`, `BestOfN`, `TreeSearch`, `DirectRoute` (a request that matches a known route runs plain code, with no model call). Each is a `Protocol` with a docstring and no implementation.
 
-**Rewind** forks a run: a new `run_id` whose log is the first *k* events of the old one, optionally followed by a human hint, then continues. The old log is untouched.
+**Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to `seq` and then its own, and every model call is counted once. The old run is untouched.
 
 ## 2. The event log
 
-The log is append-only JSONL, one event per line, and the only record of a run. Everything that reports on a run reads it; nothing reads another reader's output.
+The log is append-only JSONL, one event per line, and the only record of a run. Each session is one file, `<runs-root>/<project>/<sessionId>.jsonl`, holding every run of that session, so `(session_id, run_id)` locates a run. Everything that reports on a run reads it; nothing reads another reader's output.
 
 ### Envelope
 
@@ -94,10 +101,11 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 
 | Kind | Emitted by | Payload (besides the envelope) |
 |---|---|---|
-| `run_started` | driver | `task`, `config_digest` |
+| `run_started` | driver | `task`, `config` (system prompt, tool schemas, limits), `config_digest` |
+| `run_forked` | driver | `from` (`runId`, `seq`), `hint` |
 | `turn_started` | driver | `turn` |
-| `model_call` | driver | `type: "assistant"`, `message`, `cost_usd`, `pricing_version` (below) |
-| `tool_requested` | driver | `tool_use_id`, `name`, `input`, `idempotency_key` |
+| `model_call` | driver | `type: "assistant"`, `message`, `duration_ms`, `cost_usd`, `pricing_version` (below) |
+| `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash` |
 | `tool_completed` | registry | `tool_use_id`, `ok`, `content`, `duration_ms`, `cached` |
 | `guard_decision` | guards | `stage` (`pre`/`post`), `tool_use_id`, `decision` (`allow`/`deny`/`ask`), `reason` |
 | `approval_requested` | guards | `tool_use_id`, `question` |
@@ -108,7 +116,8 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `verification_passed`, `verification_failed` | verifier | `verifier`, `message` |
 | `escalation` | driver | `rung`, `reason` |
 | `note_written` | workspace | `path` |
-| `run_finished` | driver | `reason`, `result`, `resume_from` |
+| `run_paused` | driver | `reason`, `resume_from` |
+| `run_finished` | driver | `reason`, `result` |
 
 The `model_call` line has the same `usage` block the Anthropic Messages API returns:
 
@@ -125,7 +134,8 @@ The `model_call` line has the same `usage` block the Anthropic Messages API retu
 
 ### Writing, reading, replay
 
-- The writer appends one line and flushes; an `fsync` option exists for durability-sensitive runs.
+- The writer appends one line and flushes; an `fsync` option exists for durability-sensitive runs. Before its first append to an existing file it cuts the file back to the last complete newline, so a torn final line from a crash never ends up in the middle of the log.
+- An optional redactor runs on each event before it is appended, so a secret that reached a tool result can be removed from the log.
 - The reader yields events in order. A broken *final* line (a torn write) is dropped and reported; a broken line anywhere else is an error.
 - Snapshots of derived state are written to a temporary file and moved with `os.replace`, so they are atomic. Replay may start from a snapshot.
 - Replay is deterministic: the same log always yields the same state.
@@ -136,7 +146,7 @@ Token counts are the source of truth and cost is derived. `cost_usd` on an event
 
 ### Run spend line
 
-When a run ends, loomcore appends one line to a spend log: `{"at", "usd", "run", "note"}`. The budget guard reads this log.
+Whenever a run stops (finished or paused), loomcore appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `usd` is the spend since that run's previous line. The month-to-date total passed to `check_limits` is the sum of this log. If a process dies before it writes its line, `resume` recomputes the missing amount from the run's `model_call` events and writes it first.
 
 ## 3. The eight components
 
@@ -161,7 +171,7 @@ class ToolRegistry(Protocol):
     def execute(self, name: str, input: Mapping[str, Any]) -> ToolResult: ...
 ```
 
-Plain typed functions become tools; the type hints are the only source of the JSON Schema (via `pydantic.TypeAdapter`) and the docstring is the description. `execute` is the one interface every "hand" shares and returns `ToolResult(ok, content)`. Invalid input and failures come back as `ok=False` with a short message that says how to fix the call, an observation the model can act on. Independent calls run concurrently (`asyncio.TaskGroup`); dependent calls are ordered by `graphlib.TopologicalSorter`, and a cycle becomes a clean error. Read-only tools opt into an LRU cache keyed by the idempotency key. Emits `tool_completed`.
+Plain typed functions become tools; the type hints are the only source of the JSON Schema (via `pydantic.TypeAdapter`) and the docstring is the description. `execute` is the one interface every "hand" shares and returns `ToolResult(ok, content)`. Invalid input and failures come back as `ok=False` with a short message that says how to fix the call, an observation the model can act on. `execute` is synchronous. Within one model turn the driver runs independent calls in threads; a tool may declare the resources it `reads` and `writes` (for example a path), and calls that conflict (a write after a read of the same resource) get an edge in the order the model emitted them. Edges are ordered by `graphlib.TopologicalSorter`, and a cycle becomes a clean error. Read-only tools opt into an LRU cache keyed by `call_hash` plus a workspace generation counter that increments on every write, so a read after a write is never served stale. Emits `tool_completed`.
 Tests: schemas for nested types; invalid input gives a useful error; independent calls overlap, dependent calls run in order; a cycle is reported; cache hits and eviction order; no caching for tools that write.
 
 ### 3.3 Sandbox boundary (`sandbox.py`)
@@ -209,18 +219,18 @@ Tests: packing respects the budget and always includes pinned items; compaction 
 Verifier = Callable[[RunState], VerifyResult]
 ```
 
-When the model claims it is done, the verifier runs. A failure becomes a `verification_failed` observation with a short critique and the loop continues; a pass lets the run end. Verifiers check the outcome (tests, a checker function), not only the code. Emits `verification_passed` and `verification_failed`.
+When the model claims it is done (a `finish` call or an `end_turn`), the verifier runs. A failure becomes a `verification_failed` observation with a short critique and the loop continues; a pass lets the run end. Verifiers check the outcome (tests, a checker function), not only the code. Emits `verification_passed` and `verification_failed`.
 Tests: a failing verifier prevents `finished` and feeds back; a passing one ends the run.
 
 ### 3.7 Guardrails and the human-in-the-loop seam (`guards.py`)
 
 ```python
 class Guard(Protocol):
-    def check(self, request: ToolRequest, state: RunState) -> Allow | Deny | Ask: ...
+    def check(self, request: ToolRequest, state: RunState) -> Allow | Deny | Ask | Redact: ...
 ```
 
-Guards form a pipeline of pure checks run in order, stopping at the first `Deny` or `Ask`, before a tool runs (`pre`) and on its output after (`post`, for example a secret in a result or an oversized one). Tool results are untrusted data, wrapped and marked as data in the prompt. `Ask` appends `approval_requested`, the run stops with `awaiting_approval`, and `resume(run_id, decision)` appends `approval_granted` or `approval_denied` and continues from the log. The pause sits between choosing a tool and running it, so nothing executes before approval. A budget guard reads the spend log and denies a model call that would cross a per-run or per-month cap. Emits `guard_decision` and the approval events.
-Tests: a deny stops the tool and is logged; an ask pauses the run; kill the process, resume, and the run continues; the cap denies at the boundary with exact decimal arithmetic.
+Guards form a pipeline of pure checks run in order, stopping at the first `Deny` or `Ask`, before a tool runs (`pre`) and on its output after (`post`, for example a secret in a result, which `Redact` removes, or an oversized one). Tool results are untrusted data, wrapped and marked as data in the prompt. `Ask` appends `approval_requested`, the run pauses (`run_paused`, `awaiting_approval`), and `resume(ref, decision)` appends `approval_granted` or `approval_denied` and continues from the log. The pause sits between choosing a tool and running it, so nothing executes before approval. Budget enforcement is not a guard: it is the pure `check_limits` over the state in section 1. Emits `guard_decision` and the approval events.
+Tests: a deny stops the tool and is logged; an ask pauses the run; kill the process, resume, and the run continues; `check_limits` stops at the cap boundary with exact decimal arithmetic, counts a run's own spend, and prices the worst case.
 
 ### 3.8 Observability (`observability/`)
 
@@ -229,7 +239,7 @@ def spans(events: Iterable[Event]) -> list[Span]: ...             # trace.py
 def price(usage: Usage, table: PricingTable) -> Decimal: ...      # cost.py
 ```
 
-Spans are derived from the event log and never written separately: a run is a trace, and each turn, model call and tool call is a span with timing and attributes, using the OpenTelemetry `gen_ai.*` attribute names where they exist. Durations use `time.monotonic()`. `cost.py` tallies tokens per call and per run and prices them from `pricing.json`. Emits no events of its own.
+Spans are derived from the event log and never written separately: a run is a trace, and each turn, model call and tool call is a span with timing and attributes, using the OpenTelemetry `gen_ai.*` attribute names where they exist. Durations come from the `duration_ms` logged on `model_call` and `tool_completed`, measured with the `Monotonic` port when the call is made; spans fall back to timestamp differences where it is missing. `cost.py` tallies tokens per call and per run and prices them from `pricing.json`. Emits no events of its own.
 Tests: spans from a recorded log are stable; pricing matches hand-computed values; cache read and cache write tokens are priced separately.
 
 ## 4. Layout
@@ -254,7 +264,7 @@ evals/           # the scripted three-step task
 
 ## 5. Tests and the eval
 
-Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state).
+Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; and `resume` after a crash recomputes the missing spend line.
 
 The eval is a scripted three-step task driven by a fake model that replays canned responses. It runs in CI like a test and must reach `finished` with a complete, replayable log.
 

@@ -1,10 +1,43 @@
-# loomcore: spec
+# `loomcore`: spec
 
-The contract for v0.1. [intent.md](intent.md) says what loomcore is for; this file says what it does, component by component. Where the two differ, this file wins. Python 3.15, `src/` layout, full type hints, mypy strict. Interfaces are `Protocol`s; data is frozen dataclasses; effects sit at the edge and are passed in.
+- [`loomcore`: spec](#loomcore-spec)
+  - [1. The loop](#1-the-loop)
+    - [Ending a run](#ending-a-run)
+    - [Limits](#limits)
+    - [Escalation ladder](#escalation-ladder)
+    - [Extension seams](#extension-seams)
+  - [2. The event log](#2-the-event-log)
+    - [Envelope](#envelope)
+    - [Kinds](#kinds)
+    - [Writing, reading, replay](#writing-reading-replay)
+    - [Tokens and cost](#tokens-and-cost)
+    - [Run spend line](#run-spend-line)
+  - [3. The eight components](#3-the-eight-components)
+    - [3.1 System-prompt builder (`prompt.py`)](#31-system-prompt-builder-promptpy)
+    - [3.2 Tool registry (`tools.py`)](#32-tool-registry-toolspy)
+    - [3.3 Sandbox boundary (`sandbox.py`)](#33-sandbox-boundary-sandboxpy)
+    - [3.4 Filesystem workspace (`workspace.py`)](#34-filesystem-workspace-workspacepy)
+    - [3.5 Memory and context store (`context.py`)](#35-memory-and-context-store-contextpy)
+    - [3.6 Feedback and self-verification hook (`verify.py`)](#36-feedback-and-self-verification-hook-verifypy)
+    - [3.7 Guardrails and the human-in-the-loop seam (`guards.py`)](#37-guardrails-and-the-human-in-the-loop-seam-guardspy)
+    - [3.8 Observability (`observability/`)](#38-observability-observability)
+  - [4. Layout](#4-layout)
+  - [5. Tests and the eval](#5-tests-and-the-eval)
+  - [6. Done for v0.1](#6-done-for-v01)
+
+
+The contract for v0.1. [intent.md](intent.md) says what `loomcore` is for; this file says what it does, component by component. Where the two differ, this file wins. 
+
+Python 3.15, `src/` layout, full type hints, mypy strict. Interfaces are `Protocol`s; data is frozen dataclasses; effects sit at the edge and are passed in.
 
 ## 1. The loop
 
-loomcore runs a ReAct-style loop over native tool use: the model emits `tool_use` blocks, the harness runs them and returns `tool_result` blocks, and `stop_reason` says when the turn is over. The paper's parsed "Thought / Action / Observation" text is not used; extended thinking and tool blocks replace it.
+`loomcore` runs a [ReAct](https://arxiv.org/abs/2210.03629)-style loop over native tool use: 
+- the model emits `tool_use` blocks, 
+- the harness runs them and returns `tool_result` blocks, 
+- and `stop_reason` says when the turn is over. 
+
+The paper's parsed "Thought / Action / Observation" text is not used; extended thinking and tool blocks replace it.
 
 The core is one pure function:
 
@@ -12,10 +45,11 @@ The core is one pure function:
 def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]: ...
 ```
 
-`step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt, tool schemas, limits) is logged once in `run_started`, and `resume` refuses to continue if its digest differs.
+1. `step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. 
+2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt, tool schemas, limits) is logged once in `run_started`, and `resume` refuses to continue if its digest differs.
 
 ```python
-Effect = CallModel | RunTool | AskHuman | Stop
+# Effect = CallModel | RunTool | AskHuman | Stop
 
 class Driver(Protocol):
     def run(self, task: Task, log: EventLog) -> RunResult: ...
@@ -48,7 +82,11 @@ A run ends on purpose. `run_finished` is terminal and carries the reason; a run 
 | `run_finished` | `error` | an unrecoverable error, with the message |
 | `run_paused` | `awaiting_approval` | a guard returned `Ask`; `resume` with a decision continues the same run |
 
-Other model stop reasons are handled and logged: `tool_use` continues the loop, `stop_sequence` is treated as `end_turn`, `max_tokens` continues once and then stops with the reason `max_tokens`, and `pause_turn` resumes by sending the response back.
+Other model stop reasons are handled and logged: 
+- `tool_use` continues the loop, 
+- `stop_sequence` is treated as `end_turn`, 
+- `max_tokens` continues once and then stops with the reason `max_tokens`, and 
+- `pause_turn` resumes by sending the response back.
 
 ### Limits
 
@@ -79,7 +117,25 @@ An extension plugs into a seam that already exists and never changes the core. E
 | A stop policy | the escalation ladder, custom stop conditions |
 | An alternative driver reusing the core | bring your own loop |
 
-**Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. **Named interfaces only, not built:** `PlannerExecutor`, `ScriptAction`, `ModelRouter`, `SubAgent`, `BestOfN`, `TreeSearch`, `DirectRoute` (a request that matches a known route runs plain code, with no model call). Each is a `Protocol` with a docstring and no implementation.
+**Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. 
+
+**Named interfaces only, not built.** Each is a `Protocol` with a docstring and no implementation. The links are the public work each one is named after:
+
+- `PlannerExecutor`: one call writes a plan, a loop carries it out. 
+  - Wang et al., [Plan-and-Solve Prompting](https://arxiv.org/abs/2305.04091); 
+  - Anthropic, [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (orchestrator-workers).
+- `ScriptAction`: the model acts by writing code, not one tool call at a time. 
+  - Wang et al., [Executable Code Actions Elicit Better LLM Agents](https://arxiv.org/abs/2402.01030) (CodeAct).
+- `ModelRouter`: pick a model per request. 
+  - Ong et al., [RouteLLM: Learning to Route LLMs with Preference Data](https://arxiv.org/abs/2406.18665).
+- `SubAgent`: hand a piece of the task to a separate agent with its own context. 
+  - Anthropic, [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system).
+- `BestOfN`: sample several attempts and keep the best. 
+  - Brown et al., [Large Language Monkeys: Scaling Inference Compute with Repeated Sampling](https://arxiv.org/abs/2407.21787).
+- `TreeSearch`: explore and back up over branches of reasoning. 
+  - Yao et al., [Tree of Thoughts](https://arxiv.org/abs/2305.10601).
+- `DirectRoute`: a request that matches a known route runs plain code, with no model call. 
+  - Anthropic, [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (the routing workflow).
 
 **Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to `seq` and then its own, and every model call is counted once. The old run is untouched. Rewind restores conversation state, not files: what the old run wrote after `seq` is still on disk, and the fork starts from that workspace.
 
@@ -100,7 +156,7 @@ Every line carries:
 | `runId` | str | the run; a rewind starts a new one |
 | `kind` | str | the event kind (below) |
 
-The field names `sessionId`, `timestamp` and the `message` block below follow the transcript format that existing Claude Code tooling already parses, so a loomcore log needs a new root directory and no new parser. Files live at `<runs-root>/<project>/<sessionId>.jsonl`, with sub-run logs under `subagents/`.
+The field names `sessionId`, `timestamp` and the `message` block below follow the transcript format that existing Claude Code tooling already parses, so a `loomcore` log needs a new root directory and no new parser. Files live at `<runs-root>/<project>/<sessionId>.jsonl`, with sub-run logs under `subagents/`.
 
 ### Kinds
 
@@ -127,14 +183,37 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 The `model_call` line has the same `usage` block the Anthropic Messages API returns:
 
 ```json
-{"schema": "loomcore.event.v1", "seq": 7, "kind": "model_call", "type": "assistant",
- "timestamp": "2026-11-03T08:14:02.311Z", "sessionId": "run-2026-11-03-0814", "runId": "r1",
- "message": {"id": "msg_01…", "model": "claude-opus-5-5",
-   "usage": {"input_tokens": 1840, "output_tokens": 312,
-     "cache_read_input_tokens": 9200, "cache_creation_input_tokens": 0,
-     "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}},
-   "content": [{"type": "tool_use", "name": "retrieve_passages"}]},
- "cost_usd": 0.0129, "pricing_version": "2026-10"}
+{
+    "schema": "loomcore.event.v1", 
+    "seq": 7, 
+    "kind": "model_call", 
+    "type": "assistant",
+    "timestamp": "2026-11-03T08:14:02.311Z", 
+    "sessionId": "run-2026-11-03-0814", 
+    "runId": "r1",
+    "message": {
+        "id": "msg_01…", 
+        "model": "claude-opus-5-5",
+        "usage": {
+            "input_tokens": 1840, 
+            "output_tokens": 312,
+            "cache_read_input_tokens": 9200, 
+            "cache_creation_input_tokens": 0,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0, 
+                "ephemeral_1h_input_tokens": 0
+            }
+        },
+        "content": [
+            {
+                "type": "tool_use", 
+                "name": "retrieve_passages"
+            }
+        ]
+    },
+    "cost_usd": 0.0129, 
+    "pricing_version": "2026-10"
+}
 ```
 
 ### Writing, reading, replay
@@ -151,7 +230,7 @@ Token counts are the source of truth and cost is derived. `cost_usd` on an event
 
 ### Run spend line
 
-Whenever a run stops (finished or paused), loomcore appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the spend since that run's previous line, counting only events whose `runId` is that run. The month-to-date total passed to `check_limits` is the sum of this log. If a process dies before it writes its line, `resume` recomputes the missing amount from the run's `model_call` events and writes it first.
+Whenever a run stops (finished or paused), `loomcore` appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the spend since that run's previous line, counting only events whose `runId` is that run. The month-to-date total passed to `check_limits` is the sum of this log. If a process dies before it writes its line, `resume` recomputes the missing amount from the run's `model_call` events and writes it first.
 
 ## 3. The eight components
 

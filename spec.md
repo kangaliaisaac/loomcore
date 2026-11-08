@@ -46,14 +46,15 @@ def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]: ...
 ```
 
 1. `step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. 
-2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt, tool schemas, limits) is logged once in `run_started`, and `resume` refuses to continue if its digest differs.
+2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt and tool schemas) is logged once in `run_started` with its digest, and `resume` refuses to continue if the digest differs. Limits are logged beside the configuration but are not part of the digest, so they can be raised on resume.
 
 ```python
 # Effect = CallModel | RunTool | AskHuman | Stop
 
 class Driver(Protocol):
     def run(self, task: Task, log: EventLog) -> RunResult: ...
-    def resume(self, ref: RunRef, decision: Decision | None = None) -> RunResult: ...   # RunRef = (session_id, run_id)
+    def resume(self, ref: RunRef, decision: Decision | None = None,
+               limits: Limits | None = None) -> RunResult: ...   # RunRef = (session_id, run_id); limits required after a limit pause
 ```
 
 Every component below works without the driver: a user may call the registry, the sandbox, the guards and the context store from their own loop.
@@ -69,28 +70,28 @@ Random = Callable[[], float]                              # jitter; tests pass a
 
 ### Ending a run
 
-A run ends on purpose. `run_finished` is terminal and carries the reason; a run that waits for a human writes `run_paused` instead and is later resumed, so a run has at most one `run_finished`.
+A run ends on purpose. `run_finished` is terminal and carries the reason. A run that waits for a human, or that reached a limit, writes `run_paused` instead and is later resumed, so a run has at most one `run_finished`. A paused run that is never resumed is simply stopped.
 
 | Event | Reason | Meaning |
 |---|---|---|
 | `run_finished` | `finished` | the model called the typed `finish(result)` tool and verification passed |
 | `run_finished` | `end_turn` | the model stopped without `finish` and no tool was pending; the verifier runs here too, and a failure continues the loop |
-| `run_finished` | `max_turns`, `timeout`, `budget`, `max_tokens` | a harness limit was reached; the stop is graceful and records what was done and the `seq` to continue from. The run is finished: to continue, fork from that `seq` with raised limits (rewind), and `resume` on a finished run is an error |
 | `run_finished` | `refused` | the model's `stop_reason` was `refusal` |
 | `run_finished` | `stuck` | the escalation ladder ran out |
-| `run_finished` | `killed` | an external signal or the kill switch; a budget cap gives `budget`, not `killed` |
+| `run_finished` | `killed` | an external signal or the kill switch; a budget cap pauses with `limit`, not `killed` |
 | `run_finished` | `error` | an unrecoverable error, with the message |
-| `run_paused` | `awaiting_approval` | a guard, the escalation ladder, or crash resume of a tool that is not read-only asked for approval; `resume` with a decision appends `run_resumed` and continues the same run |
+| `run_paused` | `awaiting_approval` | a guard, the escalation ladder, or crash resume of a tool that is not read-only asked for approval; `resume` with a decision appends `run_resumed`, then `approval_granted` or `approval_denied`, and continues the same run. `resume` without a decision on such a pause is an error, and so is a decision on a run that is not paused for approval |
+| `run_paused` | `limit` | `max_turns`, `timeout`, `run_cap`, `month_cap` or `max_tokens` was reached; the stop is graceful and names which one in `limit`. `resume(ref, limits=...)` is required and appends `run_resumed` with the new limits; the turn count, the spend and the timeout segments carry over, so the new limits must leave room or the run pauses again at once. `resume` on a finished run is an error |
 
 Other model stop reasons are handled and logged: 
 - `tool_use` continues the loop, 
 - `stop_sequence` is treated as `end_turn`, 
-- `max_tokens` continues once and then stops with the reason `max_tokens`, and 
+- `max_tokens` continues once and then pauses with the limit `max_tokens`, and 
 - `pause_turn` resumes by sending the response back.
 
 ### Limits
 
-Turn, time and budget limits are part of the core, not extensions. `max_turns` and `timeout` have defaults (50 turns, 10 minutes). The budget has two caps, `run_cap` (this run) and `month_cap` (all runs this UTC month); neither has a default, and each must be given or explicitly set to `None` for unlimited. The check stops with `budget` when either would be crossed. Before each model call the driver checks the limits as a pure function over the state: `check_limits(state, limits, month_to_date, worst_case, now) → Allow | Stop(reason)`.
+Turn, time and budget limits are part of the core, not extensions. `max_turns` and `timeout` have defaults (50 turns, 10 minutes). The budget has two caps, `run_cap` (this run) and `month_cap` (all runs this UTC month); neither has a default, and each must be given or explicitly set to `None` for unlimited. The check pauses the run, naming `run_cap` or `month_cap` as the limit, when that cap would be crossed. Before each model call the driver checks the limits as a pure function over the state: `check_limits(state, limits, month_to_date, worst_case, now) → Allow | LimitReached(limit)`.
 
 - **Per-run spend** is a fold over the `model_call` events in the state whose `runId` equals this run. A forked run inherits its parent's events for context but not for spend.
 - **`month_to_date`** is read from the spend log at the edge and passed in: the sum of entries whose `at` falls in the current UTC month, excluding this run's own lines. The check compares per-run spend plus `worst_case` with `run_cap`, and `month_to_date` plus per-run spend plus `worst_case` with `month_cap`, so nothing is counted twice across a pause.
@@ -137,7 +138,7 @@ An extension plugs into a seam that already exists and never changes the core. E
 - `DirectRoute`: a request that matches a known route runs plain code, with no model call. 
   - Anthropic, [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) (the routing workflow).
 
-**Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to `seq` and then its own, and every model call is counted once. The old run is untouched. A fork has no `run_started` of its own: its configuration is its root ancestor's, taken from the first `run_started` up the `from` chain (a fork of a fork follows the chain to the root), and `resume` compares that digest. Replay follows `from` recursively. The repeat detector counts only the fork's own calls, like spend, so a fork gets a fresh start from that point. Its `timeout` clock starts at its `run_forked` timestamp and its turn count starts at 0, so neither includes the parent's time or turns, and its per-run spend counts only its own `model_call` events. Rewind restores conversation state, not files: what the old run wrote after `seq` is still on disk, and the fork starts from that workspace.
+**Rewind** forks a run: a new `run_id` in the same session file starts with a `run_forked` event holding `from: {runId, seq}` and optionally a human hint, then continues. No events are copied, so replaying the new run reads the old run's events up to and including `from.seq` and then its own, and every model call is counted once. `from.seq` must come before the parent's `run_finished`, if it has one. The old run is untouched. A fork has no `run_started` of its own: its configuration is its root ancestor's, taken from the first `run_started` up the `from` chain (a fork of a fork follows the chain to the root), and `resume` compares that digest. Replay follows `from` recursively. The repeat detector counts only the fork's own calls, like spend, so a fork gets a fresh start from that point. Its limits are the latest in force on the chain at `from.seq`, unless `run_forked` carries a `limits` override. `max_turns`, `timeout` and `run_cap` apply per run, and a fork is a new run, so rewind deliberately starts those counts again; only a person or calling code forks, never the loop itself, and `month_cap` binds across every run. Its `timeout` clock starts at its `run_forked` timestamp and its turn count starts at 0, so neither includes the parent's time or turns, and its per-run spend counts only its own `model_call` events. Rewind restores conversation state, not files: what the old run wrote after `seq` is still on disk, and the fork starts from that workspace.
 
 ## 2. The event log
 
@@ -162,8 +163,8 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 
 | Kind | Emitted by | Payload (besides the envelope) |
 |---|---|---|
-| `run_started` | driver | `task`, `config` (system prompt, tool schemas, limits), `config_digest` |
-| `run_forked` | driver | `from` (`runId`, `seq`), `hint` |
+| `run_started` | driver | `task`, `config` (system prompt, tool schemas), `limits`, `config_digest` (over `config` only) |
+| `run_forked` | driver | `from` (`runId`, `seq`), `hint`, `limits` (optional override) |
 | `turn_started` | driver | `turn` |
 | `model_call` | driver | `type: "assistant"`, `message`, `duration_ms`, `cost_usd`, `pricing_version` (below) |
 | `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash` |
@@ -177,8 +178,8 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `verification_passed`, `verification_failed` | verifier | `verifier`, `message` |
 | `escalation` | driver | `rung`, `reason` |
 | `note_written` | workspace | `path` |
-| `run_paused` | driver | `reason`, `resume_from` |
-| `run_resumed` | driver | `reason` (`approval` or `crash`), `resume_from` |
+| `run_paused` | driver | `reason` (`awaiting_approval` or `limit`), `limit` (which one, when the reason is `limit`), `resume_from` |
+| `run_resumed` | driver | `reason` (`approval`, `limit` or `crash`), `resume_from`, `limits` (the new limits, required after a `limit` pause; the latest `limits` in the log are the ones in force) |
 | `run_finished` | driver | `reason`, `result` |
 
 The `model_call` line has the same `usage` block the Anthropic Messages API returns:
@@ -219,8 +220,8 @@ The `model_call` line has the same `usage` block the Anthropic Messages API retu
 
 ### Writing, reading, replay
 
-- The writer appends one line and flushes; an `fsync` option exists for durability-sensitive runs. A session file has one writer at a time: the writer holds an exclusive lock file (`<sessionId>.lock`), and a second process that wants to write waits or fails, so a fork cannot run while its parent is resumed. Before its first append to an existing file the writer, holding the lock, cuts the file back to the last complete newline, so a torn final line from a crash never ends up in the middle of the log.
-- An optional redactor runs on each event before it is appended, so a secret that reached a tool result can be removed from the log.
+- The writer appends one line and flushes; an `fsync` option exists for durability-sensitive runs. A session file has one writer at a time: the writer holds an exclusive advisory lock (`fcntl.flock` on `<sessionId>.lock`), which the operating system releases when the holder dies, so a crash never leaves a stale lock; a second process that wants to write waits or fails, so a fork cannot run while its parent is resumed. Before its first append to an existing file the writer, holding the lock, cuts the file back to the last complete newline, so a torn final line from a crash never ends up in the middle of the log.
+- There is no separate log redactor. A secret in a tool result is removed by a post guard (`Redact`, section 3.7) before `tool_completed` is written, so the log never differs from what the model saw.
 - The reader yields events in order. A broken *final* line (a torn write) is dropped and reported; a broken line anywhere else is an error.
 - Snapshots of derived state are written to a temporary file and moved with `os.replace`, so they are atomic. Replay may start from a snapshot.
 - Replay is deterministic: the same log always yields the same state.
@@ -231,7 +232,7 @@ Token counts are the source of truth and cost is derived. `cost_usd` on an event
 
 ### Run spend line
 
-After each `model_call`, `loomcore` appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the cost of that call, counting only events whose `runId` is that run. Writing per call, not at the end, means a crashed run and a run still in progress are both already in the log, so the month cap sees them. One line is a single small append, so concurrent runs can share the file without the session lock. Each line stands alone, so the reader skips a line that fails to parse (a crash mid-append) and reports it, as it does for a torn final line in an event log. `month_to_date` for `check_limits` is read from this log as defined in section 1: the current UTC month, excluding the run's own lines. If a process dies between a `model_call` and its spend line, `resume` sums the run's `model_call` events, subtracts the run's lines, and writes the difference first. Concurrent runs can overshoot a cap by at most one call each, because the worst case is priced before every call but another run may spend in the meantime.
+After each `model_call`, `loomcore` appends one line to a spend log: `{"at", "usd", "run", "note"}`, where `run` is `"<sessionId>/<runId>"` and `usd` is the cost of that call, counting only events whose `runId` is that run. Writing per call, not at the end, means a crashed run and a run still in progress are both already in the log, so the month cap sees them. Each record is written with one `os.write` on an `O_APPEND` descriptor, as `"\n" + json + "\n"`, so concurrent runs can share the file without the session lock. The leading newline means a torn append from a crash can never absorb the next run's line: the next record starts on a fresh line. Each line stands alone, so the reader ignores blank lines and skips and reports a line that fails to parse. `month_to_date` for `check_limits` is read from this log as defined in section 1: the current UTC month, excluding the run's own lines. If a process dies between a `model_call` and its spend line, `resume` sums the run's `model_call` events, subtracts the run's lines, and writes the difference first. Concurrent runs can overshoot a cap by at most one call each, because the worst case is priced before every call but another run may spend in the meantime.
 
 ## 3. The eight components
 
@@ -376,7 +377,7 @@ evals/           # the scripted three-step task
 
 ## 5. Tests and the eval
 
-Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; crash, wait, `resume`: the run does not time out and `run_resumed` marks the gap; `resume` on a finished run is an error and a limit stop continues by fork; two writers on one session file are refused; `resume` after a crash recomputes the missing spend line; a second run's spend counts against `month_cap`; and a fork's clock and turn count start at its `run_forked`.
+Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; crash, wait, `resume`: the run does not time out and `run_resumed` marks the gap; a limit stop pauses, `resume` without raised limits is an error, `resume` with raised limits continues with the turn count, spend and clock carried over, and `resume` on a finished run is an error; a fork starts its own counts but `month_cap` still binds; two writers on one session file are refused, and a crash while holding the lock does not block `resume`; a torn spend-log append does not swallow the next run's line; `resume` after a crash recomputes the missing spend line; a second run's spend counts against `month_cap`; and a fork's clock and turn count start at its `run_forked`.
 
 The eval is a scripted three-step task driven by a fake model that replays canned responses. It runs in CI like a test and must reach `finished` with a complete, replayable log.
 

@@ -28,8 +28,8 @@ It is built first for four projects that import it (`filingstrawl`, `finanalyst`
 When it ships, the shape of use is:
 
 1. Write ordinary typed Python functions and register them as tools; their type hints become the schema the model sees. Say which are `read_only`: only those are re-run without asking if a run is resumed after a crash.
-2. Give a run its limits and a task, and let the driver run it. Every step lands in the event log.
-3. Read the log to see what happened, and price it from the recorded token counts. A run that reaches a limit or needs an approval pauses; `resume` continues it. `rewind` forks a run from an earlier clean point.
+2. Give a run its limits and a task, and let the driver run it. Turns, time and output size have defaults; the two budget caps have none, so you give each a value or say explicitly that it is unlimited. Every step lands in the event log.
+3. Read the log to see what happened, and price it from the recorded token counts. A run that reaches a limit or needs an approval pauses; `resume` continues it. Rewinding forks a run from an earlier clean point.
 4. Use a single component without the driver if you already have a loop. The registry, the sandbox, the guards and the context store are designed to be called from your own code.
 
 A short hello-agent example, about twenty lines, will be added here with the driver. [spec.md](spec.md) is the contract for every piece.
@@ -40,9 +40,10 @@ A short hello-agent example, about twenty lines, will be added here with the dri
 - **The sandbox is a policy, not a virtual machine.** It denies by default and checks paths and commands, but it does not replace operating-system isolation. Do not run untrusted code on a machine you care about because `loomcore` is wrapped around it.
 - **Allow-listing is on you.** A secret is out of reach of model-run code only until you allow-list the variable or path that holds it.
 - **Tool output is untrusted data.** Never treat what a tool returns, such as a web page or a document, as instructions to the agent.
-- **The event log is sensitive.** It holds prompts, responses and tool results. A post guard can redact a secret from a tool result before it is logged, but only the patterns you configure; treat the log as sensitive and review it before sharing.
-- **One writer per session file.** Do not point two processes at the same session; the second is refused.
-- **Version 0.1 ships a plan tool and verify-then-reflect, and stops there.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
+- **The event log is sensitive.** It holds prompts, responses and tool results. A post guard can redact a secret from a tool result before it is logged, but only what the post guards you write are built to catch, and the log then holds the redacted content, not the secret; treat the log as sensitive and review it before sharing.
+- **Rewind restores conversation state, not files.** What the old run wrote to the workspace after the fork point is still on disk, and the fork starts from that workspace.
+- **One writer per session file.** Do not point two processes at the same session; the second waits or fails.
+- **Among the optional extras, version 0.1 ships a plan tool (a plan file kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
 - **No UI, hosted service or database.** Persistence is a JSONL file.
 
 ## Design

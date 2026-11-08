@@ -58,6 +58,7 @@ max-statements = 30
 [tool.mypy]
 strict = true
 python_version = "3.15"
+mypy_path = "src"
 
 [tool.pytest.ini_options]
 addopts = "-q"

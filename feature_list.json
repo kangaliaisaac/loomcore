@@ -176,19 +176,19 @@
     "passes": false
   },
   {
-    "id": "f23",
-    "card": "12",
-    "title": "Hello-agent example and write-up",
-    "spec": "6",
-    "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion",
-    "passes": false
-  },
-  {
     "id": "f24",
     "card": "11",
     "title": "Bring your own loop: components work without the driver",
     "spec": "1 The loop, 3",
     "acceptance": "a hand-written loop calls the registry, sandbox, guards and context store directly, with no driver, and completes a task",
+    "passes": false
+  },
+  {
+    "id": "f23",
+    "card": "12",
+    "title": "Hello-agent example and write-up",
+    "spec": "6",
+    "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion",
     "passes": false
   }
 ]

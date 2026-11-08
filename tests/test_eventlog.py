@@ -140,3 +140,10 @@ def test_a_crash_while_holding_the_lock_does_not_block_the_next_writer(
     process.wait()
     with open_writer(log) as writer:
         writer.append(make("run_started"))
+
+
+def test_a_line_that_is_not_utf8_is_corruption_not_a_crash(log: Path) -> None:
+    log.parent.mkdir()
+    log.write_bytes(b'\xff\xfe{"kind": 1}\n')
+    with pytest.raises(LogCorruptError):
+        read_events(log)

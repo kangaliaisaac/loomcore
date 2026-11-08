@@ -25,7 +25,11 @@ from loomcore.events import (
 
 
 class ForkChainError(Exception):
-    """A run_forked event points at a run that leads back to itself."""
+    """A run_forked event points at an event the log lacks, or loops back.
+
+    Raised like `LogCorruptError`: a log whose fork references are broken is
+    corrupt, not a state the fold should quietly reinterpret.
+    """
 
 
 class RunState(BaseModel):
@@ -112,5 +116,13 @@ def _chain(
     if own and isinstance(own[0], RunForked):
         origin = own[0].from_
         parent = _chain(events, origin.run_id, origin.seq, seen | {run_id})
+        if not parent or (parent[-1].run_id, parent[-1].seq) != (
+            origin.run_id,
+            origin.seq,
+        ):
+            raise ForkChainError(
+                f"run {run_id} is forked from {origin.run_id} at {origin.seq}, "
+                "which the log does not hold"
+            )
         return [*parent, *own]
     return own

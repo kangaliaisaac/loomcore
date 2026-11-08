@@ -1,8 +1,11 @@
 """f03: replay is a deterministic fold; a fork reads its parent's events."""
 
+from pathlib import Path
+
 import pytest
 from factories import calling, make
 
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event
 from loomcore.replay import (
     ForkChainError,
@@ -24,7 +27,7 @@ def test_the_same_log_always_folds_to_the_same_state() -> None:
         make("model_call", 1, message=calling("a", "b")),
         make("tool_completed", 2, tool_use_id="a"),
     ]
-    assert replay(events) == replay(list(events)) == replay(events)
+    assert replay(events) == replay(list(events))
     assert replay(events).event_count == 3
 
 
@@ -126,3 +129,32 @@ def test_a_fork_that_leads_back_to_itself_is_an_error() -> None:
     ]
     with pytest.raises(ForkChainError):
         run_events(log, "a")
+
+
+def test_a_fork_of_a_run_the_log_lacks_is_an_error() -> None:
+    log = [make("run_forked", 0, run="b", **{"from": {"runId": "gone", "seq": 1}})]
+    with pytest.raises(ForkChainError, match="gone"):
+        run_events(log, "b")
+
+
+def test_a_fork_from_a_seq_the_parent_never_reached_is_an_error() -> None:
+    log = [
+        make("run_started", 0, run="a"),
+        make("run_forked", 0, run="b", **{"from": {"runId": "a", "seq": 5}}),
+    ]
+    with pytest.raises(ForkChainError, match="at 5"):
+        run_events(log, "b")
+
+
+def test_a_log_read_back_from_disk_folds_to_the_same_state(tmp_path: Path) -> None:
+    events = [
+        make("run_started"),
+        make("model_call", 1, message=calling("a")),
+        make("tool_completed", 2, tool_use_id="a"),
+    ]
+    path = tmp_path / "s1.jsonl"
+    with open_writer(path) as writer:
+        for event in events:
+            writer.append(event)
+    first, second = read_events(path).events, read_events(path).events
+    assert replay(first) == replay(second) == replay(events)

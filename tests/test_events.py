@@ -1,6 +1,8 @@
 """f01: every kind round-trips to JSON and back; unknown fields are rejected."""
 
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, get_args
 
 import pytest
@@ -89,3 +91,15 @@ def test_illegal_combinations_cannot_be_built(
 def test_legal_limit_pause_and_resume_build() -> None:
     make("run_paused", reason="limit", limit="max_turns")
     make("run_resumed", reason="limit", limits={"max_turns": 60})
+
+
+def test_an_event_built_with_microseconds_equals_its_read_back() -> None:
+    now = datetime(2026, 11, 3, 8, 0, 0, 123456, tzinfo=UTC)
+    event = make("turn_started", timestamp=now.isoformat())
+    assert event.timestamp.microsecond == 123000
+    assert parse_event(dump_event(event)) == event
+
+
+def test_money_stays_a_decimal_in_python_mode() -> None:
+    dumped = make("model_call", cost_usd=0.5).model_dump()
+    assert dumped["cost_usd"] == Decimal("0.5")

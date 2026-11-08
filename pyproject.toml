@@ -7,7 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.15"
 authors = [{ name = "Kang'alia Nyamu", email = "17615243+kangaliaisaac@users.noreply.github.com" }]
-dependencies = ["pydantic>=2"]
+dependencies = ["pydantic>=2.11"]
 
 [dependency-groups]
 dev = ["hypothesis", "mypy", "pytest", "ruff"]

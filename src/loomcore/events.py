@@ -13,6 +13,7 @@ from pydantic import (
     PlainSerializer,
     TypeAdapter,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -20,7 +21,7 @@ JsonObject = dict[str, JsonValue]
 
 # Money is Decimal in memory and a JSON number on disk, like the Messages API's own
 # numbers; tokens stay the source of truth, so a float's rounding cannot matter.
-Usd = Annotated[Decimal, PlainSerializer(float, return_type=float)]
+Usd = Annotated[Decimal, PlainSerializer(float, return_type=float, when_used="json")]
 
 
 class _Model(BaseModel):
@@ -35,6 +36,13 @@ class _Envelope(_Model):
     timestamp: AwareDatetime
     session_id: str = Field(alias="sessionId")
     run_id: str = Field(alias="runId")
+
+    @field_validator("timestamp")
+    @classmethod
+    def _to_millis(cls, value: datetime) -> datetime:
+        # The disk keeps milliseconds, so keep no more in memory: an event equals
+        # its own read-back.
+        return value.replace(microsecond=value.microsecond // 1000 * 1000)
 
     @field_serializer("timestamp")
     def _millis(self, value: datetime) -> str:

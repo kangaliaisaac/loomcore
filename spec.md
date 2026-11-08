@@ -106,6 +106,14 @@ Turn, time and budget limits are part of the core, not extensions. `max_turns` a
 
 The repeat detector counts the same `call_hash` in a run. Past a threshold the ladder climbs one rung at a time: nudge (a short corrective message), switch strategy (a different prompt or tool set), ask a human (an `Ask`), stop with the best partial result (`stuck`). Each rung is an event.
 
+The call that trips the detector is a pending `tool_use`, and the ladder settles it, so "every `tool_use` gets exactly one `tool_completed`" holds on every path:
+
+- **Nudge and switch strategy:** the call is not run. It is completed with `ok=false` and the rung's message as `content` (the corrective nudge, or the instruction that the approach is changing), so the model sees why it was not run.
+- **Ask a human:** the call stays pending. `approval_requested`, `approval_granted` and `approval_denied` carry its `tool_use_id`. On a grant it runs once and completes as usual; on a denial it is completed with `ok=false` and the denial note. A question that is not about one call (none is pending) carries a null `tool_use_id`.
+- **Stop (`stuck`):** the call is completed with `ok=false` and the reason before `run_finished` is written.
+
+A fork after any of these is a clean point once the completion is written.
+
 ### Extension seams
 
 An extension plugs into a seam that already exists and never changes the core. Each is off by default and enabled by configuration.
@@ -170,7 +178,7 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash` |
 | `tool_completed` | driver | `tool_use_id`, `ok`, `content`, `duration_ms`, `cached` |
 | `guard_decision` | guards | `stage` (`pre`/`post`), `tool_use_id`, `decision` (`allow`/`deny`/`ask`/`redact`; `ask` only at `pre`, `redact` only at `post`), `reason` |
-| `approval_requested` | guards, driver | `tool_use_id` (null when the escalation ladder asks), `question` |
+| `approval_requested` | guards, driver | `tool_use_id` (null only when the ladder asks about something other than a pending call), `question` |
 | `approval_granted`, `approval_denied` | driver | `tool_use_id` (null likewise), `by`, `note` |
 | `sandbox_denied` | sandbox, workspace | `action`, `target`, `reason` |
 | `context_packed` | context store | `selected`, `dropped`, `tokens`, `budget` |
@@ -377,7 +385,7 @@ evals/           # the scripted three-step task
 
 ## 5. Tests and the eval
 
-Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; crash, wait, `resume`: the run does not time out and `run_resumed` marks the gap; a limit stop pauses, `resume` after a limit pause without `limits` is an error, `resume` with limits continues with the turn count, spend and clock carried over and pauses again with the same `limit` if it is still reached, `resume` on a finished run is an error, and a sibling fork's limits never apply to the parent; a fork at a point with a pending tool call (including a `model_call` whose `tool_use` has no `tool_requested` yet, or one of several calls done), an outstanding approval (including the ladder's, before its `run_paused`) or an open pause is refused; `max_tokens` twice in a row pauses with `max_output_tokens`, one other call between them resets the count, and so do a `run_resumed` with reason `limit` and a `run_forked` (a fork taken after two truncations does not pause on its first check), while a crash resume mid-streak still pauses; a denied, declined or refused call still gets one `tool_completed` with `ok=false`, and a fork after it is clean; a fork starts its own counts but `month_cap` still binds; two writers on one session file are refused, and a crash while holding the lock does not block `resume`; a torn spend-log append does not swallow the next run's line; `resume` after a crash recomputes the missing spend line; a second run's spend counts against `month_cap`; and a fork's clock and turn count start at its `run_forked`.
+Unit tests sit next to the behaviour they prove. The event log also gets [Hypothesis](https://hypothesis.readthedocs.io/en/latest/stateful.html) stateful tests (random appends, snapshots and replays always agree with the fold) and a truncation test (cut the file at a random byte; replay still gives a consistent earlier state), plus truncate, resume, append and read again; a fork counts each model call once; crash, wait, `resume`: the run does not time out and `run_resumed` marks the gap; a limit stop pauses, `resume` after a limit pause without `limits` is an error, `resume` with limits continues with the turn count, spend and clock carried over and pauses again with the same `limit` if it is still reached, `resume` on a finished run is an error, and a sibling fork's limits never apply to the parent; a fork at a point with a pending tool call (including a `model_call` whose `tool_use` has no `tool_requested` yet, or one of several calls done), an outstanding approval (including the ladder's, before its `run_paused`) or an open pause is refused; `max_tokens` twice in a row pauses with `max_output_tokens`, one other call between them resets the count, and so do a `run_resumed` with reason `limit` and a `run_forked` (a fork taken after two truncations does not pause on its first check), while a crash resume mid-streak still pauses; a denied, declined or refused call still gets one `tool_completed` with `ok=false`, and a fork after it is clean; a call that trips the repeat detector is completed at each rung (nudge, switch, ask granted or denied, stuck) and a fork after it is clean; a fork starts its own counts but `month_cap` still binds; two writers on one session file are refused, and a crash while holding the lock does not block `resume`; a torn spend-log append does not swallow the next run's line; `resume` after a crash recomputes the missing spend line; a second run's spend counts against `month_cap`; and a fork's clock and turn count start at its `run_forked`.
 
 The eval is a scripted three-step task driven by a fake model that replays canned responses. It runs in CI like a test and must reach `finished` with a complete, replayable log.
 

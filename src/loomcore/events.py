@@ -44,7 +44,7 @@ class _Envelope(_Model):
         # its own read-back.
         return value.replace(microsecond=value.microsecond // 1000 * 1000)
 
-    @field_serializer("timestamp")
+    @field_serializer("timestamp", when_used="json")
     def _millis(self, value: datetime) -> str:
         return (
             value.astimezone(UTC)

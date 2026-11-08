@@ -158,3 +158,21 @@ def test_a_log_read_back_from_disk_folds_to_the_same_state(tmp_path: Path) -> No
             writer.append(event)
     first, second = read_events(path).events, read_events(path).events
     assert replay(first) == replay(second) == replay(events)
+
+
+def test_a_fork_of_a_fork_from_a_seq_the_middle_run_never_reached_is_an_error() -> None:
+    log = [
+        *forked_log(),
+        make("run_forked", 0, run="c", **{"from": {"runId": "b", "seq": 5}}),
+    ]
+    with pytest.raises(ForkChainError, match="at 5"):
+        run_events(log, "c")
+
+
+def test_a_fork_of_a_fork_whose_middle_run_has_no_events_is_an_error() -> None:
+    log = [
+        make("run_started", 0, run="a"),
+        make("run_forked", 0, run="c", **{"from": {"runId": "b", "seq": 0}}),
+    ]
+    with pytest.raises(ForkChainError, match="b"):
+        run_events(log, "c")

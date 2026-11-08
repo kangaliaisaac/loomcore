@@ -1,0 +1,16 @@
+name: review
+
+# Copy into a repo as .github/workflows/review.yml. The tag after @ pins the loopgate version; bump it to take a newer release.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: kangaliaisaac/loopgate/.github/workflows/claude-review.yml@v0.1.0
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

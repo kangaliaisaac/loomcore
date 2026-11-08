@@ -1,0 +1,186 @@
+[
+  {
+    "id": "f01",
+    "card": "04",
+    "title": "Event envelope and kinds as frozen types",
+    "spec": "2 Envelope, Kinds",
+    "acceptance": "every kind round-trips to JSON and back; unknown fields are rejected",
+    "passes": false
+  },
+  {
+    "id": "f02",
+    "card": "04",
+    "title": "Event writer: append, flush, optional fsync, torn-line cut, session lock",
+    "spec": "2 Writing",
+    "acceptance": "a torn final line is cut before the next append; a second writer on one session file is refused; a crash while holding the lock does not block the next writer",
+    "passes": false
+  },
+  {
+    "id": "f03",
+    "card": "04",
+    "title": "Event reader and replay fold",
+    "spec": "2 Reading, replay",
+    "acceptance": "a torn final line is dropped and reported; any other broken line is an error; the same log always folds to the same state",
+    "passes": false
+  },
+  {
+    "id": "f04",
+    "card": "04",
+    "title": "Snapshots and Hypothesis stateful tests",
+    "spec": "2 Writing, 5",
+    "acceptance": "random appends, snapshots and replays agree with the fold; cutting the file at a random byte still replays to a consistent earlier state",
+    "passes": false
+  },
+  {
+    "id": "f05",
+    "card": "04",
+    "title": "Spend log: one line per model call",
+    "spec": "2 Run spend line",
+    "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; resume repairs a missing line",
+    "passes": false
+  },
+  {
+    "id": "f06",
+    "card": "04",
+    "title": "Rewind: run_forked and clean fork points",
+    "spec": "1 Rewind",
+    "acceptance": "a fork reads the parent up to and including from.seq; points with a pending tool call, open approval or open pause are refused",
+    "passes": false
+  },
+  {
+    "id": "f07",
+    "card": "05",
+    "title": "RunState, apply and the pure step function",
+    "spec": "1 The loop",
+    "acceptance": "step does no I/O; state is a fold over the log",
+    "passes": false
+  },
+  {
+    "id": "f08",
+    "card": "05",
+    "title": "Driver: run, resume, ports and run_resumed",
+    "spec": "1 The loop, Ending a run",
+    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out",
+    "passes": false
+  },
+  {
+    "id": "f09",
+    "card": "05",
+    "title": "Limits: check_limits, pauses and resume with limits",
+    "spec": "1 Limits",
+    "acceptance": "each of max_turns, timeout, run_cap, month_cap and max_output_tokens pauses with its name; resume with limits continues; counts carry over",
+    "passes": false
+  },
+  {
+    "id": "f10",
+    "card": "05",
+    "title": "Retries with backoff and jitter",
+    "spec": "1 Retries",
+    "acceptance": "the retry policy is pure; 4xx other than 429 is never retried; retry-after is honoured",
+    "passes": false
+  },
+  {
+    "id": "f11",
+    "card": "05",
+    "title": "Escalation ladder and the finish tool",
+    "spec": "1 Escalation ladder, Ending a run",
+    "acceptance": "identical calls trip the detector at the threshold; nudge and switch never block; ask holds the turn; stuck completes pending calls; finish ends the run",
+    "passes": false
+  },
+  {
+    "id": "f12",
+    "card": "06",
+    "title": "Sandbox boundary: Permit or Refusal, env allow-list, timeout",
+    "spec": "3.3",
+    "acceptance": "a parent secret never reaches the child; a timeout kills the process; every refusal is logged",
+    "passes": false
+  },
+  {
+    "id": "f13",
+    "card": "06",
+    "title": "Filesystem workspace: resolve_inside, generation counter",
+    "spec": "3.4",
+    "acceptance": "../, absolute paths, a symlink out and a symlinked parent are all refused; delete bumps the generation",
+    "passes": false
+  },
+  {
+    "id": "f14",
+    "card": "07",
+    "title": "Tool registry: schemas from type hints, execute",
+    "spec": "3.2",
+    "acceptance": "schemas for nested types; invalid input gives a useful ok=false result",
+    "passes": false
+  },
+  {
+    "id": "f15",
+    "card": "07",
+    "title": "Tool scheduling, read_only, cache and timeouts",
+    "spec": "3.2, 1 Retries",
+    "acceptance": "conflicting calls run in emission order; a resumed run asks before re-running a tool that is not read_only; a timed-out call is abandoned and a late write still invalidates the cache",
+    "passes": false
+  },
+  {
+    "id": "f16",
+    "card": "08",
+    "title": "Context store: pack and compact",
+    "spec": "3.5",
+    "acceptance": "packing respects the budget and always includes pinned items; compaction fires at the threshold; the stable prefix is identical across turns",
+    "passes": false
+  },
+  {
+    "id": "f17",
+    "card": "08",
+    "title": "System-prompt builder",
+    "spec": "3.1",
+    "acceptance": "byte-identical output for the same inputs; a changed part changes only what follows it",
+    "passes": false
+  },
+  {
+    "id": "f18",
+    "card": "08",
+    "title": "Plan tool",
+    "spec": "1 Extension seams",
+    "acceptance": "the plan file is always kept in context",
+    "passes": false
+  },
+  {
+    "id": "f19",
+    "card": "09",
+    "title": "Guard pipeline: pre and post guards, Redact, Ask",
+    "spec": "3.7",
+    "acceptance": "a deny stops the tool and is logged; a post guard redacts a secret and the raw result never reaches the log; an ask pauses the run and resume continues from the log",
+    "passes": false
+  },
+  {
+    "id": "f20",
+    "card": "10",
+    "title": "Verifier hook: verify then reflect",
+    "spec": "3.6",
+    "acceptance": "a failing verifier prevents finished and feeds back; a passing one ends the run",
+    "passes": false
+  },
+  {
+    "id": "f21",
+    "card": "10",
+    "title": "Observability: spans and token-based cost",
+    "spec": "3.8, 2 Tokens and cost",
+    "acceptance": "spans from a recorded log are stable; pricing from tokens matches hand-computed values; cache read and write tokens are priced separately",
+    "passes": false
+  },
+  {
+    "id": "f22",
+    "card": "11",
+    "title": "Scripted three-step eval in CI",
+    "spec": "5",
+    "acceptance": "a fake model replays canned responses; the run reaches finished with a complete, replayable log",
+    "passes": false
+  },
+  {
+    "id": "f23",
+    "card": "12",
+    "title": "Hello-agent example and write-up",
+    "spec": "6",
+    "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion",
+    "passes": false
+  }
+]

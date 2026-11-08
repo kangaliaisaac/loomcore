@@ -1,0 +1,28 @@
+# Copy to the repo root as .pre-commit-config.yaml (with the leading dot).
+# Runs the tools through `uv run --no-sync`, so versions come from the lock file and the hooks work
+# without an activated virtualenv (a plain terminal, or Claude Code's shell). Run `uv sync` first.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --no-sync ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run --no-sync mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [src, tests]
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: gitleaks git --pre-commit --staged --redact --verbose
+        language: system
+        pass_filenames: false

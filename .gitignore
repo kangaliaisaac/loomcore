@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Per-developer Claude Code settings (the push hook and local paths); never committed.
+.claude/settings.local.json

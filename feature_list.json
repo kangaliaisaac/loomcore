@@ -45,7 +45,7 @@
     "title": "Rewind: run_forked and clean fork points",
     "spec": "1 Rewind",
     "acceptance": "a fork reads the parent up to and including from.seq; points with a pending tool call, open approval or open pause are refused",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f07",

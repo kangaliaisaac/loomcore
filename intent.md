@@ -30,7 +30,7 @@ The loop is a pure function, `step(state, event) → (state, effects)`, and the 
   Every one works without `loomcore`'s driver, so a user can bring their own loop.
 - **Nothing hidden.** 
   
-  Raw prompts, model responses and tool results are in the log, so a run can be debugged by reading it.
+  Raw prompts, model responses and tool results are in the log, so a run can be debugged by reading it. The one exception is a secret in a tool result: a guard can redact it before it is logged, and the log then holds the redacted content.
 - **Credentials stay out of the sandbox.** 
   
   Tools run with an explicit allow-list of paths, commands and environment variables, deny by default; no secret is reachable from code the model can run unless the user explicitly allow-lists it.
@@ -49,7 +49,7 @@ The loop is a pure function, `step(state, event) → (state, effects)`, and the 
 
 ## What it will not do in v0.1
 
-- Plan, route or fan out for you. Planner-executor, script actions, model routing, sub-agents, best-of-N and tree search are named interfaces in the spec, not built.
+- Plan, route or fan out for you. Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces in the spec, not built.
 - Be a framework: no agent DSL, no dependency-injection container, no global state. There are tonnes of vendors that now distribute agent harnesses as frameworks. Ref. [Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents](https://arxiv.org/abs/2609.00006)
 - Ship a UI, a hosted service or a database. Persistence is the JSONL event log.
 

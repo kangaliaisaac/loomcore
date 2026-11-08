@@ -1,0 +1,10 @@
+{
+	"gates": [
+		{ "name": "ruff-check", "command": "./.venv/bin/python", "args": ["-m", "ruff", "check", "."] },
+		{ "name": "ruff-format", "command": "./.venv/bin/python", "args": ["-m", "ruff", "format", "--check", "."] },
+		{ "name": "mypy", "command": "./.venv/bin/python", "args": ["-m", "mypy", "src", "tests"] },
+		{ "name": "pytest", "command": "./.venv/bin/python", "args": ["-m", "pytest", "-q"] },
+		{ "name": "gitleaks", "command": "gitleaks", "args": ["git", "--redact", "--no-banner"] }
+	],
+	"environment": { "path": ".venv/bin/python", "fix": "run `uv sync`" }
+}

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) uv run --no-sync ruff format -q \"$f\" && uv run --no-sync ruff check --fix -q \"$f\" 1>&2 && uv run --no-sync mypy \"$f\" 1>&2 || exit 2;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

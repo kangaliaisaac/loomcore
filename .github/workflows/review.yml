@@ -1,6 +1,6 @@
 name: review
 
-# Copy into a repo as .github/workflows/review.yml. The tag after @ pins the loopgate version; bump it to take a newer release.
+# The tag after @ pins the loopgate version; bump it to take a newer release.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]

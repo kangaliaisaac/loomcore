@@ -53,7 +53,7 @@ max-returns = 4
 max-statements = 30
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["ANN", "PLR2004"]   # tests may use bare literals and skip annotations
+"tests/**" = ["PLR2004"]   # tests may use bare literals; annotations stay (mypy is strict)
 
 [tool.mypy]
 strict = true

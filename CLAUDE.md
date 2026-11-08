@@ -13,6 +13,8 @@ uv run --no-sync pytest
 ./init.sh                        # sync, run all gates, print the next unfinished feature
 ```
 
+Needs `uv`, `gitleaks`, `jq` and `pre-commit` on the PATH; run `pre-commit install` once.
+
 ## Rules
 
 - Python 3.15, `src/` layout, full type hints, mypy strict. Interfaces are `Protocol`s; data is frozen dataclasses or pydantic models at the boundaries.

@@ -23,7 +23,7 @@ Before any step: `./init.sh` syncs the environment, runs the gates and prints th
 | 08 | Context store and system-prompt builder | 3.5, 3.1, plan tool | f16 to f18 | packing and compaction respect the budget; prompts are byte-stable |
 | 09 | Guardrails and the human-in-the-loop seam | 3.7 | f19 | deny, redact and ask work and are logged; a run resumes from the log |
 | 10 | Feedback, observability and cost | 3.6, 3.8, tokens and cost | f20, f21 | verify-then-reflect works; a recorded log is priced from tokens alone |
-| 11 | Review: the scripted-task eval in CI | 5 | f22 | the three-step eval runs in CI and the log is replayable |
+| 11 | Review: the scripted-task eval in CI | 5 | f22, f24 | the three-step eval runs in CI and the log is replayable |
 | 12 | Ship and write-up | 6 | f23 | a second repository can import `loomcore` and run a multi-step task; README hello-agent example; the write-up |
 
 ## Order and why

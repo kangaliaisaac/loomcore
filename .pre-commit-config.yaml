@@ -1,4 +1,4 @@
-# Copy to the repo root as .pre-commit-config.yaml (with the leading dot).
+# Run `pre-commit install` once.
 # Runs the tools through `uv run --no-sync`, so versions come from the lock file and the hooks work
 # without an activated virtualenv (a plain terminal, or Claude Code's shell). Run `uv sync` first.
 repos:

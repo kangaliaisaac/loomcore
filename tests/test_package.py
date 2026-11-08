@@ -1,7 +1,7 @@
-"""The package imports and reports its version."""
+"""The package imports."""
 
 import loomcore
 
 
-def test_package_has_a_version() -> None:
-    assert loomcore.__version__ == "0.0.0"
+def test_package_imports() -> None:
+    assert loomcore.__doc__

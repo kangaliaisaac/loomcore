@@ -19,7 +19,7 @@ jobs:
         with:
           enable-cache: true
 
-      # Python version comes from .python-version, so CI runs what the repo pins.
+      # uv picks a Python that satisfies requires-python in pyproject.toml.
       - run: uv sync --locked
 
       - name: ruff check

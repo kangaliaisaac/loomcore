@@ -23,7 +23,10 @@ class SessionLockedError(Exception):
 
 
 class WriterBrokenError(Exception):
-    """A failed append could not be cut back; close the writer and reopen the file."""
+    """A failed append could not be cut back; its line may be in the file.
+
+    Reopen the file and re-read the log before appending again.
+    """
 
 
 class LogCorruptError(Exception):

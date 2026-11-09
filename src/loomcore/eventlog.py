@@ -48,15 +48,26 @@ def read_events(path: Path) -> ReadResult:
 class EventWriter:
     """Appends events to one session file. Get one from `open_writer`."""
 
-    def __init__(self, file: BinaryIO, *, fsync: bool) -> None:
+    def __init__(
+        self, file: BinaryIO, *, fsync: bool, cut_tail: bytes | None = None
+    ) -> None:
         self._file = file
         self._fsync = fsync
+        self.cut_tail = cut_tail  # the torn final line `open_writer` cut off, if any
 
     def append(self, event: Event) -> None:
-        self._file.write(dump_event(event).encode() + b"\n")
-        self._file.flush()
+        """Write one line. If the write fails part-way, cut the partial line back."""
+        descriptor = self._file.fileno()
+        start = os.fstat(descriptor).st_size
+        pending = memoryview(dump_event(event).encode() + b"\n")
+        try:
+            while pending:
+                pending = pending[os.write(descriptor, pending) :]
+        except BaseException:  # an interrupt mid-write must not leave a partial line
+            os.ftruncate(descriptor, start)
+            raise
         if self._fsync:
-            os.fsync(self._file.fileno())
+            os.fsync(descriptor)
 
 
 @contextmanager
@@ -64,7 +75,8 @@ def open_writer(path: Path, *, fsync: bool = False) -> Iterator[EventWriter]:
     """Take the session lock, cut off any torn final line, and yield a writer.
 
     The lock is `flock` on `<sessionId>.lock`: the operating system drops it when
-    the holder dies, so a crash never leaves a stale lock. Raises
+    the holder dies, so a crash never leaves a stale lock. The bytes it cut are on
+    the writer as `cut_tail`, so a resume can report them. Raises
     `SessionLockedError` if another process holds it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,8 +88,11 @@ def open_writer(path: Path, *, fsync: bool = False) -> Iterator[EventWriter]:
                 f"{path} has another writer; retry later"
             ) from error
         with path.open("a+b") as file:
-            file.truncate(_complete_length(file))
-            yield EventWriter(file, fsync=fsync)
+            complete = _complete_length(file)
+            file.seek(complete)
+            cut = file.read() or None
+            file.truncate(complete)
+            yield EventWriter(file, fsync=fsync, cut_tail=cut)
 
 
 def _complete_length(file: BinaryIO) -> int:

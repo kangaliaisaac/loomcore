@@ -29,7 +29,7 @@
     "title": "Snapshots and Hypothesis stateful tests",
     "spec": "2 Writing, 5",
     "acceptance": "random appends, snapshots and replays agree with the fold; cutting the file at a random byte still replays to a consistent earlier state",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f05",
@@ -37,7 +37,7 @@
     "title": "Spend log: one line per model call",
     "spec": "2 Run spend line",
     "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; resume repairs a missing line",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f06",
@@ -60,7 +60,7 @@
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out",
+    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held",
     "passes": false
   },
   {

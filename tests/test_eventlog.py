@@ -13,6 +13,7 @@ from factories import make
 from loomcore.eventlog import (
     LogCorruptError,
     SessionLockedError,
+    WriterBrokenError,
     open_writer,
     read_events,
 )
@@ -194,3 +195,39 @@ def test_an_interrupt_mid_append_leaves_no_partial_line(
         with pytest.raises(KeyboardInterrupt):
             writer.append(make("run_started"))
     assert log.read_bytes() == b""
+
+
+def test_a_failed_fsync_cuts_the_line_back_so_a_retry_cannot_repeat_a_seq(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_fsync(descriptor: int) -> None:
+        raise OSError(5, "I/O error")
+
+    with open_writer(log, fsync=True) as writer:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", failing_fsync)
+            with pytest.raises(OSError, match="I/O error"):
+                writer.append(make("run_started"))
+        writer.append(make("run_started"))
+    assert [e.seq for e in read_events(log).events] == [0]
+
+
+def test_a_writer_that_cannot_cut_back_refuses_further_appends(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_write(descriptor: int, data: bytes | memoryview) -> int:
+        raise OSError(28, "No space left on device")
+
+    def failing_truncate(descriptor: int, length: int) -> None:
+        raise OSError(5, "I/O error")
+
+    with open_writer(log) as writer:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "write", failing_write)
+            patch.setattr(os, "ftruncate", failing_truncate)
+            with pytest.raises(OSError, match="No space"):
+                writer.append(make("run_started"))
+        with pytest.raises(WriterBrokenError) as broken:
+            writer.append(make("run_started"))
+    assert isinstance(broken.value.__cause__, OSError)
+    assert "I/O error" in str(broken.value.__cause__)

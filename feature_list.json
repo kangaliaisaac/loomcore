@@ -36,16 +36,16 @@
     "card": "04",
     "title": "Spend log: one line per model call",
     "spec": "2 Run spend line",
-    "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; resume repairs a missing line",
+    "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; repair_spend writes each missing line once, dated at its call",
     "passes": true
   },
   {
     "id": "f06",
     "card": "04",
-    "title": "Rewind: run_forked and clean fork points",
+    "title": "Rewind: clean fork points",
     "spec": "1 Rewind",
     "acceptance": "a fork reads the parent up to and including from.seq; points with a pending tool call, open approval or open pause are refused",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f07",
@@ -60,7 +60,7 @@
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held",
+    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped (month_spend returns them with the total); the spend-log path it reads is logged, since a mistyped path reads as empty; a fork calls ensure_fork_point and then writes run_forked",
     "passes": false
   },
   {

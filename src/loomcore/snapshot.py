@@ -54,6 +54,15 @@ def write_snapshot(path: Path, snapshot: Snapshot) -> None:
         file.flush()
         os.fsync(file.fileno())
     temporary.replace(path)
+    _fsync_directory(path.parent)  # else a power loss can lose the rename
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def read_snapshot(path: Path) -> Snapshot:

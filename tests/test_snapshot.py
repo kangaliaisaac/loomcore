@@ -1,5 +1,6 @@
 """f04 (part): snapshots are atomic and replay can start from one."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -53,3 +54,18 @@ def test_a_snapshot_from_another_chain_of_the_same_length_is_stale() -> None:
     other = [*CHAIN[:-1], make("run_paused", 4, run="r2")]
     with pytest.raises(StaleSnapshotError, match="different chain"):
         replay_from(take_snapshot(CHAIN), other)
+
+
+def test_writing_a_snapshot_syncs_the_file_and_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        synced.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    write_snapshot(tmp_path / "s1.snapshot.json", take_snapshot(CHAIN))
+    assert len(synced) == 2  # the temporary file, then the directory

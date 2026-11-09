@@ -25,7 +25,7 @@ NOW = datetime(2026, 11, 15, tzinfo=UTC)
 
 
 def line(usd: str, run: str = "s1/r1", at: datetime = NOW) -> SpendLine:
-    return SpendLine(at=at, usd=Decimal(usd), run=run, note="")
+    return SpendLine(at=at, usd=Decimal(usd), run=run, seq=0, note="")
 
 
 def test_a_model_call_becomes_one_line_keyed_by_session_and_run() -> None:
@@ -52,7 +52,7 @@ def test_a_record_starts_and_ends_with_a_newline(tmp_path: Path) -> None:
     raw = path.read_bytes()
     assert raw.startswith(b"\n")
     assert raw.endswith(b"\n")
-    assert set(json.loads(raw)) == {"at", "usd", "run", "note"}
+    assert set(json.loads(raw)) == {"at", "usd", "run", "seq", "note"}
 
 
 def test_a_torn_append_never_swallows_the_next_line(tmp_path: Path) -> None:
@@ -157,7 +157,9 @@ def test_a_unicode_line_separator_inside_a_record_does_not_split_it(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "spend.jsonl"
-    append_spend(path, SpendLine(at=NOW, usd=Decimal(1), run="a\x85b", note="x\u2028y"))
+    append_spend(
+        path, SpendLine(at=NOW, usd=Decimal(1), run="a\x85b", seq=0, note="x\u2028y")
+    )
     result = read_spend(path)
     assert len(result.lines) == 1
     assert result.skipped == ()
@@ -169,3 +171,25 @@ def test_a_short_write_is_an_error(
     monkeypatch.setattr(os, "write", lambda descriptor, data: 3)
     with pytest.raises(OSError, match="short write"):
         append_spend(tmp_path / "spend.jsonl", line("1"))
+
+
+def test_a_missing_spend_log_reads_as_empty(tmp_path: Path) -> None:
+    result = read_spend(tmp_path / "spend.jsonl")
+    assert result.lines == ()
+    assert result.skipped == ()
+
+
+def test_a_garbled_line_is_reported_not_counted(tmp_path: Path) -> None:
+    path = tmp_path / "spend.jsonl"
+    append_spend(path, line("1"))
+    with path.open("ab") as file:
+        file.write(b'{"at": "not a date"}\n')
+    result = read_spend(path)
+    assert [x.usd for x in result.lines] == [Decimal("1")]
+    assert result.skipped == ('{"at": "not a date"}',)
+
+
+def test_repair_matches_calls_by_seq_not_by_the_note_text() -> None:
+    events = calls(0.5, 0.25)
+    reworded = spend_line(events[0]).model_copy(update={"note": "written by hand"})
+    assert missing_spend_lines(events, [reworded], "s1/r1") == [spend_line(events[1])]

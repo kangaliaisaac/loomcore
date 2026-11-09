@@ -101,3 +101,18 @@ def test_snapshots_of_paths_that_differ_only_in_suffix_use_separate_temporaries(
     write_snapshot(tmp_path / "s1.b", take_snapshot(CHAIN))
     assert read_snapshot(tmp_path / "s1.a").applied == 2
     assert read_snapshot(tmp_path / "s1.b").applied == len(CHAIN)
+
+
+def test_a_snapshot_written_for_an_older_run_state_is_stale() -> None:
+    older = take_snapshot(CHAIN).model_copy(update={"state_fields": ("event_count",)})
+    with pytest.raises(StaleSnapshotError, match="older RunState"):
+        replay_from(older, CHAIN)
+
+
+def test_an_unreadable_snapshot_file_is_stale_not_a_validation_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "s1.snapshot.json"
+    path.write_text('{"applied": 1, "surprise": true}')
+    with pytest.raises(StaleSnapshotError, match="discard it"):
+        read_snapshot(path)

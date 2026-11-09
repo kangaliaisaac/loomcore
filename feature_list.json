@@ -36,7 +36,7 @@
     "card": "04",
     "title": "Spend log: one line per model call",
     "spec": "2 Run spend line",
-    "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; resume repairs a missing line",
+    "acceptance": "a torn append never swallows the next line; month_to_date excludes the run's own lines; repair_spend writes each missing line once, dated at its call",
     "passes": true
   },
   {
@@ -60,7 +60,7 @@
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held",
+    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped",
     "passes": false
   },
   {

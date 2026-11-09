@@ -22,6 +22,7 @@ class SpendLine(BaseModel):
     at: AwareDatetime
     usd: Usd
     run: str  # "<sessionId>/<runId>"
+    seq: int  # the model_call's seq in that run: what repair matches on
     note: str = ""
 
 
@@ -40,7 +41,8 @@ def spend_line(call: ModelCall) -> SpendLine:
         at=call.timestamp,
         usd=call.cost_usd,
         run=run_key(call.session_id, call.run_id),
-        note=f"model_call seq {call.seq}",
+        seq=call.seq,
+        note="model_call",
     )
 
 
@@ -55,8 +57,11 @@ def append_spend(path: Path, line: SpendLine) -> None:
 
 
 def read_spend(path: Path) -> SpendRead:
+    """Every parseable line; a missing file (no run has spent yet) reads as empty."""
     lines: list[SpendLine] = []
     skipped: list[str] = []
+    if not path.exists():
+        return SpendRead((), ())
     for raw in path.read_text(errors="replace").split("\n"):
         if not raw.strip():
             continue
@@ -87,7 +92,7 @@ def missing_spend_lines(
     Non-zero after a crash between a model_call and its spend line. Dating the
     line at the call keeps a call made in one month out of the next month's total.
     """
-    recorded = {line.note for line in lines if line.run == run}
+    recorded = {line.seq for line in lines if line.run == run}
     return [
         line
         for line in (
@@ -95,7 +100,7 @@ def missing_spend_lines(
             for e in events
             if isinstance(e, ModelCall) and run_key(e.session_id, e.run_id) == run
         )
-        if line.note not in recorded
+        if line.seq not in recorded
     ]
 
 
@@ -104,8 +109,7 @@ def repair_spend(path: Path, events: Iterable[Event], run: str) -> None:
 
     The caller holds the session lock: two unlocked resumes would both write them.
     """
-    existing = read_spend(path).lines if path.exists() else ()
-    for line in missing_spend_lines(events, existing, run):
+    for line in missing_spend_lines(events, read_spend(path).lines, run):
         append_spend(path, line)
 
 

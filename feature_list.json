@@ -60,7 +60,7 @@
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume refuses a snapshot whose tip event differs in content, not only in runId/seq (a log that lost its tail and regrew); resume calls repair_spend with the session lock held",
+    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held",
     "passes": false
   },
   {

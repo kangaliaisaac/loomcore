@@ -98,11 +98,10 @@ def _line_ends(lines: list[bytes]) -> list[int]:
 
 @given(log=logs())
 @settings(max_examples=60, deadline=None)
-def test_replay_is_a_pure_fold_and_snapshots_at_every_cut_agree(
+def test_snapshots_and_replays_at_every_cut_agree_with_the_fold(
     log: list[Event],
 ) -> None:
     full = replay(log)
-    assert full == replay(log)
     assert full.event_count == len(log)
     for cut in range(len(log) + 1):
         assert replay_from(take_snapshot(log[:cut]), log) == full

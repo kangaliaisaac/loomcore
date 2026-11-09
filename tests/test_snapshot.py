@@ -69,3 +69,35 @@ def test_writing_a_snapshot_syncs_the_file_and_its_directory(
     monkeypatch.setattr(os, "fsync", recording_fsync)
     write_snapshot(tmp_path / "s1.snapshot.json", take_snapshot(CHAIN))
     assert len(synced) == 2  # the temporary file, then the directory
+
+
+def test_a_snapshot_whose_last_event_changed_content_is_stale() -> None:
+    regrown = [*CHAIN[:-1], make("run_paused", 4, resume_from=2)]
+    with pytest.raises(StaleSnapshotError, match="different chain"):
+        replay_from(take_snapshot(CHAIN), regrown)
+
+
+def test_a_failed_snapshot_write_leaves_the_old_file_and_no_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "s1.snapshot.json"
+    write_snapshot(path, take_snapshot(CHAIN[:2]))
+
+    def failing_fsync(descriptor: int) -> None:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="I/O error"):
+        write_snapshot(path, take_snapshot(CHAIN))
+    monkeypatch.undo()
+    assert read_snapshot(path).applied == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["s1.snapshot.json"]
+
+
+def test_snapshots_of_paths_that_differ_only_in_suffix_use_separate_temporaries(
+    tmp_path: Path,
+) -> None:
+    write_snapshot(tmp_path / "s1.a", take_snapshot(CHAIN[:2]))
+    write_snapshot(tmp_path / "s1.b", take_snapshot(CHAIN))
+    assert read_snapshot(tmp_path / "s1.a").applied == 2
+    assert read_snapshot(tmp_path / "s1.b").applied == len(CHAIN)

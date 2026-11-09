@@ -1,12 +1,13 @@
 """Snapshots of the replayed state, so a long log need not be folded from zero."""
 
+import hashlib
 import os
 from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from loomcore.events import Event
+from loomcore.events import Event, dump_event
 from loomcore.replay import RunState, replay
 
 
@@ -18,12 +19,14 @@ class Snapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     applied: int  # how many events of the run's chain the state already folds in
-    tip: str  # "<runId>/<seq>" of the last of them, to tell a different chain
+    tip: str  # sha256 of the last of them, to tell a chain that regrew differently
     state: RunState
 
 
 def _tip(chain: Sequence[Event], applied: int) -> str:
-    return f"{chain[applied - 1].run_id}/{chain[applied - 1].seq}" if applied else ""
+    if not applied:
+        return ""
+    return hashlib.sha256(dump_event(chain[applied - 1]).encode()).hexdigest()
 
 
 def take_snapshot(chain: Sequence[Event]) -> Snapshot:
@@ -40,20 +43,24 @@ def replay_from(snapshot: Snapshot, chain: Sequence[Event]) -> RunState:
         )
     if _tip(chain, snapshot.applied) != snapshot.tip:
         raise StaleSnapshotError(
-            f"snapshot was taken on a different chain (its last event was "
-            f"{snapshot.tip}); discard it and replay"
+            "snapshot was taken on a different chain (its last event differs); "
+            "discard it and replay"
         )
     return replay(chain[snapshot.applied :], snapshot.state)
 
 
 def write_snapshot(path: Path, snapshot: Snapshot) -> None:
     """Write beside the target and move into place, so a reader never sees half."""
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("wb") as file:
-        file.write(snapshot.model_dump_json().encode())
-        file.flush()
-        os.fsync(file.fileno())
-    temporary.replace(path)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("wb") as file:
+            file.write(snapshot.model_dump_json().encode())
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     _fsync_directory(path.parent)  # else a power loss can lose the rename
 
 

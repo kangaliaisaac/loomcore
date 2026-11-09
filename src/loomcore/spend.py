@@ -100,7 +100,10 @@ def missing_spend_lines(
 
 
 def repair_spend(path: Path, events: Iterable[Event], run: str) -> None:
-    """On resume, write the lines a crash lost, so the run's lines match its calls."""
+    """On resume, write the lines a crash lost, so the run's lines match its calls.
+
+    The caller holds the session lock: two unlocked resumes would both write them.
+    """
     existing = read_spend(path).lines if path.exists() else ()
     for line in missing_spend_lines(events, existing, run):
         append_spend(path, line)

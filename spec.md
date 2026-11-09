@@ -91,7 +91,7 @@ Before `run_finished` is written for any reason, including `killed` and `error`,
 Other model stop reasons are handled and logged: 
 - `tool_use` continues the loop, 
 - `stop_sequence` is treated as `end_turn`, 
-- `max_tokens` (the model hit the request's output ceiling, `max_output_tokens`) continues once and then, if the next call is cut off too, pauses with the limit `max_output_tokens` (counted in `RunState.truncations`, below). To continue, the partial assistant turn is sent back with a short instruction to carry on; a `tool_use` block cut off mid-input is discarded, never run, and the model is asked again, while complete `tool_use` blocks before it are run as normal (each with its `tool_requested` and one `tool_completed`) and their results go back with the instruction; the cut-off block is excluded from the rule that every `tool_use` gets a `tool_completed` and from the clean-fork-point rule, and 
+- `max_tokens` (the model hit the request's output ceiling, `max_output_tokens`) continues once and then, if the next call is cut off too, pauses with the limit `max_output_tokens` (counted in `RunState.truncations`, below). To continue, the partial assistant turn is sent back with a short instruction to carry on; a `tool_use` block cut off mid-input (the last block of a response whose `stop_reason` is `max_tokens`, when that block is a `tool_use`) is discarded, never run, and the model is asked again, while complete `tool_use` blocks before it are run as normal (each with its `tool_requested` and one `tool_completed`) and their results go back with the instruction; the cut-off block is excluded from the rule that every `tool_use` gets a `tool_completed` and from the clean-fork-point rule, and 
 - `pause_turn` resumes by sending the response back.
 
 ### Limits
@@ -237,7 +237,7 @@ The `model_call` line has the same `usage` block the Anthropic Messages API retu
 
 - The writer appends one line and flushes; an `fsync` option exists for durability-sensitive runs. A session file has one writer at a time: the writer holds an exclusive advisory lock (`fcntl.flock` on `<sessionId>.lock`), which the operating system releases when the holder dies, so a crash never leaves a stale lock; a second process that wants to write waits or fails, so a fork cannot run while its parent is resumed. Before its first append to an existing file the writer, holding the lock, cuts the file back to the last complete newline, so a torn final line from a crash never ends up in the middle of the log.
 - There is no separate log redactor. A secret in a tool result is removed by a post guard (`Redact`, section 3.7) before `tool_completed` is written, so the log holds what the model saw (the typed `finish` call is the one exception, section 3.2).
-- The reader yields events in order. A broken *final* line (a torn write) is dropped and reported; a broken line anywhere else is an error.
+- The reader yields events in order. An unterminated final line (a torn write: each event is one write ending in a newline, so a crash can only leave a line without it) is dropped and reported, whether or not it parses; any terminated line that does not parse is an error, the last one included.
 - Snapshots of derived state are written to a temporary file and moved with `os.replace`, so they are atomic. Replay may start from a snapshot.
 - Replay is deterministic: the same log always yields the same state.
 
@@ -403,7 +403,12 @@ Tests: spans from a recorded log are stable; pricing matches hand-computed value
 
 ```
 src/loomcore/
-  events.py      # envelope, kinds, writer, reader, snapshot, replay
+  events.py      # envelope and kinds
+  eventlog.py    # writer, reader
+  replay.py      # run state, fold, a run's events across forks
+  snapshot.py    # snapshots
+  rewind.py      # clean fork points
+  spend.py       # spend log
   loop.py        # step, Driver, ports, retry policy, limits, escalation
   tools.py       # registry
   sandbox.py     # sandbox and rule evaluation

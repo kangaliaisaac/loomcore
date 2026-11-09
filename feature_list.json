@@ -5,7 +5,7 @@
     "title": "Event envelope and kinds as frozen types",
     "spec": "2 Envelope, Kinds",
     "acceptance": "every kind round-trips to JSON and back; unknown fields are rejected",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f02",
@@ -13,7 +13,7 @@
     "title": "Event writer: append, flush, optional fsync, torn-line cut, session lock",
     "spec": "2 Writing",
     "acceptance": "a torn final line is cut before the next append; a second writer on one session file is refused; a crash while holding the lock does not block the next writer",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f03",
@@ -21,7 +21,7 @@
     "title": "Event reader and replay fold",
     "spec": "2 Reading, replay",
     "acceptance": "a torn final line is dropped and reported; any other broken line is an error; the same log always folds to the same state",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f04",

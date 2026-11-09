@@ -7,7 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.15"
 authors = [{ name = "Kang'alia Nyamu", email = "17615243+kangaliaisaac@users.noreply.github.com" }]
-dependencies = ["pydantic>=2"]
+dependencies = ["pydantic>=2.11"]
 
 [dependency-groups]
 dev = ["hypothesis", "mypy", "pytest", "ruff"]
@@ -59,6 +59,7 @@ max-statements = 30
 strict = true
 python_version = "3.15"
 mypy_path = "src"
+plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

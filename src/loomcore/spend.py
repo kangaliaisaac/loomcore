@@ -87,6 +87,21 @@ def month_to_date(lines: Iterable[SpendLine], run: str, now: datetime) -> Decima
     )
 
 
+@dataclass(frozen=True)
+class MonthSpend:
+    usd: Decimal
+    skipped: tuple[str, ...]  # lines the total could not count; the caller reports them
+
+
+def month_spend(spend: SpendRead, run: str, now: datetime) -> MonthSpend:
+    """`month_to_date` that hands back the unparseable lines with the total.
+
+    Taking the whole `SpendRead` means the driver cannot read the total and forget
+    that some lines were not counted.
+    """
+    return MonthSpend(month_to_date(spend.lines, run, now), spend.skipped)
+
+
 def missing_spend_lines(
     events: Iterable[Event], lines: Iterable[SpendLine], run: str
 ) -> list[SpendLine]:

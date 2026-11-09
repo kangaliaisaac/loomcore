@@ -15,6 +15,7 @@ from loomcore.spend import (
     SpendLine,
     append_spend,
     missing_spend_lines,
+    month_spend,
     month_to_date,
     read_spend,
     repair_spend,
@@ -226,3 +227,14 @@ def test_repair_returns_the_lines_it_could_not_read(tmp_path: Path) -> None:
     path.write_text("\nnot json\n")
     assert repair_spend(path, calls(0.5), "s1/r1") == ("not json",)
     assert [x.usd for x in read_spend(path).lines] == [Decimal("0.5")]
+
+
+def test_month_spend_returns_the_total_with_the_lines_it_could_not_count(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "spend.jsonl"
+    append_spend(path, line("2", run="s1/r2"))
+    path.write_text(path.read_text() + "garbled\n")
+    result = month_spend(read_spend(path), "s1/r1", NOW)
+    assert result.usd == Decimal("2")
+    assert result.skipped == ("garbled",)

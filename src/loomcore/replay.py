@@ -5,9 +5,10 @@ an approval open, is the run paused or finished). The loop adds the rest.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from functools import reduce
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import JsonValue
 
 from loomcore.events import (
     ApprovalDenied,
@@ -32,9 +33,8 @@ class ForkChainError(Exception):
     """
 
 
-class RunState(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+@dataclass(frozen=True)
+class RunState:
     event_count: int = 0
     pending_tools: frozenset[str] = frozenset()
     open_approvals: frozenset[str] = frozenset()
@@ -69,25 +69,27 @@ def _is_tool_use(block: dict[str, JsonValue]) -> bool:
 
 def apply(state: RunState, event: Event) -> RunState:
     """The next state. Total: an event that names an unknown id changes nothing."""
-    update: dict[str, object] = {"event_count": state.event_count + 1}
+    state = replace(state, event_count=state.event_count + 1)
     match event:
         case ModelCall():
-            update["pending_tools"] = state.pending_tools | set(
-                tool_use_ids(event.message)
-            )
+            pending = state.pending_tools | set(tool_use_ids(event.message))
+            state = replace(state, pending_tools=pending)
         case ToolCompleted():
-            update["pending_tools"] = state.pending_tools - {event.tool_use_id}
+            pending = state.pending_tools - {event.tool_use_id}
+            state = replace(state, pending_tools=pending)
         case ApprovalRequested():
-            update["open_approvals"] = state.open_approvals | {event.tool_use_id}
+            open_ = state.open_approvals | {event.tool_use_id}
+            state = replace(state, open_approvals=open_)
         case ApprovalGranted() | ApprovalDenied():
-            update["open_approvals"] = state.open_approvals - {event.tool_use_id}
+            open_ = state.open_approvals - {event.tool_use_id}
+            state = replace(state, open_approvals=open_)
         case RunPaused():
-            update["paused"] = True
+            state = replace(state, paused=True)
         case RunResumed():
-            update["paused"] = False
+            state = replace(state, paused=False)
         case RunFinished():
-            update["finished"] = event.reason
-    return state.model_copy(update=update)
+            state = replace(state, finished=event.reason)
+    return state
 
 
 def replay(events: Iterable[Event], initial: RunState | None = None) -> RunState:

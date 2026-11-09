@@ -67,6 +67,37 @@ def test_a_torn_final_line_is_cut_before_the_next_append(log: Path) -> None:
     assert result.torn_tail is None
 
 
+def test_the_writer_keeps_the_torn_line_it_cut(log: Path) -> None:
+    with open_writer(log) as writer:
+        writer.append(make("run_started"))
+        assert writer.cut_tail is None
+    torn = dump_event(make("turn_started", seq=1)).encode()[:20]
+    log.write_bytes(log.read_bytes() + torn)
+    with open_writer(log) as writer:
+        assert writer.cut_tail == torn
+
+
+def test_a_failed_append_leaves_no_partial_line(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = os.write
+
+    def disk_full_after_ten_bytes(descriptor: int, data: bytes | memoryview) -> int:
+        real_write(descriptor, bytes(data[:10]))
+        raise OSError(28, "No space left on device")
+
+    with open_writer(log) as writer:
+        writer.append(make("run_started"))
+        monkeypatch.setattr(os, "write", disk_full_after_ten_bytes)
+        with pytest.raises(OSError, match="No space"):
+            writer.append(make("turn_started", seq=1))
+        monkeypatch.undo()
+        writer.append(make("turn_started", seq=1))
+    result = read_events(log)
+    assert [e.seq for e in result.events] == [0, 1]
+    assert result.torn_tail is None
+
+
 def test_a_log_that_is_only_a_torn_line_is_emptied_by_the_writer(log: Path) -> None:
     log.parent.mkdir()
     log.write_bytes(b'{"schema": "loomc')

@@ -118,3 +118,20 @@ def test_an_unreadable_snapshot_file_is_stale_not_a_validation_error(
     path.write_text(json.dumps({**valid, "surprise": True}))
     with pytest.raises(StaleSnapshotError, match="discard it"):
         read_snapshot(path)
+
+
+def test_a_snapshot_file_from_before_state_fields_existed_is_stale(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "s1.snapshot.json"
+    valid = take_snapshot(CHAIN).model_dump(mode="json")
+    del valid["state_fields"]
+    path.write_text(json.dumps(valid))
+    with pytest.raises(StaleSnapshotError, match="discard it"):
+        read_snapshot(path)
+
+
+def test_a_snapshot_of_another_version_is_stale() -> None:
+    other = take_snapshot(CHAIN).model_copy(update={"version": 0})
+    with pytest.raises(StaleSnapshotError, match="older RunState"):
+        replay_from(other, CHAIN)

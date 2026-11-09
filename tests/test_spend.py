@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from factories import make
+from pydantic import ValidationError
 
 from loomcore.events import ModelCall
 from loomcore.spend import (
@@ -193,3 +194,35 @@ def test_repair_matches_calls_by_seq_not_by_the_note_text() -> None:
     events = calls(0.5, 0.25)
     reworded = spend_line(events[0]).model_copy(update={"note": "written by hand"})
     assert missing_spend_lines(events, [reworded], "s1/r1") == [spend_line(events[1])]
+
+
+def test_a_negative_seq_is_not_a_spend_line() -> None:
+    with pytest.raises(ValidationError):
+        SpendLine(at=NOW, usd=Decimal(1), run="s1/r1", seq=-1)
+
+
+def test_appending_creates_the_directory_of_the_first_line(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "spend.jsonl"
+    append_spend(path, line("1"))
+    assert [x.usd for x in read_spend(path).lines] == [Decimal("1")]
+
+
+def test_a_naive_now_is_refused_not_read_as_local_time() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        month_to_date([line("1", run="x/y")], "s1/r1", datetime(2026, 11, 15))
+
+
+def test_a_line_without_seq_is_skipped_and_reported(tmp_path: Path) -> None:
+    path = tmp_path / "spend.jsonl"
+    old = '{"at":"2026-11-15T00:00:00Z","usd":0.5,"run":"s1/r1","note":"model_call"}'
+    path.write_text("\n" + old + "\n")
+    result = read_spend(path)
+    assert result.lines == ()
+    assert result.skipped == (old,)
+
+
+def test_repair_returns_the_lines_it_could_not_read(tmp_path: Path) -> None:
+    path = tmp_path / "spend.jsonl"
+    path.write_text("\nnot json\n")
+    assert repair_spend(path, calls(0.5), "s1/r1") == ("not json",)
+    assert [x.usd for x in read_spend(path).lines] == [Decimal("0.5")]

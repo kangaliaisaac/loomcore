@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from loomcore.events import Event, ModelCall, Usd
 
@@ -22,7 +22,7 @@ class SpendLine(BaseModel):
     at: AwareDatetime
     usd: Usd
     run: str  # "<sessionId>/<runId>"
-    seq: int  # the model_call's seq in that run: what repair matches on
+    seq: int = Field(ge=0)  # the model_call's seq in that run: what repair matches on
     note: str = ""
 
 
@@ -48,6 +48,7 @@ def spend_line(call: ModelCall) -> SpendLine:
 
 def append_spend(path: Path, line: SpendLine) -> None:
     record = ("\n" + line.model_dump_json() + "\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         if os.write(descriptor, record) != len(record):
@@ -74,6 +75,8 @@ def read_spend(path: Path) -> SpendRead:
 
 def month_to_date(lines: Iterable[SpendLine], run: str, now: datetime) -> Decimal:
     """Spend in the UTC month of `now`, leaving out this run's own lines."""
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware: months are judged in UTC")
     return sum(
         (
             line.usd
@@ -104,13 +107,16 @@ def missing_spend_lines(
     ]
 
 
-def repair_spend(path: Path, events: Iterable[Event], run: str) -> None:
+def repair_spend(path: Path, events: Iterable[Event], run: str) -> tuple[str, ...]:
     """On resume, write the lines a crash lost, so the run's lines match its calls.
 
-    The caller holds the session lock: two unlocked resumes would both write them.
+    Returns the log's unparseable lines, which the caller must surface. The caller
+    holds the session lock: two unlocked resumes would both write the lines.
     """
-    for line in missing_spend_lines(events, read_spend(path).lines, run):
+    existing = read_spend(path)
+    for line in missing_spend_lines(events, existing.lines, run):
         append_spend(path, line)
+    return existing.skipped
 
 
 def _month(moment: datetime) -> tuple[int, int]:

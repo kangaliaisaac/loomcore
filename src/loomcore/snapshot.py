@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from loomcore.events import Event, dump_event
 from loomcore.replay import RunState, replay
 
+SNAPSHOT_VERSION = 1  # bump when RunState's meaning changes without a field name
+
 
 class StaleSnapshotError(Exception):
     """The snapshot does not belong to this chain; discard it and replay."""
@@ -19,6 +21,7 @@ class StaleSnapshotError(Exception):
 class Snapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    version: int
     applied: int  # how many events of the run's chain the state already folds in
     tip: str  # sha256 of the last of them, to tell a chain that regrew differently
     state_fields: tuple[str, ...]  # RunState's fields at writing; a new one stales it
@@ -37,6 +40,7 @@ def _state_fields() -> tuple[str, ...]:
 
 def take_snapshot(chain: Sequence[Event]) -> Snapshot:
     return Snapshot(
+        version=SNAPSHOT_VERSION,
         applied=len(chain),
         tip=_tip(chain, len(chain)),
         state_fields=_state_fields(),
@@ -50,7 +54,7 @@ def replay_from(snapshot: Snapshot, chain: Sequence[Event]) -> RunState:
         raise StaleSnapshotError(
             f"snapshot covers {snapshot.applied} events but the log has {len(chain)}"
         )
-    if snapshot.state_fields != _state_fields():
+    if snapshot.version != SNAPSHOT_VERSION or snapshot.state_fields != _state_fields():
         raise StaleSnapshotError(
             "snapshot was written for an older RunState; discard it and replay"
         )

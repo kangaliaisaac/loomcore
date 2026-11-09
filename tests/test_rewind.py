@@ -3,10 +3,9 @@
 import pytest
 from factories import calling, make
 
-from loomcore.events import Event
+from loomcore.events import Event, ForkOrigin
 from loomcore.replay import run_events
 from loomcore.rewind import (
-    ForkPoint,
     ForkRefusedError,
     ensure_fork_point,
     fork_point_problem,
@@ -27,7 +26,7 @@ def clean_run() -> list[Event]:
 
 
 def problem(events: list[Event], seq: int) -> str | None:
-    return fork_point_problem(events, ForkPoint("r1", seq))
+    return fork_point_problem(events, ForkOrigin(run_id="r1", seq=seq))
 
 
 def test_points_between_turns_are_clean() -> None:
@@ -79,8 +78,8 @@ def test_a_seq_the_run_does_not_have_is_refused() -> None:
 
 def test_ensure_raises_with_the_reason() -> None:
     with pytest.raises(ForkRefusedError, match="pending"):
-        ensure_fork_point(clean_run(), ForkPoint("r1", 3))
-    ensure_fork_point(clean_run(), ForkPoint("r1", 7))
+        ensure_fork_point(clean_run(), ForkOrigin(run_id="r1", seq=3))
+    ensure_fork_point(clean_run(), ForkOrigin(run_id="r1", seq=7))
 
 
 def test_a_fork_sees_the_parent_up_to_from_seq_and_a_second_fork_is_judged_too() -> (
@@ -95,5 +94,5 @@ def test_a_fork_sees_the_parent_up_to_from_seq_and_a_second_fork_is_judged_too()
         ("r2", 0),
         ("r2", 1),
     ]
-    assert fork_point_problem(log, ForkPoint("r2", 0)) is None
-    assert "pending" in (fork_point_problem(log, ForkPoint("r2", 1)) or "")
+    assert fork_point_problem(log, ForkOrigin(run_id="r2", seq=0)) is None
+    assert "pending" in (fork_point_problem(log, ForkOrigin(run_id="r2", seq=1)) or "")

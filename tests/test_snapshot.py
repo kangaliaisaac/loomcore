@@ -1,5 +1,6 @@
 """f04 (part): snapshots are atomic and replay can start from one."""
 
+import json
 import os
 from pathlib import Path
 
@@ -113,6 +114,7 @@ def test_an_unreadable_snapshot_file_is_stale_not_a_validation_error(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "s1.snapshot.json"
-    path.write_text('{"applied": 1, "surprise": true}')
+    valid = take_snapshot(CHAIN).model_dump(mode="json")
+    path.write_text(json.dumps({**valid, "surprise": True}))
     with pytest.raises(StaleSnapshotError, match="discard it"):
         read_snapshot(path)

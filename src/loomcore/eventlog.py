@@ -63,7 +63,7 @@ class EventWriter:
         try:
             while pending:
                 pending = pending[os.write(descriptor, pending) :]
-        except OSError:
+        except BaseException:  # an interrupt mid-write must not leave a partial line
             os.ftruncate(descriptor, start)
             raise
         if self._fsync:

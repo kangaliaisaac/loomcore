@@ -47,3 +47,9 @@ def test_writing_a_snapshot_replaces_the_old_one_whole(tmp_path: Path) -> None:
 def test_a_snapshot_ahead_of_the_log_is_stale() -> None:
     with pytest.raises(StaleSnapshotError):
         replay_from(take_snapshot(CHAIN), CHAIN[:2])
+
+
+def test_a_snapshot_from_another_chain_of_the_same_length_is_stale() -> None:
+    other = [*CHAIN[:-1], make("run_paused", 4, run="r2")]
+    with pytest.raises(StaleSnapshotError, match="different chain"):
+        replay_from(take_snapshot(CHAIN), other)

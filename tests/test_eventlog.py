@@ -178,3 +178,19 @@ def test_a_line_that_is_not_utf8_is_corruption_not_a_crash(log: Path) -> None:
     log.write_bytes(b'\xff\xfe{"kind": 1}\n')
     with pytest.raises(LogCorruptError):
         read_events(log)
+
+
+def test_an_interrupt_mid_append_leaves_no_partial_line(
+    log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = os.write
+
+    def interrupted_after_ten_bytes(descriptor: int, data: bytes | memoryview) -> int:
+        real_write(descriptor, bytes(data[:10]))
+        raise KeyboardInterrupt
+
+    with open_writer(log) as writer:
+        monkeypatch.setattr(os, "write", interrupted_after_ten_bytes)
+        with pytest.raises(KeyboardInterrupt):
+            writer.append(make("run_started"))
+    assert log.read_bytes() == b""

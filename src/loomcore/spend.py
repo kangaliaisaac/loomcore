@@ -48,7 +48,8 @@ def append_spend(path: Path, line: SpendLine) -> None:
     record = ("\n" + line.model_dump_json() + "\n").encode()
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.write(descriptor, record)
+        if os.write(descriptor, record) != len(record):
+            raise OSError(f"short write to {path}; the record may be torn")
     finally:
         os.close(descriptor)
 
@@ -56,7 +57,7 @@ def append_spend(path: Path, line: SpendLine) -> None:
 def read_spend(path: Path) -> SpendRead:
     lines: list[SpendLine] = []
     skipped: list[str] = []
-    for raw in path.read_text(errors="replace").splitlines():
+    for raw in path.read_text(errors="replace").split("\n"):
         if not raw.strip():
             continue
         try:
@@ -78,31 +79,31 @@ def month_to_date(lines: Iterable[SpendLine], run: str, now: datetime) -> Decima
     )
 
 
-def spend_shortfall(
+def missing_spend_lines(
     events: Iterable[Event], lines: Iterable[SpendLine], run: str
-) -> Decimal:
-    """What the run's model calls cost beyond what its spend lines record.
+) -> list[SpendLine]:
+    """The run's model calls that have no spend line, each dated at its call.
 
-    Non-zero after a crash between a model_call and its spend line.
+    Non-zero after a crash between a model_call and its spend line. Dating the
+    line at the call keeps a call made in one month out of the next month's total.
     """
-    calls = (
-        e
-        for e in events
-        if isinstance(e, ModelCall) and run_key(e.session_id, e.run_id) == run
-    )
-    logged = sum((call.cost_usd for call in calls), Decimal(0))
-    recorded = sum((line.usd for line in lines if line.run == run), Decimal(0))
-    return logged - recorded
-
-
-def repair_spend(path: Path, events: Iterable[Event], run: str, now: datetime) -> None:
-    """On resume, write the one line that makes the run's lines match its calls."""
-    existing = read_spend(path).lines if path.exists() else ()
-    shortfall = spend_shortfall(events, existing, run)
-    if shortfall > 0:
-        append_spend(
-            path, SpendLine(at=now, usd=shortfall, run=run, note="resume repair")
+    recorded = {line.note for line in lines if line.run == run}
+    return [
+        line
+        for line in (
+            spend_line(e)
+            for e in events
+            if isinstance(e, ModelCall) and run_key(e.session_id, e.run_id) == run
         )
+        if line.note not in recorded
+    ]
+
+
+def repair_spend(path: Path, events: Iterable[Event], run: str) -> None:
+    """On resume, write the lines a crash lost, so the run's lines match its calls."""
+    existing = read_spend(path).lines if path.exists() else ()
+    for line in missing_spend_lines(events, existing, run):
+        append_spend(path, line)
 
 
 def _month(moment: datetime) -> tuple[int, int]:

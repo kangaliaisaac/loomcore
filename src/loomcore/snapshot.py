@@ -11,18 +11,25 @@ from loomcore.replay import RunState, replay
 
 
 class StaleSnapshotError(Exception):
-    """The snapshot covers more events than the log has; discard it and replay."""
+    """The snapshot does not belong to this chain; discard it and replay."""
 
 
 class Snapshot(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     applied: int  # how many events of the run's chain the state already folds in
+    tip: str  # "<runId>/<seq>" of the last of them, to tell a different chain
     state: RunState
 
 
+def _tip(chain: Sequence[Event], applied: int) -> str:
+    return f"{chain[applied - 1].run_id}/{chain[applied - 1].seq}" if applied else ""
+
+
 def take_snapshot(chain: Sequence[Event]) -> Snapshot:
-    return Snapshot(applied=len(chain), state=replay(chain))
+    return Snapshot(
+        applied=len(chain), tip=_tip(chain, len(chain)), state=replay(chain)
+    )
 
 
 def replay_from(snapshot: Snapshot, chain: Sequence[Event]) -> RunState:
@@ -30,6 +37,11 @@ def replay_from(snapshot: Snapshot, chain: Sequence[Event]) -> RunState:
     if snapshot.applied > len(chain):
         raise StaleSnapshotError(
             f"snapshot covers {snapshot.applied} events but the log has {len(chain)}"
+        )
+    if _tip(chain, snapshot.applied) != snapshot.tip:
+        raise StaleSnapshotError(
+            f"snapshot was taken on a different chain (its last event was "
+            f"{snapshot.tip}); discard it and replay"
         )
     return replay(chain[snapshot.applied :], snapshot.state)
 

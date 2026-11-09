@@ -58,7 +58,7 @@ class EventWriter:
         self._file = file
         self._fsync = fsync
         self.cut_tail = cut_tail  # the torn final line `open_writer` cut off, if any
-        self._broken = False
+        self._cutback_error: OSError | None = None
 
     def append(self, event: Event) -> None:
         """Write one line; a failed append leaves no line behind.
@@ -67,8 +67,10 @@ class EventWriter:
         raised, so a retry cannot repeat a seq. If the cut-back itself fails the
         writer refuses further appends, because a bad line may now be in the file.
         """
-        if self._broken:
-            raise WriterBrokenError("an earlier append could not be cut back")
+        if self._cutback_error is not None:
+            raise WriterBrokenError(
+                "an earlier append could not be cut back"
+            ) from self._cutback_error
         descriptor = self._file.fileno()
         start = os.fstat(descriptor).st_size
         pending = memoryview(dump_event(event).encode() + b"\n")
@@ -80,8 +82,8 @@ class EventWriter:
         except BaseException:  # an interrupt mid-write must not leave a partial line
             try:
                 os.ftruncate(descriptor, start)
-            except OSError:
-                self._broken = True
+            except OSError as error:
+                self._cutback_error = error
             raise
 
 

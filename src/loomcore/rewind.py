@@ -35,6 +35,10 @@ def fork_point_problem(events: Iterable[Event], point: ForkOrigin) -> str | None
 
 
 def ensure_fork_point(events: Iterable[Event], point: ForkOrigin) -> None:
-    """Raise `ForkRefusedError` unless `point` is clean."""
+    """Raise `ForkRefusedError` unless `point` is clean.
+
+    A log whose fork references are broken raises `ForkChainError` instead: that
+    is corruption, not a refused point.
+    """
     if problem := fork_point_problem(events, point):
         raise ForkRefusedError(f"cannot fork {point.run_id} at {point.seq}: {problem}")

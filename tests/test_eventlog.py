@@ -227,5 +227,7 @@ def test_a_writer_that_cannot_cut_back_refuses_further_appends(
             patch.setattr(os, "ftruncate", failing_truncate)
             with pytest.raises(OSError, match="No space"):
                 writer.append(make("run_started"))
-        with pytest.raises(WriterBrokenError):
+        with pytest.raises(WriterBrokenError) as broken:
             writer.append(make("run_started"))
+    assert isinstance(broken.value.__cause__, OSError)
+    assert "I/O error" in str(broken.value.__cause__)

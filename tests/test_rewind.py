@@ -4,7 +4,7 @@ import pytest
 from factories import calling, make
 
 from loomcore.events import Event, ForkOrigin
-from loomcore.replay import run_events
+from loomcore.replay import ForkChainError, run_events
 from loomcore.rewind import (
     ForkRefusedError,
     ensure_fork_point,
@@ -96,3 +96,10 @@ def test_a_fork_sees_the_parent_up_to_from_seq_and_a_second_fork_is_judged_too()
     ]
     assert fork_point_problem(log, ForkOrigin(run_id="r2", seq=0)) is None
     assert "pending" in (fork_point_problem(log, ForkOrigin(run_id="r2", seq=1)) or "")
+
+
+def test_a_broken_fork_chain_is_corruption_not_a_refused_point() -> None:
+    forked = make("run_forked", 0, run="r2", **{"from": {"runId": "gone", "seq": 0}})
+    log = [forked, make("turn_started", 1, run="r2")]
+    with pytest.raises(ForkChainError):
+        ensure_fork_point(log, ForkOrigin(run_id="r2", seq=1))

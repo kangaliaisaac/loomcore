@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pydantic import JsonValue
 
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
-from loomcore.replay import tool_use_ids
+from loomcore.replay import content_blocks, tool_use_ids
 
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
 
@@ -24,7 +24,7 @@ def tool_call(events: Sequence[Event], tool_use_id: str) -> tuple[str, JsonObjec
     """The name and input the model gave a `tool_use` block."""
     for event in reversed(events):
         if isinstance(event, ModelCall):
-            for block in _blocks(event.message):
+            for block in content_blocks(event.message):
                 if block.get("id") == tool_use_id:
                     args = block.get("input")
                     return str(block["name"]), args if isinstance(args, dict) else {}
@@ -33,7 +33,9 @@ def tool_call(events: Sequence[Event], tool_use_id: str) -> tuple[str, JsonObjec
 
 def final_text(message: JsonObject) -> str:
     """The text blocks of a response, joined."""
-    texts = (b.get("text", "") for b in _blocks(message) if b.get("type") == "text")
+    texts = (
+        b.get("text", "") for b in content_blocks(message) if b.get("type") == "text"
+    )
     return "".join(str(text) for text in texts)
 
 
@@ -43,7 +45,8 @@ def build_messages(task: JsonValue, events: Sequence[Event]) -> list[JsonObject]
     messages: list[JsonObject] = [{"role": "user", "content": task}]
     for event in events:
         if isinstance(event, ModelCall):
-            messages.append({"role": "assistant", "content": _sent(event.message)})
+            if sent := _sent(event.message):  # an empty turn would be rejected
+                messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
                 messages.append(reply)
         elif isinstance(event, RunForked) and event.hint:
@@ -51,19 +54,12 @@ def build_messages(task: JsonValue, events: Sequence[Event]) -> list[JsonObject]
     return messages
 
 
-def _blocks(message: JsonObject) -> list[JsonObject]:
-    content = message.get("content")
-    if not isinstance(content, list):
-        return []
-    return [block for block in content if isinstance(block, dict)]
-
-
 def _sent(message: JsonObject) -> list[JsonValue]:
     """The response's blocks, without a tool_use that max_tokens cut off mid-input."""
     kept = set(tool_use_ids(message))
     return [
         b
-        for b in _blocks(message)
+        for b in content_blocks(message)
         if b.get("type") != "tool_use" or b.get("id") in kept
     ]
 

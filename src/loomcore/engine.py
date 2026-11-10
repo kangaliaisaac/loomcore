@@ -51,7 +51,6 @@ class Run:
     writer: EventWriter
     ref: RunRef
     limits: Limits
-    events: list[Event]  # every event of the session file, then this run's appends
     chain: list[Event]  # the events replay reads for this run
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
@@ -66,7 +65,6 @@ class Run:
             **fields,
         )
         self.writer.append(event)
-        self.events.append(event)
         self.chain.append(event)
         self.next_seq += 1
         return event
@@ -148,11 +146,13 @@ class Run:
         )
         if isinstance(reached, LimitReached):
             return self._pause("limit", reached.limit)
-        turn = self.emit("turn_started", turn=self.state.turns + 1)
         started = self.ports.monotonic()
         message = self._with_retries(request)
         if isinstance(message, RunResult):
             return message
+        # After the response, so a pause or a give-up during retries leaves no
+        # turn behind that max_turns would count.
+        turn = self.emit("turn_started", turn=self.state.turns + 1)
         cost, version = self.ports.pricing.cost(message)
         call = self.emit(
             "model_call",
@@ -239,14 +239,16 @@ class Run:
                 "approval_requested", tool_use_id=tool_use_id, question=question
             )
             self.fold([requested])
-        return self._pause("awaiting_approval", None)
+        return self._pause("awaiting_approval", None, question)
 
-    def _pause(self, reason: str, limit: str | None) -> RunResult:
+    def _pause(
+        self, reason: str, limit: str | None, question: str | None = None
+    ) -> RunResult:
         paused = self.emit(
             "run_paused", reason=reason, limit=limit, resume_from=self.next_seq - 1
         )
         self.fold([paused])
-        return RunResult(self.ref, "paused", reason, limit)
+        return RunResult(self.ref, "paused", reason, limit, question)
 
     def _finish(self, stop: Stop) -> RunResult:
         """End the run: settle every pending call first, then write run_finished."""

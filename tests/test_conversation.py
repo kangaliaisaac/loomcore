@@ -78,3 +78,10 @@ def test_final_text_joins_the_text_blocks() -> None:
         ]
     }
     assert final_text(message) == "ab"
+
+
+def test_a_response_cut_off_in_its_only_tool_use_is_not_sent_empty() -> None:
+    message = calling("cut", stop_reason="max_tokens")
+    messages = build_messages("go", [make("model_call", 1, message=message)])
+    assert [m["role"] for m in messages] == ["user", "user"]
+    assert blocks(messages[-1]) == [{"type": "text", "text": CONTINUE}]

@@ -67,16 +67,21 @@ class RunState:
     last_event_at: datetime | None = None
 
 
+def content_blocks(message: JsonObject) -> list[JsonObject]:
+    """The blocks of a model response; none if it has no content list."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
 def tool_use_ids(message: JsonObject) -> list[str]:
     """The tool_use blocks of a model response that the driver must complete.
 
     When the response stopped on `max_tokens`, a final tool_use block is cut off
     mid-input: it is discarded and never run, so it is not counted.
     """
-    content = message.get("content")
-    blocks = (
-        [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-    )
+    blocks = content_blocks(message)
     if (
         message.get("stop_reason") == "max_tokens"
         and blocks

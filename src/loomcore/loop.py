@@ -25,6 +25,10 @@ class ConfigChangedError(Exception):
     """The configuration this process holds is not the one the run started with."""
 
 
+class RunIdTakenError(Exception):
+    """The `new_run_id` port returned an id the session file already uses."""
+
+
 class SpendLogMissingError(Exception):
     """The spend log's directory does not exist; a mistyped path would read as $0."""
 
@@ -53,7 +57,9 @@ class Driver:
 
     def run(self, task: Task) -> RunResult:
         with open_writer(self._session_path) as writer:
-            run = self._new_run(writer, self._ports.new_run_id(), task.limits, [], [])
+            _note_cut(writer)
+            taken = read_events(self._session_path).events
+            run = self._new_run(writer, self._fresh_id(taken), task.limits, [])
             started = run.emit(
                 "run_started",
                 task=task.prompt,
@@ -77,12 +83,13 @@ class Driver:
         self, origin: ForkOrigin, hint: str | None = None, limits: Limits | None = None
     ) -> RunResult:
         with open_writer(self._session_path) as writer:
+            _note_cut(writer)
             events = list(read_events(self._session_path).events)
             ensure_fork_point(events, origin)
             chain = run_events(events, origin.run_id, upto=origin.seq)
             self._check_digest(chain)
             run = self._new_run(
-                writer, self._ports.new_run_id(), limits_in_force(chain), events, chain
+                writer, self._fresh_id(events), limits_in_force(chain), chain
             )
             run.state = replay(chain)
             override = limits.to_json() if limits else None
@@ -96,7 +103,6 @@ class Driver:
         writer: EventWriter,
         run_id: str,
         limits: Limits,
-        events: list[Event],
         chain: list[Event],
     ) -> Run:
         ref = RunRef(self._session_path.stem, run_id)
@@ -108,7 +114,6 @@ class Driver:
             writer=writer,
             ref=ref,
             limits=limits,
-            events=events,
             chain=chain,
         )
 
@@ -117,10 +122,8 @@ class Driver:
             raise ResumeRefusedError(
                 f"{ref.session_id} is not the session in {self._session_path}"
             )
-        read = read_events(self._session_path)
-        if writer.cut_tail:
-            _LOG.warning("cut a torn final line of %d bytes", len(writer.cut_tail))
-        events = list(read.events)
+        _note_cut(writer)
+        events = list(read_events(self._session_path).events)
         chain = run_events(events, ref.run_id)
         if not chain:
             raise ResumeRefusedError(f"the session has no run {ref.run_id}")
@@ -130,10 +133,17 @@ class Driver:
             self._spend_path, chain, run_key(ref.session_id, ref.run_id)
         ):
             _LOG.warning("spend log line not counted: %r", line)
-        run = self._new_run(writer, ref.run_id, limits_in_force(chain), events, chain)
+        run = self._new_run(writer, ref.run_id, limits_in_force(chain), chain)
         run.state = replay(chain)
         run.next_seq = sum(1 for e in events if e.run_id == ref.run_id)
         return run
+
+    def _fresh_id(self, events: Sequence[Event]) -> str:
+        """A new run id; run ids are unique within the session file."""
+        run_id = self._ports.new_run_id()
+        if any(e.run_id == run_id for e in events):
+            raise RunIdTakenError(f"run id {run_id} is already in the session file")
+        return run_id
 
     def _check_digest(self, chain: Sequence[Event]) -> None:
         root = next(e for e in chain if isinstance(e, RunStarted))
@@ -142,3 +152,8 @@ class Driver:
                 "the configuration differs from the one this run started with; "
                 "rebuild the same system prompt and tool schemas"
             )
+
+
+def _note_cut(writer: EventWriter) -> None:
+    if writer.cut_tail:
+        _LOG.warning("cut a torn final line of %d bytes", len(writer.cut_tail))

@@ -12,7 +12,12 @@ from loomcore.engine import ResumeRefusedError
 from loomcore.eventlog import read_events
 from loomcore.events import ForkOrigin, JsonObject
 from loomcore.limits import Limits
-from loomcore.loop import ConfigChangedError, Driver, SpendLogMissingError
+from loomcore.loop import (
+    ConfigChangedError,
+    Driver,
+    RunIdTakenError,
+    SpendLogMissingError,
+)
 from loomcore.ports import Config, Decision, RunResult, Task
 from loomcore.rewind import ForkRefusedError
 from loomcore.spend import SpendLine, append_spend, read_spend
@@ -91,11 +96,11 @@ def test_the_other_ways_a_run_ends(
     assert (result.status, result.reason) == ("finished", reason)
 
 
-def test_pending_calls_are_completed_before_the_run_finishes(tmp_path: Path) -> None:
-    world = World(script=[failure(400)])
-    result = start(world, tmp_path)
-    assert result.reason == "error"
+def test_a_client_error_finishes_the_run_with_error(tmp_path: Path) -> None:
+    result = start(World(script=[failure(400)]), tmp_path)
+    assert (result.status, result.reason) == ("finished", "error")
     assert events(tmp_path)[-1] == "run_finished"
+    assert "turn_started" not in events(tmp_path)  # no response, no turn
 
 
 # --- f09: limits pause and resume ---------------------------------------------
@@ -178,6 +183,8 @@ def test_a_crash_asks_before_rerunning_a_tool_with_effects(tmp_path: Path) -> No
         driver.run(TASK)
     paused = driver.resume(run_ref())
     assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
+    assert paused.question is not None
+    assert "write (t1)" in paused.question
     assert world.tool_calls == []
     with pytest.raises(ResumeRefusedError, match="decision"):
         driver.resume(paused.ref)
@@ -351,4 +358,35 @@ def test_a_torn_final_line_is_cut_and_reported(
         file.write(b'{"torn":')
     with caplog.at_level(logging.WARNING):
         driver.resume(run_ref())
-    assert "torn" in caplog.text
+    assert "8 bytes" in caplog.text  # b'{"torn":' is what the crash left
+
+
+def test_a_retry_pause_leaves_no_turn_behind_and_resume_continues(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[failure(429, retry_after=3600), reply("fine")])
+    driver = world.driver(tmp_path)
+    paused = driver.run(Task("go", limits(timeout=60, max_turns=1)))
+    assert (paused.limit, "turn_started" in events(tmp_path)) == ("timeout", False)
+    done = driver.resume(paused.ref, limits=limits(timeout=7200, max_turns=1))
+    assert (done.status, done.result) == ("finished", "fine")
+    assert events(tmp_path).count("turn_started") == 1  # max_turns=1 was enough
+
+
+def test_a_new_run_id_the_session_already_uses_is_refused(tmp_path: Path) -> None:
+    start(World(script=[reply()]), tmp_path)
+    with pytest.raises(RunIdTakenError):
+        start(World(script=[reply()]), tmp_path)  # a fresh World hands out r1 again
+
+
+def test_run_reports_a_torn_line_another_run_left(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    start(World(script=[reply()]), tmp_path)
+    with (tmp_path / "s1.jsonl").open("ab") as file:
+        file.write(b'{"torn":')
+    world = World(script=[reply()])
+    world.ids = 1  # the next run is r2
+    with caplog.at_level(logging.WARNING):
+        world.driver(tmp_path).run(TASK)
+    assert "8 bytes" in caplog.text

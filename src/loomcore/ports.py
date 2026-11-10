@@ -108,4 +108,5 @@ class RunResult:
     status: Literal["finished", "paused"]
     reason: str  # the run_finished reason, or the run_paused reason
     limit: str | None = None  # which limit, when paused on one
+    question: str | None = None  # what the human is asked, when awaiting approval
     result: JsonValue = None

@@ -5,13 +5,11 @@ small local image, and are skipped without Docker (but fail in CI, so the sandbo
 never silently untested there).
 """
 
-import http.server
 import itertools
 import os
 import shutil
 import stat
 import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -32,6 +30,7 @@ from loomcore.sandbox import (
     Rules,
     SandboxUnavailableError,
     docker_args,
+    env_value_problem,
     evaluate,
     write_env_file,
 )
@@ -182,6 +181,7 @@ def test_the_command_line_isolates_the_container(root: Path) -> None:
         ("--security-opt", "no-new-privileges"),
         ("--pull", "never"),
         ("--user", "1000:1000"),
+        ("--ipc", "none"),
         ("--workdir", "/workspace"),
         ("--env-file", "/private/env"),
         ("--label", LABEL),
@@ -193,10 +193,11 @@ def test_the_command_line_isolates_the_container(root: Path) -> None:
 
 def test_nothing_that_widens_the_container_is_on_the_command_line(root: Path) -> None:
     args = args_for(root)
-    forbidden = {"--privileged", "--cap-add", "--pid", "--ipc", "--uts", "--device"}
+    forbidden = {"--privileged", "--cap-add", "--pid", "--uts", "--device"}
     forbidden |= {"--volume", "-v", "--volumes-from", "--net", "--userns"}
     assert not forbidden & set(args)
     assert ("--network", "host") not in pairs(args)
+    assert ("--ipc", "host") not in pairs(args)
     assert not any("docker.sock" in a or "unconfined" in a for a in args)
     assert ("--user", "0") not in pairs(args)
     assert ("--user", "root") not in pairs(args)
@@ -235,6 +236,25 @@ def test_every_resource_limit_is_on_the_command_line(root: Path) -> None:
     } <= pairs(args)
 
 
+@pytest.mark.parametrize(
+    "user", ["0:0", "0:1000", "1000:0", "root", "1000", "", "1000:1000:1", "-1:5"]
+)
+def test_a_user_that_is_root_or_malformed_is_refused(root: Path, user: str) -> None:
+    request = Request((SH,), root, frozenset())
+    launch = Launch("docker", "n", Path("/e"), user)
+    with pytest.raises(ValueError, match="non-root"):
+        docker_args(rules_for(root), request, ResourceLimits(), launch)
+
+
+@pytest.mark.parametrize("which", ["getuid", "getgid"])
+def test_a_sandbox_is_not_built_when_loomcore_runs_as_root(
+    root: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    monkeypatch.setattr(os, which, lambda: 0)
+    with pytest.raises(SandboxUnavailableError, match="root"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
 def test_an_image_that_could_be_taken_for_an_option_is_refused(root: Path) -> None:
     for bad in ("--privileged", "-v", "alpine --privileged", "", "a b"):
         with pytest.raises(ValueError, match="image reference"):
@@ -250,6 +270,31 @@ def test_a_path_that_cannot_be_mounted_safely_is_refused(tmp_path: Path) -> None
             DockerSandbox(
                 rules_for(tmp_path / name), on_refusal=lambda _: None, docker="true"
             )
+
+
+def test_a_tree_that_contains_the_docker_socket_cannot_be_mounted(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only mount does not stop a command connecting to a socket, and the
+    daemon is root on the host."""
+    sockets = tmp_path / "run"
+    sockets.mkdir()
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{sockets}/d.sock")
+    for tree in (sockets, tmp_path, Path("/"), Path.home(), Path("/var/run")):
+        with pytest.raises(ValueError, match="Docker socket"):
+            DockerSandbox(
+                rules_for(root, read=frozenset({tree})),
+                on_refusal=lambda _: None,
+                docker="true",
+            )
+    with pytest.raises(ValueError, match="Docker socket"):  # nor as the workspace
+        DockerSandbox(rules_for(Path.home()), on_refusal=lambda _: None, docker="true")
+
+
+def test_values_the_environment_file_cannot_hold_are_named() -> None:
+    assert env_value_problem("A", "fine value") is None
+    for bad in ("a\nb", "a\rb", "a\x00b", "\udcff", "x" * 70_000):
+        assert env_value_problem("A", bad) is not None, repr(bad)
 
 
 def test_the_environment_file_is_private_and_holds_the_variables(
@@ -395,32 +440,27 @@ def test_the_command_is_not_root_and_has_no_capabilities(root: Path) -> None:
     assert "NoNewPrivs:\t1" in status.stdout
 
 
-class _Counting(http.server.BaseHTTPRequestHandler):
-    hits = 0
+@needs_docker
+def test_the_command_has_no_network(root: Path) -> None:
+    """With networking on there is a default route and names resolve; here neither.
 
-    def do_GET(self) -> None:
-        type(self).hits += 1
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        return None
+    (The routing table is the reliable sign: the container's /sys/class/net lists
+    kernel tunnel devices even with no network, and a host-side server proves
+    nothing on Linux, where a bridged container cannot reach the host's loopback.)
+    """
+    watched = Watched(rules_for(root))
+    routes = watched.run(SH, "-c", "cat /proc/net/route", cwd=root)
+    assert len(routes.stdout.strip().splitlines()) == 1  # the header and no route
+    for url in ("http://example.com", "http://1.1.1.1", "http://127.0.0.1:9"):
+        reached = watched.run(SH, "-c", f"wget -q -T 2 -O- {url}", cwd=root)
+        assert reached.returncode != 0, url
 
 
 @needs_docker
-def test_the_command_has_no_network(root: Path) -> None:
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Counting)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    port = server.server_address[1]
-    try:
-        watched = Watched(rules_for(root))
-        for host in ("host.docker.internal", "127.0.0.1", "172.17.0.1"):
-            url = f"http://{host}:{port}/"
-            result = watched.run(SH, "-c", f"wget -q -T 2 -O- {url}", cwd=root)
-            assert result.returncode != 0, host
-    finally:
-        server.shutdown()
-    assert _Counting.hits == 0  # nothing reached the host
+def test_there_is_no_shared_memory_to_write_to(root: Path) -> None:
+    watched = Watched(rules_for(root))
+    result = watched.run(SH, "-c", "echo x > /dev/shm/x", cwd=root)
+    assert result.returncode != 0  # --ipc none: no /dev/shm at all
 
 
 @needs_docker
@@ -481,11 +521,14 @@ def test_an_unusable_working_directory_or_argument_is_a_logged_refusal(
 
 
 @needs_docker
-def test_a_value_the_environment_file_cannot_hold_is_refused(root: Path) -> None:
-    rules = rules_for(root, env=frozenset({"MULTI"}))
-    watched = Watched(rules, {"MULTI": "line one\nline two"})
-    with pytest.raises(CommandRefusedError, match="newline"):
-        watched.run(ENV, cwd=root, env=frozenset({"MULTI"}))
+@pytest.mark.parametrize("bad", ["line one\nline two", "ends with\r", "\udcff"])
+def test_a_value_the_environment_file_cannot_hold_is_refused(
+    root: Path, bad: str
+) -> None:
+    rules = rules_for(root, env=frozenset({"ODD"}))
+    watched = Watched(rules, {"ODD": bad})
+    with pytest.raises(CommandRefusedError, match="cannot be passed"):
+        watched.run(ENV, cwd=root, env=frozenset({"ODD"}))
     assert len(watched.refusals) == 1
 
 
@@ -511,6 +554,67 @@ def test_a_timeout_kills_the_container_and_leaves_none_behind(root: Path) -> Non
     assert result.returncode == 137
     assert time.monotonic() - started < 30
     assert leftover_containers() == ""  # its background child went with it
+
+
+@needs_docker
+def test_a_timeout_that_arrives_before_the_container_exists_still_ends_the_run(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`docker kill` misses a container Docker has not created yet. The removals
+    below are made to miss, as they would on a slow daemon; the run must keep trying
+    and end, not wait for the command to finish by itself (60 s)."""
+    real = DockerSandbox._remove
+    misses = {"left": 6}
+
+    def flaky(self: DockerSandbox, name: str) -> None:
+        if misses["left"] > 0:
+            misses["left"] -= 1
+            return
+        real(self, name)
+
+    monkeypatch.setattr(DockerSandbox, "_remove", flaky)
+    watched = Watched(rules_for(root))
+    started = time.monotonic()
+    result = watched.run(SLEEP, "60", cwd=root, limits=ResourceLimits(timeout=0.05))
+    assert result.timed_out
+    assert time.monotonic() - started < 30
+    assert leftover_containers() == ""
+
+
+@needs_docker
+def test_output_that_exceeds_the_cap_is_flagged_even_if_the_command_exits_first(
+    root: Path,
+) -> None:
+    watched = Watched(rules_for(root))
+    result = watched.run(
+        SH, "-c", "head -c 20000 /dev/zero | tr '\\0' a", cwd=root,
+        limits=ResourceLimits(timeout=60, max_output_bytes=5000),
+    )  # fmt: skip
+    assert result.returncode == 0  # it finished by itself
+    assert result.output_truncated
+    assert len(result.stdout) == 5000
+
+
+@needs_docker
+def test_the_output_cap_covers_stdout_and_stderr_together(root: Path) -> None:
+    watched = Watched(rules_for(root))
+    script = (
+        "head -c 4000 /dev/zero | tr '\\0' a; head -c 4000 /dev/zero | tr '\\0' b >&2"
+    )
+    result = watched.run(
+        SH, "-c", script, cwd=root,
+        limits=ResourceLimits(timeout=60, max_output_bytes=5000),
+    )  # fmt: skip
+    assert len(result.stdout) + len(result.stderr) == 5000
+    assert (len(result.stdout), len(result.stderr)) == (4000, 1000)
+    assert result.output_truncated
+
+
+@needs_docker
+def test_output_within_the_cap_is_not_flagged(root: Path) -> None:
+    watched = Watched(rules_for(root))
+    result = watched.run(ECHO, "hello", cwd=root)
+    assert (result.stdout, result.output_truncated) == ("hello\n", False)
 
 
 @needs_docker

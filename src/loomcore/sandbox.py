@@ -13,6 +13,7 @@ host kernel. Docker is the isolation: if the daemon or the image is missing the
 sandbox is not built, and nothing falls back to running on the host.
 """
 
+import contextlib
 import os
 import re
 import shutil
@@ -31,6 +32,10 @@ _NOT_RUNNABLE = 127  # the shell's code for a command that could not be started
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*\Z")  # never starts with "-"
 _POLL_SECONDS = 0.02
+_STOP_SECONDS = 20.0  # how long to keep removing a container before killing its CLI
+_DOCKER_CALL_SECONDS = 30.0
+_USER = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")  # uid:gid, neither root
+_ENV_LINE_BYTES = 60 * 1024  # Docker reads an env-file line of at most 64 KB
 
 
 @dataclass(frozen=True)
@@ -185,8 +190,10 @@ def docker_args(
     Nothing here is configurable by the caller of `run`: the isolation is fixed. The
     workspace is the only writable mount; extra trees are read-only; the root
     filesystem is read-only with a small `noexec` /tmp; there is no network, no
-    capability, no new privilege, and the user is not root.
+    capability, no new privilege, and the user is not root (`ValueError` otherwise).
     """
+    if not _USER.match(launch.user):
+        raise ValueError(f"{launch.user!r} is not a non-root uid:gid")
     cwd = request.cwd.relative_to(rules.root).as_posix()
     memory = str(limits.memory_bytes)
     args = [
@@ -194,6 +201,7 @@ def docker_args(
         "--name", launch.name, "--label", LABEL,
         "--network", "none",
         "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "--ipc", "none",  # no /dev/shm: the only writable places are listed below
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--user", launch.user,
         "--pids-limit", str(limits.pids),
@@ -211,12 +219,28 @@ def docker_args(
     return [*args, rules.image, *request.command]
 
 
+def env_value_problem(name: str, value: str) -> str | None:
+    """Why a value cannot go in an `--env-file`, or None. Docker reads one line per
+    variable: it would change a trailing carriage return and refuse a long line."""
+    if any(c in value for c in "\n\r\x00"):
+        return (
+            f"the value of {name} cannot be passed (a newline, carriage return or NUL)"
+        )
+    try:
+        line = f"{name}={value}".encode()
+    except UnicodeEncodeError:
+        return f"the value of {name} cannot be passed (it is not valid UTF-8)"
+    if len(line) > _ENV_LINE_BYTES:
+        return f"the value of {name} cannot be passed (it is too long)"
+    return None
+
+
 def write_env_file(directory: Path, env: Mapping[str, str]) -> Path:
     """The variables as an `--env-file`, readable by its owner only. They go in a file
     and never on a command line, where a process listing would show them."""
     path = directory / "env"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as file:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
         for name, value in env.items():
             file.write(f"{name}={value}\n")
     return path
@@ -241,6 +265,7 @@ class DockerSandbox:
         docker: str = "docker",
     ) -> None:
         self._rules = _checked(rules)
+        self._user = _non_root_user()
         self._docker = _find_docker(docker)
         self._check_image()
         self._environ = os.environ if environ is None else environ
@@ -269,20 +294,18 @@ class DockerSandbox:
             return ProcessResult(_NOT_RUNNABLE, "", reason, timed_out=False)
         env = {n: self._environ[n] for n in sorted(env_allow) if n in self._environ}
         for name, value in env.items():
-            if "\n" in value or "\x00" in value:
-                reason = f"the value of {name} cannot be passed (a newline or NUL)"
-                self._refuse(Refusal("exec", " ".join(command), reason))
+            if (problem := env_value_problem(name, value)) is not None:
+                self._refuse(Refusal("exec", " ".join(command), problem))
         return self._execute(request, env, limits)
 
     def _execute(
         self, request: Request, env: dict[str, str], limits: ResourceLimits
     ) -> ProcessResult:
         name = f"loomcore-{uuid.uuid4().hex}"
-        user = f"{os.getuid()}:{os.getgid()}"
         with tempfile.TemporaryDirectory(prefix="loomcore-env-") as private:
             Path(private).chmod(0o700)
             env_file = write_env_file(Path(private), env)
-            launch = Launch(self._docker, name, env_file, user)
+            launch = Launch(self._docker, name, env_file, self._user)
             args = docker_args(self._rules, request, limits, launch)
             return self._run_container(args, name, limits)
 
@@ -293,43 +316,54 @@ class DockerSandbox:
             process = subprocess.Popen(
                 args, stdin=subprocess.DEVNULL, stdout=out, stderr=err
             )
-            timed_out = truncated = False
+            timed_out = False
             started = time.monotonic()
             try:
                 while process.poll() is None:
                     timed_out = time.monotonic() - started > limits.timeout
-                    truncated = _size(out) + _size(err) > limits.max_output_bytes
-                    if timed_out or truncated:
-                        self._kill(name)
+                    over = _size(out) + _size(err) > limits.max_output_bytes
+                    if timed_out or over:
                         break
                     time.sleep(_POLL_SECONDS)
-                process.wait()
             finally:
-                self._remove(name)  # also if we were interrupted: no container is left
-                if process.poll() is None:
-                    process.kill()
-            cap = limits.max_output_bytes
-            return ProcessResult(
-                process.returncode,
-                _read(out, cap),
-                _read(err, cap),
-                timed_out,
-                truncated,
-            )
+                self._stop(name, process)  # also if we were interrupted
+            stdout, stderr, cut = _read_together(out, err, limits.max_output_bytes)
+            return ProcessResult(process.returncode, stdout, stderr, timed_out, cut)
 
-    def _kill(self, name: str) -> None:
-        subprocess.run([self._docker, "kill", name], capture_output=True, check=False)
+    def _stop(self, name: str, process: subprocess.Popen[bytes]) -> None:
+        """End the container and the docker client, leaving nothing behind.
+
+        `docker kill` only reaches a running container, and Docker takes a while to
+        start one, so a timeout can arrive first. `rm --force` kills a running
+        container and removes one that was created but never started, so it is
+        repeated until the client exits; the client is killed last, and the
+        container is removed once more in case it appeared as the client died.
+        """
+        deadline = time.monotonic() + _STOP_SECONDS
+        while process.poll() is None and time.monotonic() < deadline:
+            self._remove(name)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=_POLL_SECONDS * 10)
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        self._remove(name)
 
     def _remove(self, name: str) -> None:
-        subprocess.run(
-            [self._docker, "rm", "--force", name], capture_output=True, check=False
-        )
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            subprocess.run(
+                [self._docker, "rm", "--force", name],
+                capture_output=True,
+                check=False,
+                timeout=_DOCKER_CALL_SECONDS,
+            )
 
     def _check_image(self) -> None:
         probe = subprocess.run(
             [self._docker, "image", "inspect", self._rules.image],
             capture_output=True,
             check=False,
+            timeout=_DOCKER_CALL_SECONDS,
         )
         if probe.returncode != 0:
             raise SandboxUnavailableError(
@@ -352,11 +386,46 @@ def _checked(rules: Rules) -> Rules:
         root=rules.root.resolve(),
         read=frozenset(path.resolve() for path in rules.read),
     )
+    sockets = _docker_sockets()
     for path in (resolved.root, *resolved.read):
         text = str(path)
         if "," in text or "=" in text or not text.isprintable():
             raise ValueError(f"{text!r} cannot be mounted: no commas or equals signs")
+        if any(socket.is_relative_to(path) for socket in sockets):
+            raise ValueError(f"{text} contains the Docker socket and cannot be mounted")
     return resolved
+
+
+def _docker_sockets() -> list[Path]:
+    """Where the Docker daemon's socket may be. A read-only mount does not stop a
+    command from connecting to a socket, and the daemon is root on the host."""
+    home = Path.home()
+    found = [
+        Path("/var/run/docker.sock"),
+        Path("/run/docker.sock"),
+        home / ".docker" / "run" / "docker.sock",
+        home / ".docker" / "desktop" / "docker.sock",
+    ]
+    host = os.environ.get("DOCKER_HOST", "")
+    if host.startswith("unix://"):
+        found.append(Path(host.removeprefix("unix://")))
+    # Both where it really is and where a link to it sits: a tree holding the link
+    # is as unsafe as one holding the socket once the target is reachable too.
+    return [
+        form
+        for path in found
+        for form in (path.resolve(), path.parent.resolve() / path.name)
+    ]
+
+
+def _non_root_user() -> str:
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0 or gid == 0:
+        raise SandboxUnavailableError(
+            "loomcore is running as root, so the container's user would be root; "
+            "run it as an ordinary user"
+        )
+    return f"{uid}:{gid}"
 
 
 def _find_docker(docker: str) -> str:
@@ -370,6 +439,12 @@ def _size(file: IO[bytes]) -> int:
     return os.fstat(file.fileno()).st_size
 
 
-def _read(file: IO[bytes], cap: int) -> str:
-    file.seek(0)
-    return file.read(cap).decode(errors="replace")
+def _read_together(out: IO[bytes], err: IO[bytes], cap: int) -> tuple[str, str, bool]:
+    """stdout and stderr, at most `cap` bytes between them; stdout comes first. The
+    flag says that some output was dropped."""
+    out.seek(0)
+    err.seek(0)
+    first = out.read(cap)
+    second = err.read(max(cap - len(first), 0))
+    cut = _size(out) > len(first) or _size(err) > len(second)
+    return first.decode(errors="replace"), second.decode(errors="replace"), cut

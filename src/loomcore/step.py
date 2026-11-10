@@ -50,7 +50,7 @@ _AFTER_STOP: dict[str, Effect] = {
     "stop_sequence": Stop("end_turn"),
     "refusal": Stop("refused"),
     "pause_turn": CallModel(),  # send the response back
-    "max_tokens": CallModel(),  # continue once; f09 pauses on the second cut-off
+    "max_tokens": CallModel(),  # continue once; check_limits pauses the second
 }
 
 

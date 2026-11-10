@@ -5,7 +5,7 @@ an approval open, is the run paused or finished). The loop adds the rest.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import reduce
@@ -48,7 +48,7 @@ class RunState:
     turns: int = 0  # this run's turn_started events; a fork starts again at 0
     # Own model_call cost by UTC month ("2026-11"): a fork starts empty, because it
     # inherits its parent's events for context but not for spend.
-    spend_by_month: dict[str, Decimal] = field(default_factory=dict)
+    spend_by_month: tuple[tuple[str, Decimal], ...] = ()
     truncations: int = 0  # consecutive model_calls that stopped on max_tokens
     paused_limit: str | None = None  # the limit of the pause not yet resumed
     # Active time is the closed segments plus the open one (spec section 1, timeout).
@@ -83,7 +83,10 @@ def _is_tool_use(block: dict[str, JsonValue]) -> bool:
 
 
 def apply(state: RunState, event: Event) -> RunState:
-    """The next state. Total: an event that names an unknown id changes nothing."""
+    """The next state. An event that names an unknown id changes nothing.
+
+    Events are validated with aware timestamps, so `month_key` cannot raise here.
+    """
     state = replace(state, event_count=state.event_count + 1)
     state = _lifecycle(_tools_and_approvals(state, event), event)
     return _clock(_budget(state, event), event)
@@ -125,13 +128,15 @@ def _budget(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
             key = month_key(event.timestamp)
-            spend = {**state.spend_by_month}
+            spend = dict(state.spend_by_month)
             spend[key] = spend.get(key, Decimal(0)) + event.cost_usd
             cut_off = event.message.get("stop_reason") == "max_tokens"
             truncations = state.truncations + 1 if cut_off else 0
-            state = replace(state, spend_by_month=spend, truncations=truncations)
+            state = replace(
+                state, spend_by_month=tuple(spend.items()), truncations=truncations
+            )
         case RunForked():
-            state = replace(state, spend_by_month={}, truncations=0)
+            state = replace(state, spend_by_month=(), truncations=0)
         case RunPaused():
             state = replace(state, paused_limit=event.limit)
         case RunResumed():
@@ -152,15 +157,25 @@ def _clock(state: RunState, event: Event) -> RunState:
             state = replace(state, active=timedelta(0), segment_start=event.timestamp)
         case RunResumed():
             # The earlier segment ended at the last event before this gap.
-            closed = state.active + _open_segment(state)
+            closed = state.active + open_segment(state, state.last_event_at)
             state = replace(state, active=closed, segment_start=event.timestamp)
     return replace(state, last_event_at=event.timestamp)
 
 
-def _open_segment(state: RunState) -> timedelta:
-    if state.segment_start is None or state.last_event_at is None:
+def open_segment(state: RunState, end: datetime | None) -> timedelta:
+    """The open segment up to `end`; nothing if no segment has started."""
+    if state.segment_start is None or end is None:
         return timedelta(0)
-    return state.last_event_at - state.segment_start
+    return end - state.segment_start
+
+
+def spent(state: RunState) -> Decimal:
+    """This run's own spend over every month."""
+    return sum((usd for _, usd in state.spend_by_month), Decimal(0))
+
+
+def spent_in(state: RunState, month: str) -> Decimal:
+    return dict(state.spend_by_month).get(month, Decimal(0))
 
 
 def replay(events: Iterable[Event], initial: RunState | None = None) -> RunState:

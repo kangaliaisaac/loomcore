@@ -153,7 +153,8 @@ def test_the_state_counts_events_and_a_stopped_run_has_nothing_to_do(
         state, effects = step(state, event)
         if state.finished is not None or state.paused:
             assert effects == []
-    assert state == replay(log)
+    half = len(log) // 2  # step and replay share `apply`, so split the fold instead
+    assert state == replay(log[half:], replay(log[:half]))
     assert state.event_count == len(log)
 
 

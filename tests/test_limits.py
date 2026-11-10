@@ -10,12 +10,13 @@ from loomcore.events import Event, JsonObject
 from loomcore.limits import (
     LimitReached,
     Limits,
-    LimitsMissingError,
+    LimitsError,
     WithinLimits,
     check_limits,
+    elapsed,
     limits_in_force,
 )
-from loomcore.replay import RunState, replay, run_events
+from loomcore.replay import RunState, replay, run_events, spent
 
 CAPS: JsonObject = {"run_cap": None, "month_cap": None}
 NO_MONEY = Decimal(0)
@@ -181,7 +182,7 @@ def test_the_turn_count_and_spend_carry_over_a_resume() -> None:
     log.append(resumed(5, limits=limits(run_cap=1, max_turns=5).to_json()))
     state = replay(log)
     assert state.turns == 2
-    assert sum(state.spend_by_month.values()) == Decimal("0.4")
+    assert spent(state) == Decimal("0.4")
 
 
 def test_a_pause_waiting_for_approval_does_not_count_against_the_timeout() -> None:
@@ -238,7 +239,7 @@ def test_a_siblings_override_never_applies() -> None:
 
 
 def test_a_chain_with_no_limits_is_refused() -> None:
-    with pytest.raises(LimitsMissingError):
+    with pytest.raises(LimitsError):
         limits_in_force([make("turn_started", 0)])
 
 
@@ -255,3 +256,24 @@ def test_an_approval_resume_keeps_the_truncation_streak() -> None:
     log += [make("run_paused", 3, reason="awaiting_approval", resume_from=2)]
     log += [resumed(4, "approval")]
     assert check(log, limits()) == LimitReached("max_output_tokens")
+
+
+def test_limits_in_the_log_that_do_not_parse_are_named_by_their_seq() -> None:
+    bad = resumed(4, limits={"max_turns": 60})
+    with pytest.raises(LimitsError, match="seq 4"):
+        limits_in_force([started(), bad])
+
+
+def test_a_negative_cap_is_refused_and_zero_is_a_real_cap() -> None:
+    with pytest.raises(ValueError, match="run_cap"):
+        limits(run_cap=-1)
+    log = [started()]
+    assert check(log, limits(run_cap=0), worst_case="0.01") == LimitReached("run_cap")
+
+
+def test_a_paused_runs_idle_time_is_not_active_time() -> None:
+    log = [started(), make("run_paused", 30, reason="awaiting_approval", resume_from=0)]
+    assert check(log, limits(timeout=60), after=3600) == WithinLimits()
+    assert elapsed(replay(log), log[-1].timestamp + timedelta(hours=1)) == timedelta(
+        seconds=30
+    )

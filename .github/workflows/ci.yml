@@ -13,7 +13,8 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     env:
-      # One place for the digest the sandbox tests run in (tests/test_sandbox.py reads it).
+      # The image the sandbox tests run in. tests/test_sandbox.py defaults to the same digest
+      # for local runs: change both together.
       LOOMCORE_TEST_IMAGE: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
     steps:
       - uses: actions/checkout@v7

@@ -346,6 +346,17 @@ def test_a_docker_proxy_config_means_no_sandbox(
         DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
+def test_an_unreadable_docker_config_means_no_sandbox(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "dockercfg"
+    config.mkdir()
+    (config / "config.json").write_text("{not json")
+    monkeypatch.setenv("DOCKER_CONFIG", str(config))
+    with pytest.raises(SandboxUnavailableError, match="cannot read"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
 @needs_docker
 def test_without_the_image_there_is_no_sandbox(root: Path) -> None:
     with pytest.raises(SandboxUnavailableError, match="docker pull"):

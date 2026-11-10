@@ -377,8 +377,13 @@ class DockerSandbox:
         config = Path(os.environ.get("DOCKER_CONFIG", "~/.docker")).expanduser()
         try:
             data = json.loads((config / "config.json").read_text())
-        except OSError, ValueError:
+        except FileNotFoundError:
             return
+        except (OSError, ValueError) as error:  # present but unreadable: fail closed
+            raise SandboxUnavailableError(
+                f"cannot read {config / 'config.json'} to check it for "
+                f"`proxies`: {error}"
+            ) from error
         if isinstance(data, dict) and data.get("proxies"):
             raise SandboxUnavailableError(
                 f"{config / 'config.json'} sets `proxies`, which Docker would pass "

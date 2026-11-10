@@ -51,7 +51,6 @@ _AFTER_STOP: dict[str, Effect] = {
     "refusal": Stop("refused"),
     "pause_turn": CallModel(),  # send the response back
     "max_tokens": CallModel(),  # continue once; f09 pauses on the second cut-off
-    "tool_use": CallModel(),
 }
 
 
@@ -82,5 +81,7 @@ def _after_model_call(event: ModelCall) -> list[Effect]:
     if ids:
         return [RunTool(tool_use_id) for tool_use_id in ids]
     reason = event.message.get("stop_reason")
+    if reason == "tool_use":  # it says tools were called, and none can be run
+        return [Stop("error", "stop_reason tool_use with no tool call to run")]
     known = _AFTER_STOP.get(reason) if isinstance(reason, str) else None
     return [known or Stop("error", f"unknown stop_reason: {reason!r}")]

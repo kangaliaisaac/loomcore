@@ -63,18 +63,28 @@ def test_it_gives_up_after_max_attempts() -> None:
     assert "2 retries" in result.reason
 
 
+def test_retry_after_above_the_cap_is_honoured_not_capped() -> None:
+    policy = RetryPolicy(base=1.0, cap=8.0, max_attempts=5)
+    assert decide(0, http(429, retry_after=60.0), lambda: 0.1, policy) == Delay(60.0)
+
+
+def test_a_huge_attempt_number_is_capped_not_an_overflow() -> None:
+    policy = RetryPolicy(base=1.0, cap=8.0, max_attempts=10_000)
+    assert decide(5000, http(503), lambda: 1.0, policy) == Delay(8.0)
+
+
 @given(
-    attempt=st.integers(min_value=0, max_value=4),
+    attempt=st.integers(min_value=0, max_value=9),
     draw=st.floats(min_value=0.0, max_value=0.999),
     status=st.sampled_from([429, 500, 503, 529]),
 )
-def test_a_delay_never_exceeds_the_cap_without_retry_after(
+def test_a_delay_stays_under_both_the_cap_and_the_exponential_ceiling(
     attempt: int, draw: float, status: int
 ) -> None:
-    policy = RetryPolicy()
+    policy = RetryPolicy(base=1.0, cap=4.0, max_attempts=10)
     result = decide(attempt, http(status), lambda: draw, policy)
     assert isinstance(result, Delay)
-    assert 0.0 <= result.seconds <= policy.cap
+    assert 0.0 <= result.seconds <= min(policy.cap, policy.base * 2**attempt)
 
 
 def test_the_same_inputs_always_give_the_same_answer() -> None:

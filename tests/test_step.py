@@ -1,17 +1,20 @@
 """f07: `step` is a pure fold over the log that says what to do next."""
 
+import ast
 import builtins
+import io
 import socket
 import time
-from functools import reduce
+from pathlib import Path
 
 import pytest
 from factories import calling, make
 from hypothesis import given, settings
 from strategies import logs
 
+from loomcore import step as step_module
 from loomcore.events import Event
-from loomcore.replay import RunState, apply, replay, run_events
+from loomcore.replay import RunState, replay, run_events
 from loomcore.step import CallModel, Effect, RunTool, Stop, step
 
 
@@ -105,6 +108,11 @@ def test_a_fork_counts_its_own_turns_not_its_parents() -> None:
     assert replay(run_events([*parent, *fork], "r2")).turns == 1
 
 
+def test_a_tool_use_stop_with_no_tool_call_to_run_is_an_error() -> None:
+    effects = run(make("run_started"), model_call(1, "tool_use"))[1]
+    assert effects == [Stop("error", "stop_reason tool_use with no tool call to run")]
+
+
 def test_a_paused_or_finished_run_has_nothing_to_do() -> None:
     paused = [make("run_started"), make("run_paused", 1)]
     assert run(*paused)[1] == []
@@ -137,11 +145,33 @@ def test_turn_started_events_are_counted() -> None:
 
 @given(log=logs())
 @settings(max_examples=60, deadline=None)
-def test_stepping_the_log_gives_the_state_the_fold_gives(log: list[Event]) -> None:
+def test_the_state_counts_events_and_a_stopped_run_has_nothing_to_do(
+    log: list[Event],
+) -> None:
     state = RunState()
     for event in log:
-        state, _ = step(state, event)
-    assert state == replay(log) == reduce(apply, log, RunState())
+        state, effects = step(state, event)
+        if state.finished is not None or state.paused:
+            assert effects == []
+    assert state == replay(log)
+    assert state.event_count == len(log)
+
+
+def test_step_imports_nothing_that_touches_the_world() -> None:
+    tree = ast.parse(Path(step_module.__file__ or "").read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert imported <= {
+        "dataclasses",
+        "typing",
+        "pydantic",
+        "loomcore.events",
+        "loomcore.replay",
+    }
 
 
 @given(log=logs())
@@ -153,6 +183,8 @@ def test_step_does_no_io(log: list[Event]) -> None:
     with pytest.MonkeyPatch.context() as patch:
         for module, name in [
             (builtins, "open"),
+            (io, "open"),
+            (time, "monotonic"),
             (socket, "socket"),
             (time, "time"),
             (time, "sleep"),

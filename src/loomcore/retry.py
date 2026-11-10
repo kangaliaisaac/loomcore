@@ -12,6 +12,7 @@ Random = Callable[[], float]  # uniform in [0, 1)
 
 _RETRYABLE = frozenset({429, 529})  # rate limited, overloaded
 _SERVER_ERRORS = range(500, 600)
+_MAX_DOUBLINGS = 64  # 2.0 ** 1024 overflows; the cap binds long before this
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,8 @@ def decide(
         return GiveUp(f"not retryable: {_describe(error)}")
     if attempt >= policy.max_attempts:
         return GiveUp(f"gave up after {policy.max_attempts} retries")
-    jittered = random() * min(policy.cap, policy.base * 2**attempt)
+    ceiling = min(policy.cap, policy.base * 2.0 ** min(attempt, _MAX_DOUBLINGS))
+    jittered = random() * ceiling
     return Delay(max(jittered, error.retry_after or 0.0))
 
 

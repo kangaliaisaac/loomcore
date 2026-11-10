@@ -74,6 +74,23 @@ def docker() -> None:
 needs_docker = pytest.mark.usefixtures("docker")
 
 
+@pytest.fixture(autouse=True)
+def own_docker_config(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tests that do not start a container never read the developer's Docker config,
+    context or host; the ones that do need them to reach the daemon."""
+    if "docker" in request.fixturenames:
+        return
+    empty = tmp_path / "empty-docker-config"
+    empty.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(empty))
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     (tmp_path / "work").mkdir()
@@ -367,9 +384,11 @@ def test_a_docker_context_that_cannot_be_found_means_no_sandbox(
 def test_a_context_that_is_not_a_local_socket_is_not_in_the_way(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    home = docker_home(tmp_path, monkeypatch, '{"currentContext": "remote"}')
+    home = docker_home(tmp_path, monkeypatch, "{}")
+    without_context = _docker_sockets()
+    home.joinpath("config.json").write_text('{"currentContext": "remote"}')
     add_context(home, "remote", "ssh://me@elsewhere")
-    assert all(path.name != "elsewhere" for path in _docker_sockets())
+    assert _docker_sockets() == without_context  # nothing was added for it
 
 
 @pytest.mark.parametrize("config", ["[]", "{not json", '"text"'])
@@ -427,6 +446,15 @@ def test_an_argument_that_would_change_on_the_way_in_is_refused(
     assert evaluate(rules_for(root), ask((ECHO, "ünï"), root)) == Permit()
 
 
+@pytest.mark.parametrize("bad", ["\udc80", "\udcff", "\ud800"])
+def test_a_working_directory_that_would_change_on_the_way_in_is_refused(
+    root: Path, bad: str
+) -> None:
+    verdict = evaluate(rules_for(root), ask((ECHO,), root / bad))
+    assert isinstance(verdict, Refusal), repr(bad)
+    assert "working directory" in verdict.reason
+
+
 def test_values_the_environment_file_cannot_hold_are_named() -> None:
     assert env_value_problem("A", "fine value") is None
     for bad in ("a\nb", "a\rb", "a\x00b", "\udcff", "x" * 70_000):
@@ -459,17 +487,6 @@ def test_a_docker_proxy_config_means_no_sandbox(
     (config / "config.json").write_text('{"proxies": {"default": {"httpProxy": "x"}}}')
     monkeypatch.setenv("DOCKER_CONFIG", str(config))
     with pytest.raises(SandboxUnavailableError, match="proxies"):
-        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
-
-
-def test_an_unreadable_docker_config_means_no_sandbox(
-    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = tmp_path / "dockercfg"
-    config.mkdir()
-    (config / "config.json").write_text("{not json")
-    monkeypatch.setenv("DOCKER_CONFIG", str(config))
-    with pytest.raises(SandboxUnavailableError, match="cannot read"):
         DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
@@ -669,7 +686,7 @@ def test_the_command_runs_in_the_given_directory(root: Path) -> None:
 
 
 @needs_docker
-@pytest.mark.parametrize("bad", ["a\x00b", "\ud800"])
+@pytest.mark.parametrize("bad", ["a\x00b", "\ud800", "\udc80"])
 def test_an_unusable_working_directory_or_argument_is_a_logged_refusal(
     root: Path, bad: str
 ) -> None:

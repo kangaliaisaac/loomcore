@@ -103,26 +103,15 @@ class ProcessResult:
     output_truncated: bool = False
 
 
-def unusable(text: str) -> bool:
+def unusable(text: str, *, strict: bool = False) -> bool:
     """Text the operating system cannot take in a path or an argument: a NUL byte, or
     characters that cannot be encoded (a lone surrogate, which a model's JSON can
-    carry)."""
+    carry). `strict` also refuses the surrogate-escape range (U+DC80 to U+DCFF), which
+    the operating system takes as raw bytes but Docker's JSON turns into U+FFFD, so
+    what reaches the container would differ from what was asked, silently."""
     try:
-        os.fsencode(text)
+        text.encode("utf-8") if strict else os.fsencode(text)
     except ValueError:
-        return True
-    return "\x00" in text
-
-
-def unrepresentable(text: str) -> bool:
-    """Text that does not survive the trip to the container unchanged: a NUL byte, or
-    anything that is not strict UTF-8. `unusable` lets the surrogate-escape range
-    (U+DC80 to U+DCFF) through, since the operating system takes it as raw bytes, but
-    Docker's JSON would turn it into U+FFFD, so the command would get a different
-    argument and nobody would be told."""
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
         return True
     return "\x00" in text
 
@@ -143,7 +132,7 @@ def evaluate(rules: Rules, request: Request) -> Permit | Refusal:
 def _command_problem(rules: Rules, request: Request) -> str | None:
     if not request.command:
         return "there is no command to run"
-    if any(unrepresentable(part) for part in request.command):
+    if any(unusable(part, strict=True) for part in request.command):
         return "an argument contains a NUL byte or text that cannot be encoded"
     program = request.command[0]
     if not PurePath(program).is_absolute():
@@ -152,6 +141,8 @@ def _command_problem(rules: Rules, request: Request) -> str | None:
 
 
 def _cwd_problem(rules: Rules, request: Request) -> str | None:
+    if unusable(str(request.cwd), strict=True):
+        return "the working directory has a NUL byte or text that cannot be encoded"
     if not request.cwd.is_absolute() or not request.cwd.is_relative_to(rules.root):
         return f"the working directory {request.cwd} is outside the workspace"
     return None

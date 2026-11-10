@@ -232,7 +232,11 @@ def test_a_path_with_a_nul_byte_is_refused_and_logged(root: Path) -> None:
             action("a\x00b")
     with pytest.raises(PathRefusedError):
         watched.workspace.write("a\x00b", "x")
-    assert len(watched.refusals) == 3
+    before = watched.workspace.generation
+    with pytest.raises(PathRefusedError):
+        watched.workspace.delete("a\x00b")  # in the last component, not the parent
+    assert watched.workspace.generation == before
+    assert len(watched.refusals) == 4
     assert "cannot be resolved" in watched.refusals[0].reason
 
 
@@ -262,11 +266,13 @@ SEGMENTS = st.sampled_from(["..", ".", "a", "b", "link", "dirlink", "/", ""])
 OPERATIONS = st.sampled_from(["read", "write", "delete", "list"])
 
 
-def snapshot(directory: Path) -> dict[str, str]:
-    """Every file under `directory` with its content, and every directory."""
+def snapshot(directory: Path, skip: Path | None = None) -> dict[str, str]:
+    """Every file under `directory` with its content, and every directory; the
+    workspace root itself is skipped, since it is meant to change."""
     return {
         str(entry.relative_to(directory)): entry.read_text() if entry.is_file() else ""
         for entry in sorted(directory.rglob("*"))
+        if skip is None or not entry.is_relative_to(skip)
     }
 
 
@@ -283,7 +289,7 @@ def test_nothing_outside_the_root_is_read_or_changed(
     (outside / "g").write_text("other")
     (root / "link").symlink_to(outside / "f")
     (root / "dirlink").symlink_to(outside, target_is_directory=True)
-    before = snapshot(outside)
+    before = snapshot(base, skip=root)
     ws = FilesystemWorkspace(root)
     path = "/".join(parts)
     try:
@@ -297,4 +303,4 @@ def test_nothing_outside_the_root_is_read_or_changed(
             assert not {"f", "g"} & {Path(name).name for name in ws.list(path)}
     except PathRefusedError, OSError:
         pass  # refused, or an ordinary error such as a missing file
-    assert snapshot(outside) == before
+    assert snapshot(base, skip=root) == before

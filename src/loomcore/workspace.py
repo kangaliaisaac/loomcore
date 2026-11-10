@@ -123,8 +123,8 @@ class FilesystemWorkspace:
         """The entry `path` names, with its parent resolved and checked but the entry
         itself not followed, so a link can be removed even if it points outside."""
         name = Path(path).name
-        if name in ("", ".", ".."):
-            return self._resolve(action, path)
+        if name in ("", ".", "..") or "\x00" in path:
+            return self._resolve(action, path)  # resolve_inside refuses a NUL byte
         try:
             parent = resolve_inside(self._root, str(Path(path).parent))
         except PathRefusedError as error:

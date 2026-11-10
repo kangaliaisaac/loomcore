@@ -471,8 +471,11 @@ def test_a_crash_after_a_nudge_finishes_it_but_asks_first_about_risky_calls() ->
         RunTool("b"),
         RunTool("c"),
     ]
-    [ask] = crash(*log)  # "n" is not read-only: all three may have run
+    [ask] = crash(*log)  # "n" is not read-only; calls run in order, so only a may have
     assert isinstance(ask, AskHuman)
+    assert ask.tool_use_id == "a"
+    assert "n (a)" in ask.question
+    assert "(b)" not in ask.question
 
 
 def decided_log(granted: bool) -> list[Event]:
@@ -523,9 +526,14 @@ def test_a_grant_covers_the_whole_turn_even_after_the_asked_call_completed() -> 
     assert crash(*decided_turn(True, "a"), read_only=read_only) == [RunTool("b")]
 
 
-def test_a_denial_still_covers_the_next_call_after_one_was_failed() -> None:
-    why = "denied by me: no"
-    assert crash(*decided_turn(False, "a")) == [Fail("b", why)]
+def test_a_denial_does_not_fail_the_next_call_a_crash_interrupted() -> None:
+    """a was denied and failed, then b started and the process died: b was told to
+    run, so it gets the re-run question, not a denial it was never asked about."""
+    [ask] = crash(*decided_turn(False, "a"))
+    assert isinstance(ask, AskHuman)
+    assert (ask.tool_use_id, "write (b)" in ask.question) == ("b", True)
+    read_only = frozenset({"write"})
+    assert crash(*decided_turn(False, "a"), read_only=read_only) == [RunTool("b")]
 
 
 def after_crash(*log: Event) -> RunState:
@@ -608,3 +616,28 @@ def test_a_crash_after_the_stuck_completions_still_stops() -> None:
         make("tool_completed", 4, tool_use_id="a", ok=False),
     ]
     assert crash(*log) == [Stop("stuck")]
+
+
+def test_a_denial_after_a_crash_in_a_nudge_turn_keeps_the_others_notes() -> None:
+    log = [*judged(1, "a", "c")]
+    log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
+    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
+    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    state, _ = run(*log)
+    denied = make("approval_denied", 10, tool_use_id="a", by="me", note="no")
+    assert step(state, denied)[1] == [
+        Fail("a", "denied by me: no"),
+        RunTool("b"),
+        RunTool("c", ladder.NUDGE),
+    ]
+
+
+def test_a_grant_logged_before_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
+    log = [*judged(1, "a", "c")]
+    log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
+    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
+    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    log += [make("approval_granted", 10, tool_use_id="a", by="me", note="")]
+    log += [make("tool_completed", 11, tool_use_id="a")]
+    effects = crash(*log, read_only=frozenset({"n"}))  # b is the first pending call
+    assert effects == [RunTool("b"), RunTool("c", ladder.NUDGE)]

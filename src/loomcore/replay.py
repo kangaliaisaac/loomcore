@@ -52,7 +52,7 @@ class RunState:
     # A model_call that asked for no tool ends with (stop_reason,); until the next
     # model_call a crash resume reads it to know what that call asked for.
     ended_with: tuple[JsonValue, ...] | None = None
-    open_approvals: frozenset[str] = frozenset()
+    open_approvals: tuple[str, ...] = ()  # in the order they were asked
     paused: bool = False
     finished: str | None = None
     turns: int = 0  # this run's turn_started events; a fork starts again at 0
@@ -67,16 +67,21 @@ class RunState:
     last_event_at: datetime | None = None
 
 
+def content_blocks(message: JsonObject) -> list[JsonObject]:
+    """The blocks of a model response; none if it has no content list."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
 def tool_use_ids(message: JsonObject) -> list[str]:
     """The tool_use blocks of a model response that the driver must complete.
 
     When the response stopped on `max_tokens`, a final tool_use block is cut off
     mid-input: it is discarded and never run, so it is not counted.
     """
-    content = message.get("content")
-    blocks = (
-        [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-    )
+    blocks = content_blocks(message)
     if (
         message.get("stop_reason") == "max_tokens"
         and blocks
@@ -98,11 +103,11 @@ def apply(state: RunState, event: Event) -> RunState:
     Events are validated with aware timestamps, so `month_key` cannot raise here.
     """
     state = replace(state, event_count=state.event_count + 1)
-    state = _lifecycle(_tools_and_approvals(state, event), event)
+    state = _lifecycle(_approvals(_tools(state, event), event), event)
     return _clock(_budget(state, event), event)
 
 
-def _tools_and_approvals(state: RunState, event: Event) -> RunState:
+def _tools(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
             ids = tool_use_ids(event.message)
@@ -112,7 +117,9 @@ def _tools_and_approvals(state: RunState, event: Event) -> RunState:
             ended = None if ids else (event.message.get("stop_reason"),)
             state = replace(state, pending_tools=pending, ended_with=ended)
         case ToolRequested():
-            if event.tool_use_id not in dict(state.requested):
+            if event.tool_use_id in state.pending_tools and (
+                event.tool_use_id not in dict(state.requested)
+            ):
                 requested = (*state.requested, (event.tool_use_id, event.name))
                 state = replace(state, requested=requested)
         case ToolCompleted():
@@ -129,11 +136,18 @@ def _tools_and_approvals(state: RunState, event: Event) -> RunState:
             started = {i for i, _ in state.requested}
             found = tuple(i for i in state.pending_tools if i in started)
             state = replace(state, interrupted=found)
+    return state
+
+
+def _approvals(state: RunState, event: Event) -> RunState:
+    match event:
         case ApprovalRequested():
-            open_ = state.open_approvals | {event.tool_use_id}
-            state = replace(state, open_approvals=open_)
+            asked = event.tool_use_id
+            open_ = state.open_approvals
+            if asked not in open_:
+                state = replace(state, open_approvals=(*open_, asked))
         case ApprovalGranted() | ApprovalDenied():
-            open_ = state.open_approvals - {event.tool_use_id}
+            open_ = tuple(i for i in state.open_approvals if i != event.tool_use_id)
             state = replace(state, open_approvals=open_)
     return state
 
@@ -143,7 +157,8 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
         case TurnStarted():
             state = replace(state, turns=state.turns + 1)
         case RunForked():
-            state = replace(state, turns=0)
+            # A fork forgets how its parent's last call ended and what a crash found.
+            state = replace(state, turns=0, ended_with=None, interrupted=())
         case RunPaused():
             state = replace(state, paused=True)
         case RunResumed():
@@ -169,8 +184,6 @@ def _budget(state: RunState, event: Event) -> RunState:
                 state,
                 spend_by_month=(),
                 truncations=0,
-                ended_with=None,
-                interrupted=(),
             )
         case RunPaused():
             state = replace(state, paused_limit=event.limit)

@@ -27,7 +27,7 @@ def fork_point_problem(events: Iterable[Event], point: ForkOrigin) -> str | None
     elif state.pending_tools:
         problem = f"tool calls pending: {list(state.pending_tools)}"
     elif state.open_approvals:
-        problem = f"approvals open: {sorted(state.open_approvals)}"
+        problem = f"approvals open: {list(state.open_approvals)}"
     elif state.paused:
         problem = "the run is paused and has not been resumed"
     return problem

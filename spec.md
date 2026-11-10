@@ -46,7 +46,7 @@ def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]: ...
 ```
 
 1. `step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. 
-2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure. Given the same configuration, a new process can load the log and continue: the configuration (system prompt and tool schemas) is logged in `run_started` with its digest, and again, with its digest, on each switch-strategy `escalation`; `resume` checks two things and refuses to continue if either differs: the configuration the resuming process holds must match `run_started.config_digest` (for a fork, the root's), and the configuration it rebuilds from the latest switch must match that switch's `config_digest`. The latest configuration is this run's own latest switch, else the one in force on its parent chain at `from.seq`, else its root's `run_started`. Limits are logged beside the configuration but are not part of the digest, so they can be changed on resume.
+2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure (it counts the run's own `turn_started` events in `turns`, and a fork starts again at 0, and so does the `turn` its first `turn_started` carries: the fork's turns number from 1). Given the same configuration, a new process can load the log and continue: the configuration (system prompt and tool schemas) is logged in `run_started` with its digest, and again, with its digest, on each switch-strategy `escalation`; `resume` checks two things and refuses to continue if either differs: the configuration the resuming process holds must match `run_started.config_digest` (for a fork, the root's), and the configuration it rebuilds from the latest switch must match that switch's `config_digest`. The latest configuration is this run's own latest switch, else the one in force on its parent chain at `from.seq`, else its root's `run_started`. Limits are logged beside the configuration but are not part of the digest, so they can be changed on resume.
 
 ```python
 # Effect = CallModel | RunTool | AskHuman | Stop
@@ -92,7 +92,8 @@ Other model stop reasons are handled and logged:
 - `tool_use` continues the loop, 
 - `stop_sequence` is treated as `end_turn`, 
 - `max_tokens` (the model hit the request's output ceiling, `max_output_tokens`) continues once and then, if the next call is cut off too, pauses with the limit `max_output_tokens` (counted in `RunState.truncations`, below). To continue, the partial assistant turn is sent back with a short instruction to carry on; a `tool_use` block cut off mid-input (the last block of a response whose `stop_reason` is `max_tokens`, when that block is a `tool_use`) is discarded, never run, and the model is asked again, while complete `tool_use` blocks before it are run as normal (each with its `tool_requested` and one `tool_completed`) and their results go back with the instruction; the cut-off block is excluded from the rule that every `tool_use` gets a `tool_completed` and from the clean-fork-point rule, and 
-- `pause_turn` resumes by sending the response back.
+- `pause_turn` resumes by sending the response back, and
+- `tool_use` with no complete `tool_use` block to run, and any other or missing `stop_reason`, end the run with `error`, naming the value; a response with complete `tool_use` blocks runs them whatever its `stop_reason`.
 
 ### Limits
 
@@ -103,7 +104,7 @@ Turn, time and budget limits are part of the core, not extensions. `max_turns` a
 - **`worst_case`** prices the next call as its known input tokens plus `max_output_tokens` of output (the per-request ceiling that every `ModelRequest` carries, taken from `Limits`), at the request model's prices.
 - **`timeout`** counts active time, as a sum of segments. A segment starts at `run_started`, `run_forked` or `run_resumed` and ends at the last event before the next gap (a `run_paused`, or the end of the log after a crash); the open segment ends at `now` (the `Clock` port). A run waiting an hour for approval, or resumed hours after a crash, does not time out for the time it was down.
 
-**Retries** are a pure policy, `(attempt, error, random) → Delay | GiveUp`, with the random source passed in. 429 and 529, other 5xx, connection errors and timeouts get exponential backoff with full jitter (`random() * min(cap, base * 2**attempt)`) and honour `retry-after`; any other 4xx is never retried. Every model and tool call has a timeout. A tool timeout abandons the call: it is logged as failed with `timeout` and the loop moves on, but Python cannot kill a thread, so the call may keep running. A tool that writes must therefore run through the sandbox (a subprocess, killed on timeout) or accept a cancel event; a late write from an abandoned call still bumps the workspace generation counter, so the cache stays correct.
+**Retries** are a pure policy, `(attempt, error, random) → Delay | GiveUp`, with the random source passed in; the error is a `CallError` (kind `http`, `connection` or `timeout`, the status, `retry_after` seconds) so the policy knows no SDK type, and the defaults are a 0.5 s base, a 30 s cap and 5 retries after the first call. 429 and 529, other 5xx, connection errors and timeouts get exponential backoff with full jitter (`random() * min(cap, base * 2**attempt)`) and honour `retry-after` as a floor on the delay (it is not capped, so the driver checks the run's `timeout` before it sleeps); any other 4xx is never retried. Every model and tool call has a timeout. A tool timeout abandons the call: it is logged as failed with `timeout` and the loop moves on, but Python cannot kill a thread, so the call may keep running. A tool that writes must therefore run through the sandbox (a subprocess, killed on timeout) or accept a cancel event; a late write from an abandoned call still bumps the workspace generation counter, so the cache stays correct.
 
 **Two identifiers, two jobs.** A replay or a retry does not re-run a completed call: tool completions are matched by `tool_use_id`, and if the log already holds a `tool_completed` for it, the result is reused. Delivery is at-least-once. If the process dies after a tool runs but before its completion is appended, `resume` re-runs a tool registered `read_only=True`, and turns a call to any other tool, declared or not, into an `Ask` before running it again. A tool that does not say it is read-only is treated as one that has side effects. Separately, `call_hash` is `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()`, stored on `tool_requested`; it identifies a repeated call for the repeat detector and the cache. A deliberate repeat (running the tests again after an edit) is never refused at the nudge or switch rungs, but enough identical calls within `repeat_window` still reach the ask and stop rungs, because the detector cannot see that an edit came between them.
 
@@ -409,7 +410,9 @@ src/loomcore/
   snapshot.py    # snapshots
   rewind.py      # clean fork points
   spend.py       # spend log
-  loop.py        # step, Driver, ports, retry policy, limits, escalation
+  step.py        # step and its effects
+  retry.py       # retry policy
+  loop.py        # Driver, ports, limits, escalation
   tools.py       # registry
   sandbox.py     # sandbox and rule evaluation
   workspace.py   # filesystem workspace

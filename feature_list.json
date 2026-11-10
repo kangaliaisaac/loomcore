@@ -53,14 +53,14 @@
     "title": "RunState, apply and the pure step function",
     "spec": "1 The loop",
     "acceptance": "step does no I/O; state is a fold over the log",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f08",
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped (month_spend returns them with the total); the spend-log path it reads is logged, since a mistyped path reads as empty; a fork calls ensure_fork_point and then writes run_forked",
+    "acceptance": "a scripted fake model drives a run to finished; step covers a crash or approval resume and approval_granted/approval_denied, with AskHuman in Effect; the driver checks the timeout before a retry sleep; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped (month_spend returns them with the total); the spend-log path it reads is logged, since a mistyped path reads as empty; a fork calls ensure_fork_point and then writes run_forked",
     "passes": false
   },
   {
@@ -77,7 +77,7 @@
     "title": "Retries with backoff and jitter",
     "spec": "1 Retries",
     "acceptance": "the retry policy is pure; 4xx other than 429 is never retried; retry-after is honoured",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f11",

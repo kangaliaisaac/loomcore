@@ -17,7 +17,7 @@ Before any step: `./init.sh` syncs the environment, runs the gates and prints th
 |---|---|---|---|---|
 | 03 | Plan and repo setup (this step) | n/a | none | gates and CI run on an empty package; `plan.md` and `feature_list.json` exist |
 | 04 | The event log | section 2, Rewind in section 1 | f01 to f06 | a log can be written, read back after a torn write, replayed to the same state, and a fork point can be judged clean (writing `run_forked` is card 05); the spend log works |
-| 05 | The ReAct loop | section 1 | f07 to f11 | a scripted fake model drives a run to `finished`; limits pause and resume; the ladder and `finish` work; resume repairs the spend log under the session lock, surfaces skipped spend lines and the spend-log path, and writes `run_forked` after `ensure_fork_point` (carried from card 04, f08) |
+| 05 | The ReAct loop | section 1 | f07 to f11 | a scripted fake model drives a run to `finished` (`step` also covers crash and approval resumes and `AskHuman`); limits pause and resume; the ladder and `finish` work; resume repairs the spend log under the session lock, surfaces skipped spend lines and the spend-log path, and writes `run_forked` after `ensure_fork_point` (carried from card 04, f08) |
 | 06 | Sandbox boundary and filesystem workspace | 3.3, 3.4 | f12, f13 | a secret in the parent never reaches the child; every escape is refused |
 | 07 | Tool registry | 3.2 | f14, f15 | typed functions become tools; conflicting calls run in order; timeouts and the cache behave |
 | 08 | Context store and system-prompt builder | 3.5, 3.1, plan tool | f16 to f18 | packing and compaction respect the budget; prompts are byte-stable |

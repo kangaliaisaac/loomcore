@@ -22,6 +22,7 @@ from loomcore.events import (
     RunPaused,
     RunResumed,
     ToolCompleted,
+    TurnStarted,
 )
 
 
@@ -40,6 +41,7 @@ class RunState:
     open_approvals: frozenset[str] = frozenset()
     paused: bool = False
     finished: str | None = None
+    turns: int = 0  # this run's turn_started events; a fork starts again at 0
 
 
 def tool_use_ids(message: JsonObject) -> list[str]:
@@ -70,6 +72,10 @@ def _is_tool_use(block: dict[str, JsonValue]) -> bool:
 def apply(state: RunState, event: Event) -> RunState:
     """The next state. Total: an event that names an unknown id changes nothing."""
     state = replace(state, event_count=state.event_count + 1)
+    return _lifecycle(_tools_and_approvals(state, event), event)
+
+
+def _tools_and_approvals(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
             pending = state.pending_tools | set(tool_use_ids(event.message))
@@ -83,6 +89,15 @@ def apply(state: RunState, event: Event) -> RunState:
         case ApprovalGranted() | ApprovalDenied():
             open_ = state.open_approvals - {event.tool_use_id}
             state = replace(state, open_approvals=open_)
+    return state
+
+
+def _lifecycle(state: RunState, event: Event) -> RunState:
+    match event:
+        case TurnStarted():
+            state = replace(state, turns=state.turns + 1)
+        case RunForked():
+            state = replace(state, turns=0)
         case RunPaused():
             state = replace(state, paused=True)
         case RunResumed():

@@ -20,6 +20,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from loomcore.dockerenv import SandboxUnavailableError
 from loomcore.sandbox import (
     LABEL,
     CommandRefusedError,
@@ -31,7 +32,6 @@ from loomcore.sandbox import (
     Request,
     ResourceLimits,
     Rules,
-    SandboxUnavailableError,
     docker_args,
     env_value_problem,
     evaluate,

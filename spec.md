@@ -318,6 +318,8 @@ def evaluate(rules: Rules, request: Request) -> Permit | Refusal: ...   # pure; 
 def docker_args(rules, request, limits, launch) -> list[str]: ...      # pure; the one `docker run` command line
 ```
 
+The checks on the Docker client's own setup (config, context, `DOCKER_HOST`, proxies) live in `dockerenv.py`; `SandboxUnavailableError` is defined there.
+
 Deny by default, and every command runs in its own Docker container. On macOS Docker Desktop runs the container inside a Linux virtual machine, so the command sits behind a hypervisor as well as the container; on Linux it shares the host kernel. There is no fallback: if the Docker executable, the daemon or the image is missing, `DockerSandbox` is not built (`SandboxUnavailableError`), and a sandbox never pulls an image on its own (`--pull never`), so what runs is what the owner pulled.
 
 `Rules(root, image, commands, env, read)` says what is allowed. `commands` are absolute paths of executables *inside the image* (a bare name is refused, because searching a path would make the answer depend on the environment); `root` is the workspace (the working directory must resolve inside it); `env` is the ceiling on the variables a call may ask for; `read` are extra host trees mounted read-only. `Request(command, cwd, env_allow)` is checked in that order and the first rule that fails is the `Refusal`'s reason; the command is compared as written, so `/bin/ls/../rm` is not `/bin/rm`. An argument or working directory with a NUL byte or text that cannot be encoded, and a variable name that is not a name, are refusals too.
@@ -457,6 +459,7 @@ src/loomcore/
   finish.py      # the typed finish tool
   tools.py       # registry
   sandbox.py     # sandbox and rule evaluation
+  dockerenv.py   # what the Docker client is set up to do: its socket, its proxies
   workspace.py   # filesystem workspace
   context.py     # pack, compaction, formatter
   prompt.py      # system-prompt builder

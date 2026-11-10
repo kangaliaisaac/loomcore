@@ -39,8 +39,9 @@ def test_tool_calls_are_pending_until_completed() -> None:
 
 
 def test_a_completion_for_an_unknown_call_changes_nothing_but_the_count() -> None:
-    state = apply(RunState(), make("tool_completed", tool_use_id="ghost"))
-    assert state == RunState(event_count=1)
+    ghost = make("tool_completed", tool_use_id="ghost")
+    state = apply(RunState(), ghost)
+    assert state == RunState(event_count=1, last_event_at=ghost.timestamp)
 
 
 def test_a_tool_use_cut_off_by_max_tokens_is_never_pending() -> None:

@@ -69,7 +69,7 @@
     "title": "Limits: check_limits, pauses and resume with limits",
     "spec": "1 Limits",
     "acceptance": "each of max_turns, timeout, run_cap, month_cap and max_output_tokens pauses with its name; resume with limits continues; counts carry over",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f10",

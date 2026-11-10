@@ -5,7 +5,9 @@ an approval open, is the run paused or finished). The loop adds the rest.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from functools import reduce
 
 from pydantic import JsonValue
@@ -21,6 +23,7 @@ from loomcore.events import (
     RunForked,
     RunPaused,
     RunResumed,
+    RunStarted,
     ToolCompleted,
     TurnStarted,
 )
@@ -42,6 +45,15 @@ class RunState:
     paused: bool = False
     finished: str | None = None
     turns: int = 0  # this run's turn_started events; a fork starts again at 0
+    # Own model_call cost by UTC month ("2026-11"): a fork starts empty, because it
+    # inherits its parent's events for context but not for spend.
+    spend_by_month: dict[str, Decimal] = field(default_factory=dict)
+    truncations: int = 0  # consecutive model_calls that stopped on max_tokens
+    paused_limit: str | None = None  # the limit of the pause not yet resumed
+    # Active time is the closed segments plus the open one (spec section 1, timeout).
+    active: timedelta = timedelta(0)
+    segment_start: datetime | None = None
+    last_event_at: datetime | None = None
 
 
 def tool_use_ids(message: JsonObject) -> list[str]:
@@ -72,7 +84,15 @@ def _is_tool_use(block: dict[str, JsonValue]) -> bool:
 def apply(state: RunState, event: Event) -> RunState:
     """The next state. Total: an event that names an unknown id changes nothing."""
     state = replace(state, event_count=state.event_count + 1)
-    return _lifecycle(_tools_and_approvals(state, event), event)
+    state = _lifecycle(_tools_and_approvals(state, event), event)
+    return _clock(_budget(state, event), event)
+
+
+def month_key(moment: datetime) -> str:
+    """The UTC month of `moment`, like "2026-11"."""
+    if moment.tzinfo is None:
+        raise ValueError("moment must be timezone-aware: months are judged in UTC")
+    return f"{moment.astimezone(UTC):%Y-%m}"
 
 
 def _tools_and_approvals(state: RunState, event: Event) -> RunState:
@@ -105,6 +125,48 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
         case RunFinished():
             state = replace(state, finished=event.reason)
     return state
+
+
+def _budget(state: RunState, event: Event) -> RunState:
+    match event:
+        case ModelCall():
+            key = month_key(event.timestamp)
+            spend = {**state.spend_by_month}
+            spend[key] = spend.get(key, Decimal(0)) + event.cost_usd
+            cut_off = event.message.get("stop_reason") == "max_tokens"
+            truncations = state.truncations + 1 if cut_off else 0
+            state = replace(state, spend_by_month=spend, truncations=truncations)
+        case RunForked():
+            state = replace(state, spend_by_month={}, truncations=0)
+        case RunPaused():
+            state = replace(state, paused_limit=event.limit)
+        case RunResumed():
+            # Fresh attempts only when the pause was for truncation: a crash or an
+            # approval resume keeps the streak.
+            fresh = state.paused_limit == "max_output_tokens"
+            state = replace(
+                state,
+                paused_limit=None,
+                truncations=0 if fresh else state.truncations,
+            )
+    return state
+
+
+def _clock(state: RunState, event: Event) -> RunState:
+    match event:
+        case RunStarted() | RunForked():
+            state = replace(state, active=timedelta(0), segment_start=event.timestamp)
+        case RunResumed():
+            # The earlier segment ended at the last event before this gap.
+            closed = state.active + _open_segment(state)
+            state = replace(state, active=closed, segment_start=event.timestamp)
+    return replace(state, last_event_at=event.timestamp)
+
+
+def _open_segment(state: RunState) -> timedelta:
+    if state.segment_start is None or state.last_event_at is None:
+        return timedelta(0)
+    return state.last_event_at - state.segment_start
 
 
 def replay(events: Iterable[Event], initial: RunState | None = None) -> RunState:

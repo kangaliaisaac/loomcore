@@ -328,7 +328,7 @@ class Run:
             for e in reversed(self.chain)
             if isinstance(e, ApprovalRequested) and e.tool_use_id == tool_use_id
         )
-        return f"{logged} ({extra})" if extra else logged
+        return f"{logged} ({extra})" if extra and extra not in logged else logged
 
     def _pause(
         self, reason: str, limit: str | None, question: str | None = None

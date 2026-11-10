@@ -312,14 +312,14 @@ def test_a_denial_without_a_crash_fails_only_the_call_asked_about() -> None:
     ]
 
 
-def test_after_a_crash_a_denial_fails_every_interrupted_call_with_effects() -> None:
+def test_after_a_crash_a_denial_fails_the_asked_call_and_runs_the_rest() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
     log += [requested(2, "a", "write"), requested(3, "b", "search")]
     log += [requested(4, "c", "write"), asked(5)]
     state = paused_for_approval(*log, reason="crash")
-    assert state.interrupted == ("a", "b", "c")
+    assert state.interrupted == ("a",)  # calls run one at a time: only a can have run
     why = "denied by me: no"
-    assert denial(state, 9) == [Fail("a", why), Fail("c", why), RunTool("b")]
+    assert denial(state, 9) == [Fail("a", why), RunTool("b"), RunTool("c")]
 
 
 def test_a_call_that_completes_is_no_longer_interrupted() -> None:
@@ -342,23 +342,23 @@ def test_a_crash_right_after_a_fork_from_a_final_answer_calls_the_model() -> Non
     assert step(state, resumed)[1] == [CallModel()]
 
 
-def test_the_crash_question_names_every_interrupted_call_with_effects() -> None:
+def test_the_crash_question_names_the_interrupted_call_only() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
     log += [requested(2, "a", "write"), requested(3, "b", "search")]
     log += [requested(4, "c", "delete")]
     [ask] = crash(*log, read_only=frozenset({"search"}))
     assert isinstance(ask, AskHuman)
     assert "write (a)" in ask.question
-    assert "delete (c)" in ask.question
+    assert "delete" not in ask.question  # c was never started
     assert "search" not in ask.question
 
 
 def test_an_open_approval_does_not_hide_an_interrupted_call_from_the_question() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "c")]
-    log += [requested(2, "c", "write"), asked(3, "a")]
+    log += [requested(2, "a", "write"), requested(3, "c", "write"), asked(4, "a")]
     [ask] = crash(*log)
     assert isinstance(ask, AskHuman)
-    assert (ask.tool_use_id, "write (c)" in ask.question) == ("a", True)
+    assert (ask.tool_use_id, "write (a)" in ask.question) == ("a", True)
 
 
 def test_a_tool_requested_for_a_call_nobody_asked_for_changes_nothing() -> None:
@@ -501,40 +501,14 @@ def test_a_grant_does_not_license_re_running_a_call_that_may_have_written() -> N
 
 def test_a_denial_logged_before_a_crash_is_settled_not_asked_again() -> None:
     why = "denied by me: no"
-    assert crash(*decided_log(False)) == [Fail("a", why), Fail("b", why)]
-
-
-def test_a_crash_after_a_finish_call_ends_the_run_and_does_not_run_anything() -> None:
-    log = [make("run_started"), finish_call(1, "a")]
-    assert crash(*log) == [Stop("finished", 42, "f")]
-    partly = [*log, make("tool_completed", 2, tool_use_id="f")]
-    assert crash(*partly) == [Stop("finished", 42, "f")]  # a is still pending
-
-
-def test_a_crash_after_every_call_was_settled_still_writes_the_ending() -> None:
-    log = [make("run_started"), finish_call(1)]
-    log.append(make("tool_completed", 2, tool_use_id="f"))
-    assert crash(*log) == [Stop("finished", 42, "f")]
-
-
-def test_a_crash_after_the_stuck_completions_still_stops() -> None:
-    log = [make("run_started"), model_call(1, "tool_use", "a"), escalation(2, 4, "a")]
-    log += [
-        requested(3, "a", "n"),
-        make("tool_completed", 4, tool_use_id="a", ok=False),
-    ]
-    assert crash(*log) == [Stop("stuck")]
+    assert crash(*decided_log(False)) == [Fail("a", why), RunTool("b")]
 
 
 def decided_turn(granted: bool, *completed: str) -> list[Event]:
     """An ask about `a` in the turn [a, b], answered, with some calls completed."""
     log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
-    log += [
-        escalation(2, 3, "a"),
-        requested(3, "a", "write"),
-        requested(4, "b", "write"),
-    ]
-    log += [asked(5, "a")]
+    log += [escalation(2, 3, "a"), requested(3, "a", "write")]
+    log += [requested(4, "b", "write"), asked(5, "a")]
     log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
     log += [make("run_resumed", 7, reason="approval", resume_from=5)]
     kind = "approval_granted" if granted else "approval_denied"
@@ -549,22 +523,55 @@ def test_a_grant_covers_the_whole_turn_even_after_the_asked_call_completed() -> 
     assert crash(*decided_turn(True, "a"), read_only=read_only) == [RunTool("b")]
 
 
-def test_a_denial_covers_every_interrupted_call_even_after_one_was_failed() -> None:
+def test_a_denial_still_covers_the_next_call_after_one_was_failed() -> None:
     why = "denied by me: no"
     assert crash(*decided_turn(False, "a")) == [Fail("b", why)]
 
 
-def test_after_a_crash_every_requested_pending_call_counts_as_interrupted() -> None:
-    """A known limit, pinned so that narrowing it later is a visible change.
+def after_crash(*log: Event) -> RunState:
+    state = RunState()
+    for event in [*log, make("run_resumed", len(log), reason="crash")]:
+        state, _ = step(state, event)
+    return state
 
-    A turn's `tool_requested` lines are written together, so a crash marks calls
-    that cannot have started: calls run one at a time, and under an ask rung none
-    has run. Only the first requested-and-not-completed call can have started.
-    """
+
+def test_after_a_crash_only_the_first_pending_call_counts_as_interrupted() -> None:
+    """Calls run one at a time, in order, so no later call can have started."""
     log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
     log += [requested(2, "a", "write"), requested(3, "b", "write")]
     log += [requested(4, "c", "write")]
-    state = RunState()
-    for event in [*log, make("run_resumed", 5, reason="crash")]:
-        state, _ = step(state, event)
-    assert state.interrupted == ("a", "b", "c")  # narrowed to ("a",) in card 06
+    assert after_crash(*log).interrupted == ("a",)
+    log.append(make("tool_completed", 5, tool_use_id="a"))
+    assert after_crash(*log).interrupted == ("b",)
+
+
+def test_no_call_can_have_started_while_a_line_is_missing() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log.append(requested(2, "a", "write"))  # b's line was never written
+    assert after_crash(*log).interrupted == ()
+
+
+def test_no_call_can_have_started_while_the_ladder_holds_the_turn() -> None:
+    assert after_crash(*judged(3, "a")).interrupted == ()  # asked, not answered
+    assert after_crash(*judged(4, "a")).interrupted == ()  # stuck: none will run
+    assert after_crash(*decided_turn(True)).interrupted == ("a",)  # answered
+
+
+def test_a_denial_after_a_crash_in_an_ask_turn_fails_only_the_asked_call() -> None:
+    log = [*judged(3, "a"), asked(6, "a")]  # crashed before run_paused
+    state = paused_for_approval(*log, reason="crash")
+    assert state.interrupted == ()
+    why = "denied by me: no"
+    assert denial(state, 9) == [Fail("a", why), RunTool("b"), RunTool("c")]
+
+
+def test_a_grant_after_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
+    log = [*judged(1, "a", "c")]
+    log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
+    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
+    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    state, _ = run(*log)
+    granted = make("approval_granted", 10, tool_use_id="a")
+    effects = step(state, granted)[1]
+    note = ladder.NUDGE
+    assert effects == [RunTool("a", note), RunTool("b"), RunTool("c", note)]

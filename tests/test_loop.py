@@ -598,3 +598,38 @@ def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
         e.tool_use_id: ladder.NUDGE in str(e.content) for e in completions(tmp_path)
     }
     assert nudged == {"a": False, "b": True}
+
+
+def test_an_open_approval_question_is_not_repeated_after_a_crash(
+    tmp_path: Path,
+) -> None:
+    """The crash came after approval_requested and before run_paused."""
+    args: JsonObject = {"q": "a"}
+    asked = "run again?; may have run before the crash: write (a)"
+    log = [
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=limits().to_json(),
+            config_digest=CONFIG.digest(),
+        ),
+        make("turn_started", 1, turn=1),
+        make("model_call", 2, message=use(("a", "write"))),
+        make(
+            "tool_requested",
+            3,
+            tool_use_id="a",
+            name="write",
+            input=args,
+            call_hash=call_hash("write", args),
+        ),
+        make("approval_requested", 4, tool_use_id="a", question=asked),
+    ]
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log:
+            writer.append(event)
+    paused = World(script=[]).driver(tmp_path).resume(run_ref())
+    assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
+    assert paused.question == asked  # not "... (may have run before the crash: ...)"

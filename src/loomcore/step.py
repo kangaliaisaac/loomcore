@@ -120,7 +120,7 @@ def _after_tool_event(
             # The escalation, if any, was written first, so the turn is judged.
             effects = _proceed(state, read_only)
         case ApprovalGranted() if event.tool_use_id in old.open_approvals:
-            effects = [RunTool(i) for i in state.pending_tools]
+            effects = _run_pending(state)
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
             reason = {i: r for i, _, r in state.decided}[event.tool_use_id]
             effects = _deny(state, event.tool_use_id, reason, read_only)
@@ -236,6 +236,15 @@ def _after_decision(
     # already written again": that one is asked unless the tool is read-only.
     if _interrupted_risky(state, read_only):
         return _settle(state, read_only)
+    return _run_pending(state)
+
+
+def _run_pending(state: RunState) -> list[Effect]:
+    """Run the turn's calls once a human has answered; a nudge or a switch rung
+    still adds its note to the calls that tripped (an ask rung adds none)."""
+    rung = state.escalated[0] if state.escalated else 0
+    if rung in (ladder.NUDGE_RUNG, ladder.SWITCH_RUNG):
+        return _ladder(state)
     return [RunTool(i) for i in state.pending_tools]
 
 

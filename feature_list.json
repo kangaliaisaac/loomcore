@@ -108,7 +108,7 @@
     "card": "07",
     "title": "Tool registry: schemas from type hints, execute",
     "spec": "3.2",
-    "acceptance": "schemas for nested types; invalid input gives a useful ok=false result; the registry passes the workspace to tools and turns the workspace's on_refusal and on_note callbacks and the sandbox's on_refusal into sandbox_denied and note_written events carrying the tool_use_id",
+    "acceptance": "schemas for nested types; invalid input gives a useful ok=false result; the registry passes the workspace to tools and hands out on_refusal and on_note for the workspace and the sandbox and turns them into sandbox_denied and note_written events (execute takes the tool_use_id and holds it in a ContextVar) carrying the tool_use_id",
     "passes": false
   },
   {

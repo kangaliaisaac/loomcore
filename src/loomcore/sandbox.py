@@ -14,6 +14,7 @@ sandbox is not built, and nothing falls back to running on the host.
 """
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,7 @@ _IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*\Z")  # never starts with "-"
 _POLL_SECONDS = 0.02
 _STOP_SECONDS = 20.0  # how long to keep removing a container before killing its CLI
 _DOCKER_CALL_SECONDS = 30.0
+_HOST_ONLY = (Path("/proc"), Path("/sys"), Path("/dev"))  # never mounted from the host
 _KILLED = 137
 _USER = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")  # uid:gid, neither root
 _ENV_LINE_BYTES = 60 * 1024  # Docker reads an env-file line of at most 64 KB
@@ -90,7 +92,8 @@ class ResourceLimits:
 @dataclass(frozen=True)
 class ProcessResult:
     """`returncode` is the command's, as Docker reports it: 137 after a kill (the
-    timeout or the memory limit), 127 when the command could not be started, 125
+    timeout, the output cap or the memory limit; the first two always, however the
+    docker client ended), 127 when the command could not be started, 125
     when Docker itself failed."""
 
     returncode: int
@@ -111,6 +114,19 @@ def unusable(text: str) -> bool:
     return "\x00" in text
 
 
+def unrepresentable(text: str) -> bool:
+    """Text that does not survive the trip to the container unchanged: a NUL byte, or
+    anything that is not strict UTF-8. `unusable` lets the surrogate-escape range
+    (U+DC80 to U+DCFF) through, since the operating system takes it as raw bytes, but
+    Docker's JSON would turn it into U+FFFD, so the command would get a different
+    argument and nobody would be told."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return "\x00" in text
+
+
 def evaluate(rules: Rules, request: Request) -> Permit | Refusal:
     """Permit a request only if every rule holds; the first that fails is the reason."""
     target = " ".join(request.command)
@@ -127,7 +143,7 @@ def evaluate(rules: Rules, request: Request) -> Permit | Refusal:
 def _command_problem(rules: Rules, request: Request) -> str | None:
     if not request.command:
         return "there is no command to run"
-    if any(unusable(part) for part in request.command):
+    if any(unrepresentable(part) for part in request.command):
         return "an argument contains a NUL byte or text that cannot be encoded"
     program = request.command[0]
     if not PurePath(program).is_absolute():
@@ -327,18 +343,20 @@ class DockerSandbox:
             )
             timed_out = False
             started = time.monotonic()
+            ended_by_us = False
             try:
                 while process.poll() is None:
                     timed_out = time.monotonic() - started > limits.timeout
                     over = _size(out) + _size(err) > limits.max_output_bytes
                     if timed_out or over:
+                        ended_by_us = True
                         break
                     time.sleep(_POLL_SECONDS)
             finally:
                 self._stop(name, process)  # also if we were interrupted
             stdout, stderr, cut = _read_together(out, err, limits.max_output_bytes)
             code = process.returncode
-            if code < 0:  # the docker client itself was killed: report it as a kill
+            if ended_by_us or code < 0:  # a kill is a kill, however the client died
                 code = _KILLED
             return ProcessResult(code, stdout, stderr, timed_out, cut)
 
@@ -374,21 +392,12 @@ class DockerSandbox:
         """The Docker CLI adds `proxies` from its config to every container it
         creates, which would put variables nobody allow-listed in the command's
         environment (often with credentials)."""
-        config = Path(os.environ.get("DOCKER_CONFIG", "~/.docker")).expanduser()
-        try:
-            data = json.loads((config / "config.json").read_text())
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError) as error:  # present but unreadable: fail closed
+        data = _docker_config()
+        if data.get("proxies"):
             raise SandboxUnavailableError(
-                f"cannot read {config / 'config.json'} to check it for "
-                f"`proxies`: {error}"
-            ) from error
-        if isinstance(data, dict) and data.get("proxies"):
-            raise SandboxUnavailableError(
-                f"{config / 'config.json'} sets `proxies`, which Docker would pass "
-                "into every container as environment variables. Remove it, or point "
-                "DOCKER_CONFIG at a directory without it."
+                f"{_docker_config_dir() / 'config.json'} sets `proxies`, which Docker "
+                "would pass into every container as environment variables. Remove it, "
+                "or point DOCKER_CONFIG at a directory without it."
             )
 
     def _check_image(self) -> None:
@@ -427,9 +436,62 @@ def _checked(rules: Rules) -> Rules:
         text = str(path)
         if "," in text or "=" in text or not text.isprintable():
             raise ValueError(f"{text!r} cannot be mounted: no commas or equals signs")
+        if any(path.is_relative_to(tree) for tree in _HOST_ONLY):
+            raise ValueError(f"{text} is a host system tree and cannot be mounted")
+        if path in resolved.read and (
+            path.is_relative_to(WORKSPACE) or Path(WORKSPACE).is_relative_to(path)
+        ):
+            raise ValueError(f"{text} would cover the workspace at {WORKSPACE}")
         if any(socket.is_relative_to(path) for socket in sockets):
             raise ValueError(f"{text} contains the Docker socket and cannot be mounted")
     return resolved
+
+
+def _docker_config_dir() -> Path:
+    """Where the Docker CLI looks, as it does: an empty `DOCKER_CONFIG` is unset, and a
+    `~` in a set one is not expanded."""
+    value = os.environ.get("DOCKER_CONFIG")
+    return Path(value) if value else Path.home() / ".docker"
+
+
+def _docker_config() -> dict[str, object]:
+    """The CLI's `config.json`: empty if there is none; a file that is there but
+    cannot be read as a JSON object makes the sandbox unavailable, not unchecked."""
+    path = _docker_config_dir() / "config.json"
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise SandboxUnavailableError(
+            f"cannot read {path} to check it: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise SandboxUnavailableError(f"{path} is not a JSON object")
+    return data
+
+
+def _context_socket() -> Path | None:
+    """The socket of the Docker context in use (`DOCKER_CONTEXT`, else the config's
+    `currentContext`), which is where Colima, OrbStack and rootless Docker live. None
+    for the default context or a context that is not a local socket. A context named
+    but not found is an error: the socket could be anywhere."""
+    name = os.environ.get("DOCKER_CONTEXT") or _docker_config().get("currentContext")
+    if not name or name == "default":
+        return None
+    if not isinstance(name, str):
+        raise SandboxUnavailableError("the Docker config's currentContext is not text")
+    digest = hashlib.sha256(name.encode()).hexdigest()
+    meta = _docker_config_dir() / "contexts" / "meta" / digest / "meta.json"
+    try:
+        host = json.loads(meta.read_text())["Endpoints"]["docker"]["Host"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SandboxUnavailableError(
+            f"cannot find the endpoint of the Docker context {name!r} ({meta}): {error}"
+        ) from error
+    if isinstance(host, str) and host.startswith("unix://"):
+        return Path(host.removeprefix("unix://"))
+    return None
 
 
 def _docker_sockets() -> list[Path]:
@@ -445,6 +507,8 @@ def _docker_sockets() -> list[Path]:
     host = os.environ.get("DOCKER_HOST", "")
     if host.startswith("unix://"):
         found.append(Path(host.removeprefix("unix://")))
+    if (context := _context_socket()) is not None:
+        found.append(context)
     # Both where it really is and where a link to it sits: a tree holding the link
     # is as unsafe as one holding the socket once the target is reachable too.
     return [

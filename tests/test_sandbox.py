@@ -5,7 +5,9 @@ small local image, and are skipped without Docker (but fail in CI, so the sandbo
 never silently untested there).
 """
 
+import hashlib
 import itertools
+import json
 import os
 import shutil
 import stat
@@ -30,6 +32,7 @@ from loomcore.sandbox import (
     ResourceLimits,
     Rules,
     SandboxUnavailableError,
+    _docker_sockets,
     docker_args,
     env_value_problem,
     evaluate,
@@ -297,11 +300,13 @@ def test_a_tree_that_contains_the_docker_socket_cannot_be_mounted(
 ) -> None:
     """A read-only mount does not stop a command connecting to a socket, and the
     daemon is root on the host."""
+    docker_home(tmp_path, monkeypatch, "{}")
     sockets = tmp_path / "run"
     sockets.mkdir()
     monkeypatch.setenv("DOCKER_HOST", f"unix://{sockets}/d.sock")
     for tree in (sockets, tmp_path, Path("/"), Path.home(), Path("/var/run")):
-        with pytest.raises(ValueError, match="Docker socket"):
+        # "/" is refused too, but as covering the workspace first
+        with pytest.raises(ValueError, match=r"Docker socket|cover the workspace"):
             DockerSandbox(
                 rules_for(root, read=frozenset({tree})),
                 on_refusal=lambda _: None,
@@ -309,6 +314,117 @@ def test_a_tree_that_contains_the_docker_socket_cannot_be_mounted(
             )
     with pytest.raises(ValueError, match="Docker socket"):  # nor as the workspace
         DockerSandbox(rules_for(Path.home()), on_refusal=lambda _: None, docker="true")
+
+
+def docker_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str | None = None
+) -> Path:
+    """A Docker config directory of our own, so a test never reads the real one."""
+    home = tmp_path / "dockercfg"
+    home.mkdir(exist_ok=True)
+    if config is not None:
+        (home / "config.json").write_text(config)
+    monkeypatch.setenv("DOCKER_CONFIG", str(home))
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    return home
+
+
+def add_context(home: Path, name: str, host: str) -> None:
+    meta = home / "contexts" / "meta" / hashlib.sha256(name.encode()).hexdigest()
+    meta.mkdir(parents=True)
+    endpoint = {"Name": name, "Endpoints": {"docker": {"Host": host}}}
+    (meta / "meta.json").write_text(json.dumps(endpoint))
+
+
+@pytest.mark.parametrize("how", ["config", "env"])
+def test_a_tree_holding_the_socket_of_the_docker_context_in_use_is_refused(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    home = docker_home(tmp_path, monkeypatch, '{"currentContext": "colima"}')
+    sockets = tmp_path / "colima"
+    sockets.mkdir()
+    add_context(home, "colima", f"unix://{sockets}/docker.sock")
+    if how == "env":
+        docker_home(tmp_path, monkeypatch, "{}")
+        monkeypatch.setenv("DOCKER_CONTEXT", "colima")
+    with pytest.raises(ValueError, match="Docker socket"):
+        DockerSandbox(
+            rules_for(root, read=frozenset({sockets})),
+            on_refusal=lambda _: None,
+            docker="true",
+        )
+
+
+def test_a_docker_context_that_cannot_be_found_means_no_sandbox(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker_home(tmp_path, monkeypatch, '{"currentContext": "gone"}')
+    with pytest.raises(SandboxUnavailableError, match="gone"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
+def test_a_context_that_is_not_a_local_socket_is_not_in_the_way(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = docker_home(tmp_path, monkeypatch, '{"currentContext": "remote"}')
+    add_context(home, "remote", "ssh://me@elsewhere")
+    assert all(path.name != "elsewhere" for path in _docker_sockets())
+
+
+@pytest.mark.parametrize("config", ["[]", "{not json", '"text"'])
+def test_a_docker_config_that_is_not_a_json_object_means_no_sandbox(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
+) -> None:
+    docker_home(tmp_path, monkeypatch, config)
+    with pytest.raises(SandboxUnavailableError, match=r"config\.json"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
+def test_an_empty_docker_config_variable_is_the_same_as_none(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Docker CLI treats `DOCKER_CONFIG=""` as unset and reads ~/.docker."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".docker").mkdir(parents=True)
+    (fake_home / ".docker" / "config.json").write_text('{"proxies": {"a": "b"}}')
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("DOCKER_CONFIG", "")
+    monkeypatch.chdir(tmp_path)  # a config.json here must not be read instead
+    (tmp_path / "config.json").write_text("{}")
+    with pytest.raises(SandboxUnavailableError, match="proxies"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
+@pytest.mark.parametrize(
+    "tree", [Path("/proc"), Path("/sys/kernel"), Path("/dev"), Path("/dev/shm")]
+)
+def test_a_host_system_tree_cannot_be_mounted(root: Path, tree: Path) -> None:
+    with pytest.raises(ValueError, match="host system tree"):
+        DockerSandbox(
+            rules_for(root, read=frozenset({tree})),
+            on_refusal=lambda _: None,
+            docker="true",
+        )
+
+
+@pytest.mark.parametrize("tree", [Path("/workspace"), Path("/workspace/sub")])
+def test_a_read_tree_cannot_cover_the_workspace(root: Path, tree: Path) -> None:
+    with pytest.raises(ValueError, match="cover the workspace"):
+        DockerSandbox(
+            rules_for(root, read=frozenset({tree})),
+            on_refusal=lambda _: None,
+            docker="true",
+        )
+
+
+@pytest.mark.parametrize("bad", ["\udcff", "\ud800", "\udc80", "a\x00b"])
+def test_an_argument_that_would_change_on_the_way_in_is_refused(
+    root: Path, bad: str
+) -> None:
+    verdict = evaluate(rules_for(root), ask((ECHO, bad), root))
+    assert isinstance(verdict, Refusal), repr(bad)
+    assert evaluate(rules_for(root), ask((ECHO, "ünï"), root)) == Permit()
 
 
 def test_values_the_environment_file_cannot_hold_are_named() -> None:
@@ -622,6 +738,7 @@ def test_a_timeout_that_arrives_before_the_container_exists_still_ends_the_run(
     started = time.monotonic()
     result = watched.run(SLEEP, "60", cwd=root, limits=ResourceLimits(timeout=0.05))
     assert result.timed_out
+    assert result.returncode == 137  # not 125, whenever the container was removed
     assert time.monotonic() - started < 30
     assert leftover_containers() == ""
 

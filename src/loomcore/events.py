@@ -255,6 +255,11 @@ def parse_event(line: str | bytes) -> Event:
     return _EVENT.validate_json(line)
 
 
+def make_event(kind: str, **fields: object) -> Event:
+    """Build and validate one event; fields use the Python names (`session_id`)."""
+    return _EVENT.validate_python({"kind": kind, **fields})
+
+
 def dump_event(event: Event) -> str:
     """One log line, without the newline."""
     return _EVENT.dump_json(event).decode()

@@ -20,7 +20,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from loomcore.dockerenv import SandboxUnavailableError
+from loomcore.dockerenv import SandboxUnavailableError, docker_sockets
 from loomcore.sandbox import (
     LABEL,
     CommandRefusedError,
@@ -388,6 +388,36 @@ def test_a_docker_context_on_another_machine_means_no_sandbox(
     add_context(home, "remote", "ssh://me@elsewhere")
     with pytest.raises(SandboxUnavailableError, match="remote"):
         DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
+def test_docker_host_and_the_context_socket_are_both_kept_out_of_mounts(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = docker_home(tmp_path, monkeypatch, '{"currentContext": "colima"}')
+    colima, chosen = tmp_path / "colima", tmp_path / "chosen"
+    colima.mkdir()
+    chosen.mkdir()
+    add_context(home, "colima", f"unix://{colima}/docker.sock")
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{chosen}/docker.sock")
+    for tree in (colima, chosen):
+        with pytest.raises(ValueError, match="Docker socket"):
+            DockerSandbox(
+                rules_for(root, read=frozenset({tree})),
+                on_refusal=lambda _: None,
+                docker="true",
+            )
+
+
+@pytest.mark.parametrize("context", ["gone", "remote"])
+def test_a_context_that_cannot_be_used_does_not_matter_when_docker_host_is_set(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: str
+) -> None:
+    home = docker_home(tmp_path, monkeypatch, f'{{"currentContext": "{context}"}}')
+    if context == "remote":
+        add_context(home, "remote", "ssh://me@elsewhere")
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{tmp_path}/docker.sock")
+    assert docker_sockets()  # resolves; without DOCKER_HOST it would be an error
+    DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
 @pytest.mark.parametrize("host", ["tcp://10.0.0.5:2376", "ssh://me@elsewhere"])

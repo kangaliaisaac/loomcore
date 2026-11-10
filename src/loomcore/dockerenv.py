@@ -94,9 +94,15 @@ def docker_sockets() -> list[Path]:
         home / ".docker" / "desktop" / "docker.sock",
     ]
     host = os.environ.get("DOCKER_HOST", "")
+    try:
+        context = _context_socket()
+    except SandboxUnavailableError:
+        if not host:
+            raise
+        context = None  # DOCKER_HOST decides which daemon is used; this one is not
     if host:
         found.append(_local_socket(host, "DOCKER_HOST"))
-    elif (context := _context_socket()) is not None:  # DOCKER_HOST wins over a context
+    if context is not None:  # still refused as a tree: that daemon may be running
         found.append(context)
     # Both where it really is and where a link to it sits: a tree holding the link
     # is as unsafe as one holding the socket once the target is reachable too.

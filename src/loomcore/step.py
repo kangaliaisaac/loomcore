@@ -126,7 +126,8 @@ def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
 def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
     """Settle what the log leaves open, as a new process finds it."""
     if state.open_approvals:
-        return [AskHuman(sorted(state.open_approvals)[0], "approval still open")]
+        first = state.open_approvals[0]
+        return [AskHuman(first, "approval still open" + _risky_note(state, read_only))]
     if state.pending_tools:
         return _rerun(state, read_only)
     if state.ended_with is not None:
@@ -137,12 +138,19 @@ def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
 def _rerun(state: RunState, read_only: ReadOnly) -> list[Effect]:
     """A call requested but never completed may have run: a read-only tool is run
     again, any other becomes an `AskHuman` first. The question is about the first
-    such call and covers every such call of the turn: a grant runs them all, a
+    such call and names every such call of the turn: a grant runs them all, a
     denial fails them all."""
     risky = _interrupted_risky(state, read_only)
     if risky:
-        return [AskHuman(risky[0], f"{risky[0]} may have run before the crash; again?")]
+        return [AskHuman(risky[0], "run again?" + _risky_note(state, read_only))]
     return [RunTool(i) for i in state.pending_tools]
+
+
+def _risky_note(state: RunState, read_only: ReadOnly) -> str:
+    names = dict(state.requested)
+    risky = _interrupted_risky(state, read_only)
+    listed = ", ".join(f"{names[i]} ({i})" for i in risky)
+    return f"; may have run before the crash: {listed}" if risky else ""
 
 
 def _after_model_call(event: ModelCall) -> list[Effect]:

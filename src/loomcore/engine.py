@@ -111,7 +111,7 @@ class Run:
             return self.fold([self._resumed("limit", limits=limits.to_json())])
         if decision is None or limits is not None:
             raise ResumeRefusedError("paused for approval: resume with a decision only")
-        asked = sorted(self.state.open_approvals)[0]
+        asked = self.state.open_approvals[0]
         resumed = self._resumed("approval")
         kind = "approval_granted" if decision.granted else "approval_denied"
         answer = self.emit(kind, tool_use_id=asked, by=decision.by, note=decision.note)

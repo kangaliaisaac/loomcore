@@ -58,9 +58,9 @@ def test_tool_use_ids_ignores_text_blocks_and_odd_content() -> None:
 
 def test_approvals_are_open_until_granted_or_denied() -> None:
     asked = make("approval_requested")
-    assert replay([asked]).open_approvals == {"t1"}
-    assert replay([asked, make("approval_granted", 1)]).open_approvals == frozenset()
-    assert replay([asked, make("approval_denied", 1)]).open_approvals == frozenset()
+    assert replay([asked]).open_approvals == ("t1",)
+    assert replay([asked, make("approval_granted", 1)]).open_approvals == ()
+    assert replay([asked, make("approval_denied", 1)]).open_approvals == ()
 
 
 def test_a_pause_lasts_until_the_run_resumes() -> None:

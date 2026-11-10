@@ -14,7 +14,7 @@ from strategies import logs
 
 from loomcore import step as step_module
 from loomcore.events import Event
-from loomcore.replay import RunState, replay, run_events
+from loomcore.replay import RunState, apply, replay, run_events
 from loomcore.step import AskHuman, CallModel, Effect, Fail, RunTool, Stop, step
 
 
@@ -316,3 +316,27 @@ def test_a_crash_right_after_a_fork_from_a_final_answer_calls_the_model() -> Non
         state, _ = step(state, event)
     resumed = make("run_resumed", 1, "r2", reason="crash")
     assert step(state, resumed)[1] == [CallModel()]
+
+
+def test_the_crash_question_names_every_interrupted_call_with_effects() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "search")]
+    log += [requested(4, "c", "delete")]
+    [ask] = crash(*log, read_only=frozenset({"search"}))
+    assert isinstance(ask, AskHuman)
+    assert "write (a)" in ask.question
+    assert "delete (c)" in ask.question
+    assert "search" not in ask.question
+
+
+def test_an_open_approval_does_not_hide_an_interrupted_call_from_the_question() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "c")]
+    log += [requested(2, "c", "write"), asked(3, "a")]
+    [ask] = crash(*log)
+    assert isinstance(ask, AskHuman)
+    assert (ask.tool_use_id, "write (c)" in ask.question) == ("a", True)
+
+
+def test_a_tool_requested_for_a_call_nobody_asked_for_changes_nothing() -> None:
+    state = apply(RunState(), requested(0, "ghost", "write"))
+    assert state.requested == ()

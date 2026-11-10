@@ -14,6 +14,8 @@ sandbox is not built, and nothing falls back to running on the host.
 """
 
 import contextlib
+import json
+import math
 import os
 import re
 import shutil
@@ -34,6 +36,7 @@ _IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*\Z")  # never starts with "-"
 _POLL_SECONDS = 0.02
 _STOP_SECONDS = 20.0  # how long to keep removing a container before killing its CLI
 _DOCKER_CALL_SECONDS = 30.0
+_KILLED = 137
 _USER = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")  # uid:gid, neither root
 _ENV_LINE_BYTES = 60 * 1024  # Docker reads an env-file line of at most 64 KB
 
@@ -194,6 +197,11 @@ def docker_args(
     """
     if not _USER.match(launch.user):
         raise ValueError(f"{launch.user!r} is not a non-root uid:gid")
+    for field, number in vars(limits).items():
+        if not math.isfinite(number) or number <= 0:  # Docker reads 0 and -1 as "none"
+            raise ValueError(
+                f"limit {field}={number!r} must be a finite number above 0"
+            )
     cwd = request.cwd.relative_to(rules.root).as_posix()
     memory = str(limits.memory_bytes)
     args = [
@@ -267,6 +275,7 @@ class DockerSandbox:
         self._rules = _checked(rules)
         self._user = _non_root_user()
         self._docker = _find_docker(docker)
+        self._check_no_proxies()
         self._check_image()
         self._environ = os.environ if environ is None else environ
         self._on_refusal = on_refusal
@@ -328,7 +337,10 @@ class DockerSandbox:
             finally:
                 self._stop(name, process)  # also if we were interrupted
             stdout, stderr, cut = _read_together(out, err, limits.max_output_bytes)
-            return ProcessResult(process.returncode, stdout, stderr, timed_out, cut)
+            code = process.returncode
+            if code < 0:  # the docker client itself was killed: report it as a kill
+                code = _KILLED
+            return ProcessResult(code, stdout, stderr, timed_out, cut)
 
     def _stop(self, name: str, process: subprocess.Popen[bytes]) -> None:
         """End the container and the docker client, leaving nothing behind.
@@ -358,13 +370,32 @@ class DockerSandbox:
                 timeout=_DOCKER_CALL_SECONDS,
             )
 
+    def _check_no_proxies(self) -> None:
+        """The Docker CLI adds `proxies` from its config to every container it
+        creates, which would put variables nobody allow-listed in the command's
+        environment (often with credentials)."""
+        config = Path(os.environ.get("DOCKER_CONFIG", "~/.docker")).expanduser()
+        try:
+            data = json.loads((config / "config.json").read_text())
+        except OSError, ValueError:
+            return
+        if isinstance(data, dict) and data.get("proxies"):
+            raise SandboxUnavailableError(
+                f"{config / 'config.json'} sets `proxies`, which Docker would pass "
+                "into every container as environment variables. Remove it, or point "
+                "DOCKER_CONFIG at a directory without it."
+            )
+
     def _check_image(self) -> None:
-        probe = subprocess.run(
-            [self._docker, "image", "inspect", self._rules.image],
-            capture_output=True,
-            check=False,
-            timeout=_DOCKER_CALL_SECONDS,
-        )
+        try:
+            probe = subprocess.run(
+                [self._docker, "image", "inspect", self._rules.image],
+                capture_output=True,
+                check=False,
+                timeout=_DOCKER_CALL_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError) as error:
+            raise SandboxUnavailableError(f"Docker did not answer: {error}") from error
         if probe.returncode != 0:
             raise SandboxUnavailableError(
                 f"Docker cannot find the image {self._rules.image}: is the daemon "

@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,18 @@ def test_everything_is_refused_by_default(root: Path) -> None:
 def test_an_allowed_command_in_the_workspace_is_permitted(root: Path) -> None:
     assert evaluate(rules_for(root), ask((SH, "-c", "true"), root)) == Permit()
     assert evaluate(rules_for(root), ask((SH,), root / "sub")) == Permit()
+
+
+@pytest.mark.parametrize("field", list(vars(ResourceLimits())))
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_a_limit_that_docker_reads_as_unlimited_is_refused(
+    root: Path, field: str, bad: float
+) -> None:
+    limits = replace(ResourceLimits(), **{field: bad})  # type: ignore[arg-type]
+    request = Request((SH,), root, frozenset())
+    launch = Launch("docker", "n", Path("/e"), "1:1")
+    with pytest.raises(ValueError, match=field):
+        docker_args(rules_for(root), request, limits, launch)
 
 
 @pytest.mark.parametrize(
@@ -319,6 +332,17 @@ def test_without_the_docker_executable_there_is_no_sandbox(root: Path) -> None:
         DockerSandbox(
             rules_for(root), on_refusal=lambda _: None, docker="/nonexistent/docker"
         )
+
+
+def test_a_docker_proxy_config_means_no_sandbox(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "dockercfg"
+    config.mkdir()
+    (config / "config.json").write_text('{"proxies": {"default": {"httpProxy": "x"}}}')
+    monkeypatch.setenv("DOCKER_CONFIG", str(config))
+    with pytest.raises(SandboxUnavailableError, match="proxies"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None)
 
 
 @needs_docker

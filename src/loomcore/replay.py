@@ -47,7 +47,7 @@ class ForkChainError(Exception):
 class RunState:
     event_count: int = 0
     pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
-    # (id, name) of calls with a tool_requested and no completion: they may have run.
+    # (id, name) of the calls with a tool_requested and no completion.
     requested: tuple[tuple[str, str], ...] = ()
     # The escalation ladder (spec section 1): the rung reached, this run's call
     # hashes in order, the (call, hash) of each ladder ask, this turn's rung with the

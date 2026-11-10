@@ -223,12 +223,19 @@ def requested(seq: int, tool_use_id: str, name: str) -> Event:
     return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
 
 
-def crash(*events: Event, read_only: frozenset[str] = frozenset()) -> list[Effect]:
+def crashed(
+    *events: Event, read_only: frozenset[str] = frozenset()
+) -> tuple[RunState, list[Effect]]:
+    """Fold the log, then resume it after a crash: the state and the effects."""
     state = RunState()
     for event in events:
         state, _ = step(state, event)
     resumed = make("run_resumed", len(events), reason="crash")
-    return step(state, resumed, lambda name: name in read_only)[1]
+    return step(state, resumed, lambda name: name in read_only)
+
+
+def crash(*events: Event, read_only: frozenset[str] = frozenset()) -> list[Effect]:
+    return crashed(*events, read_only=read_only)[1]
 
 
 def test_a_crash_before_the_first_model_call_calls_the_model() -> None:
@@ -266,7 +273,7 @@ def test_a_crash_asks_before_rerunning_a_call_that_may_have_had_effects() -> Non
 
 def test_a_crash_with_an_open_approval_pauses_for_it() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a"), asked(2)]
-    assert [type(e) for e in crash(*log)] == [AskHuman]
+    assert crash(*log) == [AskHuman("a", "")]  # the question is the one in the log
 
 
 def test_a_grant_runs_every_pending_call_and_a_denial_fails_the_asked_one() -> None:
@@ -351,14 +358,6 @@ def test_the_crash_question_names_the_interrupted_call_only() -> None:
     assert "write (a)" in ask.question
     assert "delete" not in ask.question  # c was never started
     assert "search" not in ask.question
-
-
-def test_an_open_approval_does_not_hide_an_interrupted_call_from_the_question() -> None:
-    log = [make("run_started"), model_call(1, "tool_use", "a", "c")]
-    log += [requested(2, "a", "write"), requested(3, "c", "write"), asked(4, "a")]
-    [ask] = crash(*log)
-    assert isinstance(ask, AskHuman)
-    assert (ask.tool_use_id, "write (a)" in ask.question) == ("a", True)
 
 
 def test_a_tool_requested_for_a_call_nobody_asked_for_changes_nothing() -> None:
@@ -537,10 +536,7 @@ def test_a_denial_does_not_fail_the_next_call_a_crash_interrupted() -> None:
 
 
 def after_crash(*log: Event) -> RunState:
-    state = RunState()
-    for event in [*log, make("run_resumed", len(log), reason="crash")]:
-        state, _ = step(state, event)
-    return state
+    return crashed(*log)[0]
 
 
 def test_after_a_crash_only_the_first_pending_call_counts_as_interrupted() -> None:
@@ -584,11 +580,18 @@ def test_a_denial_after_a_crash_in_an_ask_turn_fails_only_the_asked_call() -> No
     assert denial(state, 9) == [Fail("a", why), RunTool("b"), RunTool("c")]
 
 
-def test_a_grant_after_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
+def nudge_turn_asked_after_a_crash() -> list[Event]:
+    """A nudge turn [a, b, c] (a and c tripped); the crash-resume ask about a is open
+    and its pause has been resumed for an approval decision."""
     log = [*judged(1, "a", "c")]
     log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
     log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
     log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    return log
+
+
+def test_a_grant_after_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
+    log = nudge_turn_asked_after_a_crash()
     state, _ = run(*log)
     granted = make("approval_granted", 10, tool_use_id="a")
     effects = step(state, granted)[1]
@@ -619,10 +622,7 @@ def test_a_crash_after_the_stuck_completions_still_stops() -> None:
 
 
 def test_a_denial_after_a_crash_in_a_nudge_turn_keeps_the_others_notes() -> None:
-    log = [*judged(1, "a", "c")]
-    log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
-    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
-    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    log = nudge_turn_asked_after_a_crash()
     state, _ = run(*log)
     denied = make("approval_denied", 10, tool_use_id="a", by="me", note="no")
     assert step(state, denied)[1] == [
@@ -633,10 +633,7 @@ def test_a_denial_after_a_crash_in_a_nudge_turn_keeps_the_others_notes() -> None
 
 
 def test_a_grant_logged_before_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
-    log = [*judged(1, "a", "c")]
-    log += [make("run_resumed", 6, reason="crash"), asked(7, "a")]
-    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
-    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    log = nudge_turn_asked_after_a_crash()
     log += [make("approval_granted", 10, tool_use_id="a", by="me", note="")]
     log += [make("tool_completed", 11, tool_use_id="a")]
     effects = crash(*log, read_only=frozenset({"n"}))  # b is the first pending call

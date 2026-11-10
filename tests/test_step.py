@@ -10,12 +10,23 @@ from pathlib import Path
 import pytest
 from factories import calling, make
 from hypothesis import given, settings
+from pydantic import JsonValue
 from strategies import logs
 
+from loomcore import ladder
 from loomcore import step as step_module
-from loomcore.events import Event
+from loomcore.events import Event, JsonObject
 from loomcore.replay import RunState, apply, replay, run_events
-from loomcore.step import AskHuman, CallModel, Effect, Fail, RunTool, Stop, step
+from loomcore.step import (
+    AskHuman,
+    CallModel,
+    Effect,
+    Fail,
+    RequestCalls,
+    RunTool,
+    Stop,
+    step,
+)
 
 
 def run(*events: Event) -> tuple[RunState, list[Effect]]:
@@ -40,9 +51,16 @@ def test_a_fork_starts_by_calling_the_model() -> None:
     assert run(make("run_forked", 0, "r1", **origin))[1] == [CallModel()]
 
 
-def test_each_tool_use_becomes_a_run_tool_in_order() -> None:
+def test_a_turns_tool_uses_are_requested_together_in_order() -> None:
     effects = run(make("run_started"), model_call(1, "tool_use", "b", "a"))[1]
-    assert effects == [RunTool("b"), RunTool("a")]
+    assert effects == [RequestCalls(("b", "a"))]
+
+
+def test_once_every_call_is_requested_they_run_in_order() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "b", "a")]
+    log += [requested(2, "b", "search"), requested(3, "a", "search")]
+    assert run(*log)[1] == [RunTool("b"), RunTool("a")]
+    assert run(*log[:3])[1] == []  # the batch is not complete yet
 
 
 def test_the_model_is_called_again_only_when_every_tool_has_completed() -> None:
@@ -81,7 +99,7 @@ def test_an_unknown_or_missing_stop_reason_stops_with_an_error() -> None:
 def test_a_cut_off_tool_use_is_not_run_and_the_complete_ones_are() -> None:
     message = calling("a", "b", stop_reason="max_tokens")
     effects = run(make("run_started"), make("model_call", 1, message=message))[1]
-    assert effects == [RunTool("a")]
+    assert effects == [RequestCalls(("a",))]
 
 
 def test_a_response_cut_off_inside_its_only_tool_use_continues() -> None:
@@ -169,7 +187,9 @@ def test_step_imports_nothing_that_touches_the_world() -> None:
         "dataclasses",
         "typing",
         "pydantic",
+        "loomcore",
         "loomcore.events",
+        "loomcore.finish",
         "loomcore.replay",
     }
 
@@ -229,12 +249,16 @@ def test_a_crash_after_a_final_answer_stops_with_its_reason() -> None:
 def test_a_crash_runs_calls_never_started_and_reruns_read_only_ones() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
     log.append(requested(2, "a", "search"))
-    assert crash(*log, read_only=frozenset({"search"})) == [RunTool("a"), RunTool("b")]
+    unrequested = crash(*log, read_only=frozenset({"search"}))
+    assert unrequested == [RequestCalls(("b",))]  # b never started: request, then run
+    log.append(requested(3, "b", "search"))
+    both = crash(*log, read_only=frozenset({"search"}))
+    assert both == [RunTool("a"), RunTool("b")]
 
 
 def test_a_crash_asks_before_rerunning_a_call_that_may_have_had_effects() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
-    log.append(requested(2, "a", "write_file"))
+    log += [requested(2, "a", "write_file"), requested(3, "b", "search")]
     [effect] = crash(*log, read_only=frozenset({"search"}))
     assert isinstance(effect, AskHuman)
     assert effect.tool_use_id == "a"
@@ -340,3 +364,125 @@ def test_an_open_approval_does_not_hide_an_interrupted_call_from_the_question() 
 def test_a_tool_requested_for_a_call_nobody_asked_for_changes_nothing() -> None:
     state = apply(RunState(), requested(0, "ghost", "write"))
     assert state.requested == ()
+
+
+# --- f11: the ladder and finish ------------------------------------------------
+
+
+def escalation(seq: int, rung: int, *tripped: str) -> Event:
+    return make(
+        "escalation",
+        seq,
+        rung=rung,
+        reason="repeat",
+        tool_use_id=tripped[0],
+        call_hash="h",
+        tripped=list(tripped),
+    )
+
+
+def judged(rung: int, *tripped: str) -> list[Event]:
+    """A turn of calls a, b, c, requested together, then judged at `rung`."""
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "n"), requested(3, "b", "n"), requested(4, "c", "n")]
+    return [*log, escalation(5, rung, *tripped)]
+
+
+def test_a_nudge_runs_every_call_and_marks_only_the_ones_that_tripped() -> None:
+    effects = run(*judged(1, "a", "c"))[1]
+    note = ladder.NUDGE
+    assert effects == [RunTool("a", note), RunTool("b"), RunTool("c", note)]
+
+
+def test_a_switch_runs_every_call_with_the_switch_message() -> None:
+    effects = run(*judged(2, "b"))[1]
+    assert effects == [RunTool("a"), RunTool("b", ladder.SWITCH), RunTool("c")]
+
+
+def test_an_ask_holds_every_call_and_asks_about_the_first_that_tripped() -> None:
+    assert run(*judged(3, "b", "c"))[1] == [AskHuman("b", "repeat")]
+
+
+def test_a_stuck_turn_stops() -> None:
+    assert run(*judged(4, "a"))[1] == [Stop("stuck")]
+
+
+def test_the_ladder_never_goes_down_and_a_fork_starts_at_zero() -> None:
+    state, _ = run(*judged(3, "a"))
+    assert state.rung == 3
+    forked = make("run_forked", 0, "r2", **{"from": {"runId": "r1", "seq": 0}})
+    state, _ = step(state, forked)
+    assert (state.rung, state.call_hashes, state.ladder_asks) == (0, (), ())
+
+
+def test_a_grant_on_a_ladder_ask_forgets_the_earlier_calls_with_that_hash() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [make("tool_requested", 2, tool_use_id="a", name="n", call_hash="h")]
+    log += [make("tool_requested", 3, tool_use_id="b", name="n", call_hash="x")]
+    log += [escalation(4, 3, "a"), asked(5, "a")]
+    log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
+    log += [make("run_resumed", 7, reason="approval", resume_from=5)]
+    before, _ = run(*log)
+    assert before.call_hashes == ("h", "x")
+    after, effects = step(before, make("approval_granted", 8, tool_use_id="a"))
+    assert after.call_hashes == ("x",)  # the asked call's hash no longer counts
+    assert after.rung == 3  # a human approved the call once, not for good
+    assert effects == [RunTool("a"), RunTool("b")]
+
+
+def finish_call(seq: int, *others: str) -> Event:
+    blocks: list[JsonValue] = [
+        {"type": "tool_use", "id": "f", "name": "finish", "input": {"result": 42}}
+    ]
+    blocks += [{"type": "tool_use", "id": i, "name": "n", "input": {}} for i in others]
+    message: JsonObject = {"content": blocks, "stop_reason": "tool_use"}
+    return make("model_call", seq, message=message)
+
+
+def test_a_finish_call_ends_the_run_with_its_result() -> None:
+    effects = run(make("run_started"), finish_call(1))[1]
+    assert effects == [Stop("finished", 42, "f")]
+
+
+def test_a_finish_call_beside_other_calls_still_ends_the_run() -> None:
+    effects = run(make("run_started"), finish_call(1, "a"))[1]
+    assert effects == [Stop("finished", 42, "f")]
+
+
+def test_a_crash_after_a_stuck_rung_finishes_the_rung() -> None:
+    assert crash(*judged(4, "a")) == [Stop("stuck")]
+
+
+def test_a_crash_after_an_ask_rung_asks_again_without_running_anything() -> None:
+    effects = crash(*judged(3, "b"))
+    assert effects == [AskHuman("b", "repeat")]
+
+
+def test_a_crash_after_a_nudge_finishes_it_but_asks_first_about_risky_calls() -> None:
+    log = judged(1, "a")
+    assert crash(*log, read_only=frozenset({"n"})) == [
+        RunTool("a", ladder.NUDGE),
+        RunTool("b"),
+        RunTool("c"),
+    ]
+    [ask] = crash(*log)  # "n" is not read-only: all three may have run
+    assert isinstance(ask, AskHuman)
+
+
+def decided_then_crash(granted: bool) -> list[Effect]:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write"), asked(4, "a")]
+    log += [make("run_paused", 5, reason="awaiting_approval", resume_from=4)]
+    log += [make("run_resumed", 6, reason="approval", resume_from=4)]
+    kind = "approval_granted" if granted else "approval_denied"
+    log += [make(kind, 7, tool_use_id="a", by="me", note="no")]
+    return crash(*log)
+
+
+def test_a_grant_logged_before_a_crash_is_settled_not_asked_again() -> None:
+    assert decided_then_crash(True) == [RunTool("a"), RunTool("b")]
+
+
+def test_a_denial_logged_before_a_crash_is_settled_not_asked_again() -> None:
+    why = "denied by me: no"
+    assert decided_then_crash(False) == [Fail("a", why), Fail("b", why)]

@@ -85,7 +85,7 @@
     "title": "Escalation ladder and the finish tool",
     "spec": "1 Escalation ladder, Ending a run",
     "acceptance": "identical calls trip the detector at the threshold; nudge and switch never block; ask holds the turn; stuck completes pending calls; finish ends the run; an approval decision logged before a crash is settled on crash resume (a denied call fails, a granted one runs)",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f12",

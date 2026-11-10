@@ -9,6 +9,7 @@ from pydantic import JsonValue
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
 from loomcore.replay import content_blocks, tool_use_ids
 
+FORK_CONTINUE = "Carry on with the task."
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
 
 
@@ -49,9 +50,18 @@ def build_messages(task: JsonValue, events: Sequence[Event]) -> list[JsonObject]
                 messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
                 messages.append(reply)
-        elif isinstance(event, RunForked) and event.hint:
-            messages.append({"role": "user", "content": event.hint})
+        elif isinstance(event, RunForked):
+            _after_fork(messages, event)
     return messages
+
+
+def _after_fork(messages: list[JsonObject], event: RunForked) -> None:
+    """A hint is the next user message; with none, a fork from a final answer would
+    end the request on the assistant's turn, so ask it to carry on."""
+    if event.hint:
+        messages.append({"role": "user", "content": event.hint})
+    elif messages[-1]["role"] == "assistant":
+        messages.append({"role": "user", "content": FORK_CONTINUE})
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

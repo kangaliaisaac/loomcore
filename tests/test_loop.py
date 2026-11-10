@@ -5,12 +5,20 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from fakes import CAPS, CONFIG, COST, Crash, World, failure, kinds, reply, use
+from fakes import CAPS, CONFIG, COST, Crash, World, failure, finish, kinds, reply, use
 from fakes import ref as run_ref
 
+from loomcore import ladder
+from loomcore.conversation import FORK_CONTINUE
 from loomcore.engine import ResumeRefusedError
 from loomcore.eventlog import read_events
-from loomcore.events import ForkOrigin, JsonObject
+from loomcore.events import (
+    Escalation,
+    Event,
+    ForkOrigin,
+    JsonObject,
+    ToolCompleted,
+)
 from loomcore.limits import Limits
 from loomcore.loop import (
     ConfigChangedError,
@@ -390,3 +398,143 @@ def test_run_reports_a_torn_line_another_run_left(
     with caplog.at_level(logging.WARNING):
         world.driver(tmp_path).run(TASK)
     assert "8 bytes" in caplog.text
+
+
+# --- f11: the ladder and finish ------------------------------------------------
+
+SWITCHED = Config(model="m", system="try something else", tools=CONFIG.tools)
+LADDER_CONFIG = Config(CONFIG.model, CONFIG.system, CONFIG.tools, switch_to=SWITCHED)
+REPEATING = Task("go", limits(repeat_threshold=2))
+
+
+def repeat(count: int) -> list[JsonObject | Exception]:
+    """The same call, `count` times, under different tool_use ids."""
+    return [use((f"c{n}", "search"), q="x") for n in range(1, count + 1)]
+
+
+def all_events(tmp: Path) -> tuple[Event, ...]:
+    return read_events(tmp / "s1.jsonl").events
+
+
+def completions(tmp: Path) -> list[ToolCompleted]:
+    return [e for e in all_events(tmp) if isinstance(e, ToolCompleted)]
+
+
+def escalations(tmp: Path) -> list[Escalation]:
+    return [e for e in all_events(tmp) if isinstance(e, Escalation)]
+
+
+def test_finish_ends_the_run_with_its_result_and_is_not_run_as_a_tool(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[finish({"answer": 42})])
+    result = start(world, tmp_path)
+    assert (result.status, result.reason) == ("finished", "finished")
+    assert result.result == {"answer": 42}
+    done = completions(tmp_path)
+    assert [(e.tool_use_id, e.ok) for e in done] == [("fin", True)]
+    assert world.tool_calls == []
+
+
+def test_the_calls_beside_finish_are_settled_without_running(tmp_path: Path) -> None:
+    world = World(script=[finish("done", ("a", "search"))])
+    result = start(world, tmp_path)
+    assert result.reason == "finished"
+    ok = {
+        e.tool_use_id: e.ok for e in all_events(tmp_path) if e.kind == "tool_completed"
+    }
+    assert ok == {"fin": True, "a": False}
+    assert world.tool_calls == []
+
+
+def test_the_ladder_climbs_from_a_nudge_to_a_switch_to_an_ask_to_stuck(
+    tmp_path: Path,
+) -> None:
+    world = World(script=repeat(6))
+    driver = world.driver(tmp_path, LADDER_CONFIG)
+    paused = driver.run(REPEATING)
+    assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
+    assert paused.question is not None
+    assert world.tool_calls == ["x", "x", "x"]  # the asked call has not run
+    done = driver.resume(paused.ref, Decision(granted=True, by="me"))
+    assert (done.status, done.reason) == ("finished", "stuck")
+    assert [e.rung for e in escalations(tmp_path)] == [1, 2, 3, 4]
+    completed = completions(tmp_path)
+    assert len(completed) == 6  # every tool_use has exactly one completion
+    assert [e.ok for e in completed] == [True] * 5 + [False]
+
+
+def test_a_nudge_and_a_switch_reach_the_model_through_the_tool_results(
+    tmp_path: Path,
+) -> None:
+    world = World(script=repeat(6))
+    driver = world.driver(tmp_path, LADDER_CONFIG)
+    driver.resume(driver.run(REPEATING).ref, Decision(granted=True, by="me"))
+    sent = [str(r.messages[-1]["content"]) for r in world.requests]
+    assert ladder.NUDGE in sent[2]  # c2 tripped: the result after it carries it
+    assert ladder.NUDGE not in sent[1]  # c1 did not trip
+    assert ladder.SWITCH in sent[3]
+    assert [r.system for r in world.requests[:4]] == [
+        "be brief",
+        "be brief",
+        "be brief",
+        "try something else",  # in force from the turn after the switch
+    ]
+
+
+def test_a_denied_ladder_ask_fails_that_call_and_the_next_trip_is_stuck(
+    tmp_path: Path,
+) -> None:
+    world = World(script=repeat(6))
+    driver = world.driver(tmp_path, LADDER_CONFIG)
+    paused = driver.run(REPEATING)
+    done = driver.resume(paused.ref, Decision(granted=False, by="me", note="no"))
+    assert (done.status, done.reason) == ("finished", "stuck")
+    assert world.tool_calls == ["x", "x", "x"]
+    why = [e.content for e in completions(tmp_path)]
+    assert "denied by me: no" in why
+
+
+def test_a_grant_logged_before_a_crash_is_not_asked_about_again(tmp_path: Path) -> None:
+    world = World(script=repeat(6), crash_on_call=4)
+    driver = world.driver(tmp_path, LADDER_CONFIG)
+    paused = driver.run(REPEATING)
+    with pytest.raises(Crash):  # the granted call c4 is the 4th tool call
+        driver.resume(paused.ref, Decision(granted=True, by="me"))
+    with pytest.raises(ConfigChangedError):  # the switch is part of the log
+        world.driver(tmp_path).resume(paused.ref)
+    done = driver.resume(paused.ref)
+    assert (done.status, done.reason) == ("finished", "stuck")
+    kinds_ = events(tmp_path)
+    assert kinds_.count("approval_requested") == 1
+    assert kinds_.count("run_paused") == 1
+
+
+def test_a_fork_from_a_final_answer_with_no_hint_asks_the_model_to_carry_on(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[reply("first"), reply("second")])
+    driver = world.driver(tmp_path)
+    driver.run(TASK)
+    call = next(e for e in all_events(tmp_path) if e.kind == "model_call")
+    driver.fork(ForkOrigin(run_id="r1", seq=call.seq))
+    last = world.requests[-1].messages[-1]
+    assert (last["role"], last["content"]) == ("user", FORK_CONTINUE)
+
+
+def test_resume_on_a_session_that_does_not_exist_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ResumeRefusedError, match="no session file"):
+        World().driver(tmp_path).resume(run_ref())
+    with pytest.raises(ResumeRefusedError, match="no session file"):
+        World().driver(tmp_path).fork(ForkOrigin(run_id="r1", seq=0))
+    assert not list(tmp_path.glob("s1.*"))
+
+
+def test_a_price_that_cannot_be_found_leaves_no_turn_behind(tmp_path: Path) -> None:
+    world = World(script=[reply()])
+    world.pricing.fail = True
+    with pytest.raises(LookupError):
+        start(world, tmp_path)
+    assert events(tmp_path) == ["run_started"]

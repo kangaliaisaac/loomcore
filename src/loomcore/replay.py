@@ -16,6 +16,7 @@ from loomcore.events import (
     ApprovalDenied,
     ApprovalGranted,
     ApprovalRequested,
+    Escalation,
     Event,
     JsonObject,
     ModelCall,
@@ -29,6 +30,8 @@ from loomcore.events import (
     TurnStarted,
 )
 from loomcore.months import month_key
+
+_ASK_RUNG = 3  # nudge, switch strategy, ask a human, stop
 
 
 class ForkChainError(Exception):
@@ -45,6 +48,14 @@ class RunState:
     pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
     # (id, name) of calls with a tool_requested and no completion: they may have run.
     requested: tuple[tuple[str, str], ...] = ()
+    # The escalation ladder (spec section 1): the rung reached, this run's call
+    # hashes in order, the (call, hash) of each ladder ask, this turn's rung with the
+    # calls that tripped and why, and decisions not yet followed by a completion.
+    rung: int = 0
+    call_hashes: tuple[str, ...] = ()
+    ladder_asks: tuple[tuple[str, str], ...] = ()
+    escalated: tuple[int, tuple[str, ...], str] | None = None
+    decided: tuple[tuple[str, bool, str], ...] = ()
     # The calls a crash resume found requested and not completed: they may have run.
     # A requested call need not have started (the turn's lines can be written
     # together), so only a crash makes a call "interrupted".
@@ -115,22 +126,27 @@ def _tools(state: RunState, event: Event) -> RunState:
                 i for i in ids if i not in state.pending_tools
             )
             ended = None if ids else (event.message.get("stop_reason"),)
-            state = replace(state, pending_tools=pending, ended_with=ended)
+            state = replace(
+                state, pending_tools=pending, ended_with=ended, escalated=None
+            )
         case ToolRequested():
             if event.tool_use_id in state.pending_tools and (
                 event.tool_use_id not in dict(state.requested)
             ):
                 requested = (*state.requested, (event.tool_use_id, event.name))
-                state = replace(state, requested=requested)
+                hashes = (*state.call_hashes, event.call_hash)
+                state = replace(state, requested=requested, call_hashes=hashes)
         case ToolCompleted():
             pending = tuple(i for i in state.pending_tools if i != event.tool_use_id)
             requested = tuple(r for r in state.requested if r[0] != event.tool_use_id)
             interrupted = tuple(i for i in state.interrupted if i != event.tool_use_id)
+            decided = tuple(d for d in state.decided if d[0] != event.tool_use_id)
             state = replace(
                 state,
                 pending_tools=pending,
                 requested=requested,
                 interrupted=interrupted,
+                decided=decided,
             )
         case RunResumed(reason="crash"):
             started = {i for i, _ in state.requested}
@@ -143,13 +159,33 @@ def _approvals(state: RunState, event: Event) -> RunState:
     match event:
         case ApprovalRequested():
             asked = event.tool_use_id
-            open_ = state.open_approvals
-            if asked not in open_:
-                state = replace(state, open_approvals=(*open_, asked))
+            if asked not in state.open_approvals:
+                state = replace(state, open_approvals=(*state.open_approvals, asked))
         case ApprovalGranted() | ApprovalDenied():
+            if event.tool_use_id in state.open_approvals:
+                state = _decide(state, event)
             open_ = tuple(i for i in state.open_approvals if i != event.tool_use_id)
             state = replace(state, open_approvals=open_)
+        case Escalation():
+            asks = state.ladder_asks
+            if event.rung == _ASK_RUNG and event.tool_use_id and event.call_hash:
+                asks = (*asks, (event.tool_use_id, event.call_hash))
+            seen = (event.rung, tuple(event.tripped), event.reason)
+            state = replace(state, rung=event.rung, ladder_asks=asks, escalated=seen)
     return state
+
+
+def _decide(state: RunState, event: ApprovalGranted | ApprovalDenied) -> RunState:
+    """Remember a decision until its calls complete; a grant on a ladder ask also
+    forgets the earlier calls with the asked call's hash, so they no longer count."""
+    granted = isinstance(event, ApprovalGranted)
+    reason = "" if granted else f"denied by {event.by}: {event.note}"
+    decided = (*state.decided, (event.tool_use_id, granted, reason))
+    hashes = state.call_hashes
+    asked = dict(state.ladder_asks).get(event.tool_use_id)
+    if granted and asked is not None:
+        hashes = tuple(h for h in hashes if h != asked)
+    return replace(state, decided=decided, call_hashes=hashes)
 
 
 def _lifecycle(state: RunState, event: Event) -> RunState:
@@ -158,7 +194,17 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
             state = replace(state, turns=state.turns + 1)
         case RunForked():
             # A fork forgets how its parent's last call ended and what a crash found.
-            state = replace(state, turns=0, ended_with=None, interrupted=())
+            state = replace(
+                state,
+                turns=0,
+                ended_with=None,
+                interrupted=(),
+                rung=0,
+                call_hashes=(),
+                ladder_asks=(),
+                escalated=None,
+                decided=(),
+            )
         case RunPaused():
             state = replace(state, paused=True)
         case RunResumed():

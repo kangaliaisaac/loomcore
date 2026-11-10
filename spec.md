@@ -4,6 +4,7 @@
   - [1. The loop](#1-the-loop)
     - [Ending a run](#ending-a-run)
     - [Limits](#limits)
+    - [The finish tool](#the-finish-tool)
     - [Escalation ladder](#escalation-ladder)
     - [Extension seams](#extension-seams)
   - [2. The event log](#2-the-event-log)
@@ -48,10 +49,12 @@ def step(
 ```
 
 1. `step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. 
-2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure (it counts the run's own `turn_started` events in `turns`, and a fork starts again at 0, and so does the `turn` its first `turn_started` carries: the fork's turns number from 1). Given the same configuration, a new process can load the log and continue: the configuration (system prompt and tool schemas) is logged in `run_started` with its digest, and again, with its digest, on each switch-strategy `escalation`; `resume` checks two things and refuses to continue if either differs: the configuration the resuming process holds must match `run_started.config_digest` (for a fork, the root's), and the configuration it rebuilds from the latest switch must match that switch's `config_digest`. The latest configuration is this run's own latest switch, else the one in force on its parent chain at `from.seq`, else its root's `run_started`. Limits are logged beside the configuration but are not part of the digest, so they can be changed on resume.
+2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure (it counts the run's own `turn_started` events in `turns`, and a fork starts again at 0, and so does the `turn` its first `turn_started` carries: the fork's turns number from 1). Given the same configuration, a new process can load the log and continue: the configuration (model, system prompt and tool schemas) is logged in `run_started` with its digest, and again, with its digest, on each switch-strategy `escalation`; `resume` checks two things and refuses to continue if either differs: the configuration the resuming process holds must match `run_started.config_digest` (for a fork, the root's), and the configuration it rebuilds from the latest switch must match that switch's `config_digest`. The latest configuration is this run's own latest switch, else the one in force on its parent chain at `from.seq`, else its root's `run_started`. Limits are logged beside the configuration but are not part of the digest, so they can be changed on resume.
 
 ```python
-# Effect = CallModel | RunTool | Fail | AskHuman | Stop   (Fail completes a call ok=false, unrun)
+# Effect = CallModel | RequestCalls | RunTool | Fail | AskHuman | Stop
+#   RequestCalls: write the turn's tool_requested lines together, then judge them
+#   RunTool may carry a ladder note; Fail completes a call ok=false, unrun
 
 class Driver(Protocol):                 # bound to one session file and one spend log
     def run(self, task: Task) -> RunResult: ...            # Task = (prompt, limits)
@@ -118,6 +121,10 @@ Turn, time and budget limits are part of the core, not extensions. `max_turns` a
 
 **Two identifiers, two jobs.** A replay or a retry does not re-run a completed call: tool completions are matched by `tool_use_id`, and if the log already holds a `tool_completed` for it, the result is reused. A call is interrupted when it has a `tool_requested` and no `tool_completed`. Delivery is at-least-once. If the process dies after a tool runs but before its completion is appended, `resume` re-runs a tool registered `read_only=True`, and turns a call to any other tool, declared or not, into an `Ask` before running it again (one `approval_requested`, about the first such call, covering the turn's calls). A tool that does not say it is read-only is treated as one that has side effects. Separately, `call_hash` is `sha256(json.dumps({"tool": name, "input": args}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()`, stored on `tool_requested`; it identifies a repeated call for the repeat detector and the cache. A deliberate repeat (running the tests again after an edit) is never refused at the nudge or switch rungs, but enough identical calls within `repeat_window` still reach the ask and stop rungs, because the detector cannot see that an edit came between them.
 
+### The finish tool
+
+`finish(result)` is a typed tool whose schema is `finish.SCHEMA`; the configuration lists it among the tools. When a turn calls it, the run ends with reason `finished` and the call's `result` as `run_finished.result`. The `finish` call is completed with `ok=true`; any other call in the same turn is completed with `ok=false` and is not run, so "every `tool_use` gets exactly one `tool_completed`" holds. The verifier (section 3.6) runs before the run ends once it exists; until then the claim stands.
+
 ### Escalation ladder
 
 The repeat detector looks at the run's last `repeat_window` tool calls (default 10), the one being judged included, and counts those with the same `call_hash`. When that count reaches or exceeds `repeat_threshold` (default 3) the call trips the detector, so each further identical call trips it again and the ladder can climb. The detector is exact: it sees identical calls only, so a model that changes a harmless argument each time is not caught, and `max_turns`, `timeout` and `run_cap` are the backstop for near-repeats. It is a fold over the `tool_requested` lines of the run's own calls and the `approval_granted` lines that answer its own ladder asks (the same `tool_use_id` as the `escalation`) (a fork counts only its own), judged once per turn in emission order, so it needs no workspace state and replays the same way every time.
@@ -129,6 +136,8 @@ The calls that tripped are pending `tool_use` blocks, and the rung settles them,
 - **Nudge and switch strategy:** the calls run as normal, and the rung's message is added to the `content` of each call that tripped (the corrective nudge, or the instruction that the approach is changing), after the post guards have run and before `tool_completed` is written, so the log holds exactly what the model sees. Nothing is blocked, so a deliberate repeat is never refused. Switch strategy changes the prompt or tool set for the turns that follow, logs the new configuration and its digest on its `escalation` event, so a new process can rebuild it from the log.
 - **Ask a human:** the question is about the first call that tripped, and `approval_requested`, `approval_granted` and `approval_denied` carry its `tool_use_id`. None of the turn's calls runs before the decision. On a grant they all run as normal, and calls made before the grant no longer count toward that `call_hash`; the rung does not drop, so the next trip goes to `stuck`, because a human approved the call once, not for good. On a denial the call that was asked about is completed with `ok=false` and the denial note, and the turn's other calls run as normal.
 - **Stop (`stuck`):** every still-pending `tool_use` in the turn is completed with `ok=false` and the reason before `run_finished` is written.
+
+After a crash, `resume` finishes the rung: `stuck` stops; an `ask` with no decision asks again and runs nothing; a decision already logged is settled (a granted turn runs, a denied call fails) and never asked about again; a nudge or a switch runs the calls with their notes, except that any call a crash left possibly run is asked about first (the grant then runs it without its note). A turn whose `tool_requested` lines were not all written is requested and judged again for the lines that are missing.
 
 A fork after any of these is a clean point once the completions are written.
 
@@ -189,11 +198,11 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 
 | Kind | Emitted by | Payload (besides the envelope) |
 |---|---|---|
-| `run_started` | driver | `task`, `config` (system prompt, tool schemas), `limits`, `config_digest` (over `config` only) |
+| `run_started` | driver | `task`, `config` (model, system prompt, tool schemas), `limits`, `config_digest` (over `config` only) |
 | `run_forked` | driver | `from` (`runId`, `seq`), `hint`, `limits` (optional override) |
 | `turn_started` | driver | `turn` |
 | `model_call` | driver | `type: "assistant"`, `message`, `duration_ms`, `cost_usd`, `pricing_version` (below) |
-| `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash` |
+| `tool_requested` | driver | `tool_use_id`, `name`, `input`, `call_hash`; the turn's lines are written together, before any of its calls runs, and then judged by the repeat detector; a `finish` call has none |
 | `tool_completed` | driver | `tool_use_id`, `ok`, `content`, `duration_ms`, `cached` (a completion for a call that did not run has `duration_ms` 0 and `cached` false) |
 | `guard_decision` | guards | `stage` (`pre`/`post`), `tool_use_id`, `decision` (`allow`/`deny`/`ask`/`redact`; `ask` only at `pre`, `redact` only at `post`), `reason` |
 | `approval_requested` | guards, driver | `tool_use_id`, `question` |
@@ -202,7 +211,7 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `context_packed` | context store | `selected`, `dropped`, `tokens`, `budget` |
 | `context_compacted` | context store | `strategy`, `tokens_before`, `tokens_after` |
 | `verification_passed`, `verification_failed` | verifier | `verifier`, `message` |
-| `escalation` | driver | `rung`, `reason`, `tool_use_id` and `call_hash` (of the first call that tripped), `config` and `config_digest` (on switch strategy) |
+| `escalation` | driver | `rung`, `reason`, `tool_use_id` and `call_hash` (of the first call that tripped), `tripped` (every call that tripped), `config` and `config_digest` (on switch strategy) |
 | `note_written` | workspace | `path` |
 | `run_paused` | driver | `reason` (`awaiting_approval` or `limit`), `limit` (which one, when the reason is `limit`), `resume_from` |
 | `run_resumed` | driver | `reason` (`approval`, `limit` or `crash`), `resume_from`, `limits` (the limits in force from here on for this run; required after a `limit` pause) |
@@ -428,6 +437,8 @@ src/loomcore/
   conversation.py # the messages a call sends, rebuilt from the log
   engine.py      # one run: emit events, perform effects
   loop.py        # Driver: run, resume, fork
+  ladder.py      # the repeat detector and the rung messages
+  finish.py      # the typed finish tool
   tools.py       # registry
   sandbox.py     # sandbox and rule evaluation
   workspace.py   # filesystem workspace

@@ -5,7 +5,7 @@ an approval open, is the run paused or finished). The loop adds the rest.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import reduce
@@ -25,6 +25,7 @@ from loomcore.events import (
     RunResumed,
     RunStarted,
     ToolCompleted,
+    ToolRequested,
     TurnStarted,
 )
 from loomcore.months import month_key
@@ -41,14 +42,23 @@ class ForkChainError(Exception):
 @dataclass(frozen=True)
 class RunState:
     event_count: int = 0
-    pending_tools: frozenset[str] = frozenset()
+    pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
+    # (id, name) of calls with a tool_requested and no completion: they may have run.
+    requested: tuple[tuple[str, str], ...] = ()
+    # The calls a crash resume found requested and not completed: they may have run.
+    # A requested call need not have started (the turn's lines can be written
+    # together), so only a crash makes a call "interrupted".
+    interrupted: tuple[str, ...] = ()
+    # A model_call that asked for no tool ends with (stop_reason,); until the next
+    # model_call a crash resume reads it to know what that call asked for.
+    ended_with: tuple[JsonValue, ...] | None = None
     open_approvals: frozenset[str] = frozenset()
     paused: bool = False
     finished: str | None = None
     turns: int = 0  # this run's turn_started events; a fork starts again at 0
     # Own model_call cost by UTC month ("2026-11"): a fork starts empty, because it
     # inherits its parent's events for context but not for spend.
-    spend_by_month: dict[str, Decimal] = field(default_factory=dict)
+    spend_by_month: tuple[tuple[str, Decimal], ...] = ()
     truncations: int = 0  # consecutive model_calls that stopped on max_tokens
     paused_limit: str | None = None  # the limit of the pause not yet resumed
     # Active time is the closed segments plus the open one (spec section 1, timeout).
@@ -83,7 +93,10 @@ def _is_tool_use(block: dict[str, JsonValue]) -> bool:
 
 
 def apply(state: RunState, event: Event) -> RunState:
-    """The next state. Total: an event that names an unknown id changes nothing."""
+    """The next state. An event that names an unknown id changes nothing.
+
+    Events are validated with aware timestamps, so `month_key` cannot raise here.
+    """
     state = replace(state, event_count=state.event_count + 1)
     state = _lifecycle(_tools_and_approvals(state, event), event)
     return _clock(_budget(state, event), event)
@@ -92,11 +105,30 @@ def apply(state: RunState, event: Event) -> RunState:
 def _tools_and_approvals(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
-            pending = state.pending_tools | set(tool_use_ids(event.message))
-            state = replace(state, pending_tools=pending)
+            ids = tool_use_ids(event.message)
+            pending = state.pending_tools + tuple(
+                i for i in ids if i not in state.pending_tools
+            )
+            ended = None if ids else (event.message.get("stop_reason"),)
+            state = replace(state, pending_tools=pending, ended_with=ended)
+        case ToolRequested():
+            if event.tool_use_id not in dict(state.requested):
+                requested = (*state.requested, (event.tool_use_id, event.name))
+                state = replace(state, requested=requested)
         case ToolCompleted():
-            pending = state.pending_tools - {event.tool_use_id}
-            state = replace(state, pending_tools=pending)
+            pending = tuple(i for i in state.pending_tools if i != event.tool_use_id)
+            requested = tuple(r for r in state.requested if r[0] != event.tool_use_id)
+            interrupted = tuple(i for i in state.interrupted if i != event.tool_use_id)
+            state = replace(
+                state,
+                pending_tools=pending,
+                requested=requested,
+                interrupted=interrupted,
+            )
+        case RunResumed(reason="crash"):
+            started = {i for i, _ in state.requested}
+            found = tuple(i for i in state.pending_tools if i in started)
+            state = replace(state, interrupted=found)
         case ApprovalRequested():
             open_ = state.open_approvals | {event.tool_use_id}
             state = replace(state, open_approvals=open_)
@@ -125,13 +157,21 @@ def _budget(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
             key = month_key(event.timestamp)
-            spend = {**state.spend_by_month}
+            spend = dict(state.spend_by_month)
             spend[key] = spend.get(key, Decimal(0)) + event.cost_usd
             cut_off = event.message.get("stop_reason") == "max_tokens"
             truncations = state.truncations + 1 if cut_off else 0
-            state = replace(state, spend_by_month=spend, truncations=truncations)
+            state = replace(
+                state, spend_by_month=tuple(spend.items()), truncations=truncations
+            )
         case RunForked():
-            state = replace(state, spend_by_month={}, truncations=0)
+            state = replace(
+                state,
+                spend_by_month=(),
+                truncations=0,
+                ended_with=None,
+                interrupted=(),
+            )
         case RunPaused():
             state = replace(state, paused_limit=event.limit)
         case RunResumed():
@@ -152,15 +192,25 @@ def _clock(state: RunState, event: Event) -> RunState:
             state = replace(state, active=timedelta(0), segment_start=event.timestamp)
         case RunResumed():
             # The earlier segment ended at the last event before this gap.
-            closed = state.active + _open_segment(state)
+            closed = state.active + open_segment(state, state.last_event_at)
             state = replace(state, active=closed, segment_start=event.timestamp)
     return replace(state, last_event_at=event.timestamp)
 
 
-def _open_segment(state: RunState) -> timedelta:
-    if state.segment_start is None or state.last_event_at is None:
+def open_segment(state: RunState, end: datetime | None) -> timedelta:
+    """The open segment up to `end`; nothing if no segment has started."""
+    if state.segment_start is None or end is None:
         return timedelta(0)
-    return state.last_event_at - state.segment_start
+    return end - state.segment_start
+
+
+def spent(state: RunState) -> Decimal:
+    """This run's own spend over every month."""
+    return sum((usd for _, usd in state.spend_by_month), Decimal(0))
+
+
+def spent_in(state: RunState, month: str) -> Decimal:
+    return dict(state.spend_by_month).get(month, Decimal(0))
 
 
 def replay(events: Iterable[Event], initial: RunState | None = None) -> RunState:

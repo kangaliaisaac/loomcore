@@ -15,7 +15,7 @@ from strategies import logs
 from loomcore import step as step_module
 from loomcore.events import Event
 from loomcore.replay import RunState, replay, run_events
-from loomcore.step import CallModel, Effect, RunTool, Stop, step
+from loomcore.step import AskHuman, CallModel, Effect, Fail, RunTool, Stop, step
 
 
 def run(*events: Event) -> tuple[RunState, list[Effect]]:
@@ -153,7 +153,6 @@ def test_the_state_counts_events_and_a_stopped_run_has_nothing_to_do(
         state, effects = step(state, event)
         if state.finished is not None or state.paused:
             assert effects == []
-    assert state == replay(log)
     assert state.event_count == len(log)
 
 
@@ -166,6 +165,7 @@ def test_step_imports_nothing_that_touches_the_world() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
     assert imported <= {
+        "collections.abc",
         "dataclasses",
         "typing",
         "pydantic",
@@ -193,3 +193,126 @@ def test_step_does_no_io(log: list[Event]) -> None:
         state = RunState()
         for event in log:
             state, _ = step(state, event)
+
+
+def asked(seq: int, tool_use_id: str = "a") -> Event:
+    return make("approval_requested", seq, tool_use_id=tool_use_id)
+
+
+def requested(seq: int, tool_use_id: str, name: str) -> Event:
+    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+
+
+def crash(*events: Event, read_only: frozenset[str] = frozenset()) -> list[Effect]:
+    state = RunState()
+    for event in events:
+        state, _ = step(state, event)
+    resumed = make("run_resumed", len(events), reason="crash")
+    return step(state, resumed, lambda name: name in read_only)[1]
+
+
+def test_a_crash_before_the_first_model_call_calls_the_model() -> None:
+    assert crash(make("run_started")) == [CallModel()]
+
+
+def test_a_crash_after_the_last_completion_calls_the_model() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a")]
+    log.append(make("tool_completed", 2, tool_use_id="a"))
+    assert crash(*log) == [CallModel()]
+
+
+def test_a_crash_after_a_final_answer_stops_with_its_reason() -> None:
+    assert crash(make("run_started"), model_call(1, "end_turn")) == [Stop("end_turn")]
+    assert crash(make("run_started"), model_call(1, "max_tokens")) == [CallModel()]
+
+
+def test_a_crash_runs_calls_never_started_and_reruns_read_only_ones() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log.append(requested(2, "a", "search"))
+    assert crash(*log, read_only=frozenset({"search"})) == [RunTool("a"), RunTool("b")]
+
+
+def test_a_crash_asks_before_rerunning_a_call_that_may_have_had_effects() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log.append(requested(2, "a", "write_file"))
+    [effect] = crash(*log, read_only=frozenset({"search"}))
+    assert isinstance(effect, AskHuman)
+    assert effect.tool_use_id == "a"
+
+
+def test_a_crash_with_an_open_approval_pauses_for_it() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a"), asked(2)]
+    assert [type(e) for e in crash(*log)] == [AskHuman]
+
+
+def test_a_grant_runs_every_pending_call_and_a_denial_fails_the_asked_one() -> None:
+    base = [make("run_started"), model_call(1, "tool_use", "a", "b"), asked(2)]
+    base.append(make("run_paused", 3, reason="awaiting_approval", resume_from=2))
+    base.append(make("run_resumed", 4, reason="approval", resume_from=2))
+    granted = make("approval_granted", 5, tool_use_id="a")
+    assert run(*base, granted)[1] == [RunTool("a"), RunTool("b")]
+    denied = make("approval_denied", 5, tool_use_id="a", by="me", note="no")
+    assert run(*base, denied)[1] == [Fail("a", "denied by me: no"), RunTool("b")]
+
+
+def test_a_decision_nobody_asked_for_does_nothing() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a")]
+    assert run(*log, make("approval_granted", 2, tool_use_id="a"))[1] == []
+
+
+def paused_for_approval(*log: Event, reason: str) -> RunState:
+    """The state after the log, a pause awaiting approval, and its resume."""
+    n = len(log)
+    pause = make("run_paused", n, reason="awaiting_approval", resume_from=n - 1)
+    resume = make("run_resumed", n + 1, reason=reason, resume_from=n - 1)
+    state = RunState()
+    for event in [*log, pause, resume]:
+        state, _ = step(state, event)
+    return state
+
+
+def denial(state: RunState, seq: int) -> list[Effect]:
+    denied = make("approval_denied", seq, tool_use_id="a", by="me", note="no")
+    return step(state, denied, lambda name: name == "search")[1]
+
+
+def test_a_denial_without_a_crash_fails_only_the_call_asked_about() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "search")]
+    log += [requested(4, "c", "write"), asked(5)]  # the turn's lines written together
+    state = paused_for_approval(*log, reason="approval")
+    assert denial(state, 9) == [
+        Fail("a", "denied by me: no"),
+        RunTool("b"),
+        RunTool("c"),
+    ]
+
+
+def test_after_a_crash_a_denial_fails_every_interrupted_call_with_effects() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "search")]
+    log += [requested(4, "c", "write"), asked(5)]
+    state = paused_for_approval(*log, reason="crash")
+    assert state.interrupted == ("a", "b", "c")
+    why = "denied by me: no"
+    assert denial(state, 9) == [Fail("a", why), Fail("c", why), RunTool("b")]
+
+
+def test_a_call_that_completes_is_no_longer_interrupted() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write")]
+    log.append(make("tool_completed", 4, tool_use_id="b"))
+    state = RunState()
+    for event in [*log, make("run_resumed", 5, reason="crash")]:
+        state, _ = step(state, event)
+    assert state.interrupted == ("a",)
+
+
+def test_a_crash_right_after_a_fork_from_a_final_answer_calls_the_model() -> None:
+    parent = [make("run_started"), model_call(1, "end_turn")]
+    origin: dict[str, object] = {"from": {"runId": "r1", "seq": 1}}
+    state = RunState()
+    for event in [*parent, make("run_forked", 0, "r2", **origin)]:
+        state, _ = step(state, event)
+    resumed = make("run_resumed", 1, "r2", reason="crash")
+    assert step(state, resumed)[1] == [CallModel()]

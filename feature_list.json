@@ -68,8 +68,8 @@
     "card": "05",
     "title": "Limits: check_limits, pauses and resume with limits",
     "spec": "1 Limits",
-    "acceptance": "check_limits names each of max_turns, timeout, run_cap, month_cap and max_output_tokens when it is reached; the limits in force come from the latest resume, fork or start on the run's chain; counts carry over a resume with limits, and a truncation pause resets the streak (the driver writes run_paused and run_resumed: f08)",
-    "passes": true
+    "acceptance": "each of max_turns, timeout, run_cap, month_cap and max_output_tokens pauses with its name; resume with limits continues; counts carry over",
+    "passes": false
   },
   {
     "id": "f10",
@@ -84,7 +84,7 @@
     "card": "05",
     "title": "Escalation ladder and the finish tool",
     "spec": "1 Escalation ladder, Ending a run",
-    "acceptance": "identical calls trip the detector at the threshold; nudge and switch never block; ask holds the turn; stuck completes pending calls; finish ends the run",
+    "acceptance": "identical calls trip the detector at the threshold; nudge and switch never block; ask holds the turn; stuck completes pending calls; finish ends the run; an approval decision logged before a crash is settled on crash resume (a denied call fails, a granted one runs)",
     "passes": false
   },
   {

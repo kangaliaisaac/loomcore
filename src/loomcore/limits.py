@@ -8,9 +8,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from loomcore.events import (
     Event,
@@ -21,7 +21,7 @@ from loomcore.events import (
     Usd,
 )
 from loomcore.months import month_key
-from loomcore.replay import RunState
+from loomcore.replay import RunState, open_segment, spent, spent_in
 
 LimitName = Literal["max_output_tokens", "max_turns", "timeout", "run_cap", "month_cap"]
 
@@ -33,8 +33,8 @@ class Limits(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    run_cap: Usd | None
-    month_cap: Usd | None
+    run_cap: Annotated[Usd, Field(ge=0)] | None
+    month_cap: Annotated[Usd, Field(ge=0)] | None
     max_turns: int = Field(50, gt=0)
     timeout: float = Field(600.0, gt=0)  # seconds of active time
     max_output_tokens: int = Field(8192, gt=0)
@@ -46,8 +46,8 @@ class Limits(BaseModel):
         return self.model_dump(mode="json")
 
 
-class LimitsMissingError(Exception):
-    """The chain holds no event that carries limits; the log is not a run's."""
+class LimitsError(Exception):
+    """The chain has no usable limits: none carried, or the latest do not parse."""
 
 
 @dataclass(frozen=True)
@@ -72,15 +72,27 @@ def limits_in_force(chain: Sequence[Event]) -> Limits:
                 RunResumed(limits=raw) | RunForked(limits=raw) | RunStarted(limits=raw)
             ):
                 if raw is not None:
-                    return Limits.model_validate(raw)
-    raise LimitsMissingError("no run_started, run_forked or run_resumed carries limits")
+                    return _parse(raw, event.seq)
+    raise LimitsError("no run_started, run_forked or run_resumed carries limits")
+
+
+def _parse(raw: JsonObject, seq: int) -> Limits:
+    try:
+        return Limits.model_validate(raw)
+    except ValidationError as error:
+        raise LimitsError(
+            f"the limits at seq {seq} do not parse; write limits from Limits.to_json()"
+        ) from error
 
 
 def elapsed(state: RunState, now: datetime) -> timedelta:
-    """Active time: closed segments, plus the open one up to `now`."""
-    if state.segment_start is None:
-        return state.active
-    return state.active + (now - state.segment_start)
+    """Active time: closed segments, plus the open one.
+
+    A paused or finished run is not running, so its open segment ends at its last
+    event, not at `now`.
+    """
+    stopped = state.paused or state.finished is not None
+    return state.active + open_segment(state, state.last_event_at if stopped else now)
 
 
 def check_limits(
@@ -91,9 +103,9 @@ def check_limits(
     now: datetime,
 ) -> WithinLimits | LimitReached:
     """Whether the next model call may be made; the first limit in this order wins."""
-    run_spend = sum(state.spend_by_month.values(), Decimal(0))
+    run_spend = spent(state)
     # A run that spans a month boundary charges only this month's calls to this month.
-    month_spend = state.spend_by_month.get(month_key(now), Decimal(0))
+    month_spend = spent_in(state, month_key(now))
     checks: tuple[tuple[LimitName, bool], ...] = (
         ("max_output_tokens", state.truncations >= _TRUNCATIONS_BEFORE_PAUSE),
         ("max_turns", state.turns >= limits.max_turns),

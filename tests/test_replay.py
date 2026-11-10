@@ -33,9 +33,9 @@ def test_the_same_log_always_folds_to_the_same_state() -> None:
 
 def test_tool_calls_are_pending_until_completed() -> None:
     call = make("model_call", 1, message=calling("a", "b"))
-    assert replay([call]).pending_tools == {"a", "b"}
+    assert replay([call]).pending_tools == ("a", "b")
     done = make("tool_completed", 2, tool_use_id="a")
-    assert replay([call, done]).pending_tools == {"b"}
+    assert replay([call, done]).pending_tools == ("b",)
 
 
 def test_a_completion_for_an_unknown_call_changes_nothing_but_the_count() -> None:

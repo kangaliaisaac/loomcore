@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from loomcore.events import Event, ModelCall, Usd
-from loomcore.replay import month_key
+from loomcore.months import month_key
 
 
 class SpendLine(BaseModel):

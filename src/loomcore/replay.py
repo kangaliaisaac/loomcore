@@ -6,7 +6,7 @@ an approval open, is the run paused or finished). The loop adds the rest.
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import reduce
 
@@ -27,6 +27,7 @@ from loomcore.events import (
     ToolCompleted,
     TurnStarted,
 )
+from loomcore.months import month_key
 
 
 class ForkChainError(Exception):
@@ -86,13 +87,6 @@ def apply(state: RunState, event: Event) -> RunState:
     state = replace(state, event_count=state.event_count + 1)
     state = _lifecycle(_tools_and_approvals(state, event), event)
     return _clock(_budget(state, event), event)
-
-
-def month_key(moment: datetime) -> str:
-    """The UTC month of `moment`, like "2026-11"."""
-    if moment.tzinfo is None:
-        raise ValueError("moment must be timezone-aware: months are judged in UTC")
-    return f"{moment.astimezone(UTC):%Y-%m}"
 
 
 def _tools_and_approvals(state: RunState, event: Event) -> RunState:

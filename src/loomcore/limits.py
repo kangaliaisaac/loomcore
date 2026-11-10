@@ -20,7 +20,8 @@ from loomcore.events import (
     RunStarted,
     Usd,
 )
-from loomcore.replay import RunState, month_key
+from loomcore.months import month_key
+from loomcore.replay import RunState
 
 LimitName = Literal["max_output_tokens", "max_turns", "timeout", "run_cap", "month_cap"]
 

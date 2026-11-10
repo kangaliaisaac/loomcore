@@ -3,16 +3,15 @@
 Every path goes through `resolve_inside`, which resolves first (following symlinks)
 and then requires the result to be inside the root. The check is not atomic with
 the open that follows: a process that can race the workspace can still swap a
-symlink in between, so the sandbox (a subprocess with no such access), not this
-class, is what contains hostile code.
+symlink in between, so the sandbox (a container that mounts only the workspace),
+not this class, is what contains hostile code.
 """
 
-import os
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
 
-from loomcore.sandbox import Refusal
+from loomcore.sandbox import Refusal, unusable
 
 
 class PathRefusedError(Exception):
@@ -124,7 +123,7 @@ class FilesystemWorkspace:
         """The entry `path` names, with its parent resolved and checked but the entry
         itself not followed, so a link can be removed even if it points outside."""
         name = Path(path).name
-        if name in ("", ".", "..") or _unusable(path):
+        if name in ("", ".", "..") or unusable(path):
             return self._resolve(action, path)  # resolve_inside refuses these
         try:
             parent = resolve_inside(self._root, str(Path(path).parent))
@@ -150,13 +149,3 @@ class FilesystemWorkspace:
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self._root).as_posix()
-
-
-def _unusable(path: str) -> bool:
-    """A path the operating system cannot take: a NUL byte, or text that cannot be
-    encoded (a lone surrogate, which a model's JSON can carry)."""
-    try:
-        os.fsencode(path)
-    except ValueError:
-        return True
-    return "\x00" in path

@@ -92,8 +92,8 @@ class ResourceLimits:
 @dataclass(frozen=True)
 class ProcessResult:
     """`returncode` is the command's, as Docker reports it: 137 after a kill (the
-    timeout, the output cap or the memory limit; the first two always, however the
-    docker client ended), 127 when the command could not be started, 125
+    timeout always, whatever the docker client then reports; the output cap and the
+    memory limit as Docker reports them), 127 when the command could not be started, 125
     when Docker itself failed."""
 
     returncode: int
@@ -231,7 +231,10 @@ def docker_args(
         args += ["--mount", f"type=bind,src={tree},dst={tree},readonly"]
     workdir = WORKSPACE if cwd == "." else f"{WORKSPACE}/{cwd}"
     args += ["--workdir", workdir, "--env-file", str(launch.env_file)]
-    return [*args, rules.image, *request.command]
+    # --entrypoint: an image's own ENTRYPOINT would otherwise run in place of the
+    # allowed program and take it as an argument, so `commands` would allow nothing.
+    program, *arguments = request.command
+    return [*args, "--entrypoint", program, rules.image, *arguments]
 
 
 def env_value_problem(name: str, value: str) -> str | None:
@@ -334,20 +337,18 @@ class DockerSandbox:
             )
             timed_out = False
             started = time.monotonic()
-            ended_by_us = False
             try:
                 while process.poll() is None:
                     timed_out = time.monotonic() - started > limits.timeout
                     over = _size(out) + _size(err) > limits.max_output_bytes
                     if timed_out or over:
-                        ended_by_us = True
                         break
                     time.sleep(_POLL_SECONDS)
             finally:
                 self._stop(name, process)  # also if we were interrupted
             stdout, stderr, cut = _read_together(out, err, limits.max_output_bytes)
             code = process.returncode
-            if ended_by_us or code < 0:  # a kill is a kill, however the client died
+            if timed_out or code < 0:  # a kill is a kill, however the client died
                 code = _KILLED
             return ProcessResult(code, stdout, stderr, timed_out, cut)
 
@@ -465,8 +466,8 @@ def _docker_config() -> dict[str, object]:
 def _context_socket() -> Path | None:
     """The socket of the Docker context in use (`DOCKER_CONTEXT`, else the config's
     `currentContext`), which is where Colima, OrbStack and rootless Docker live. None
-    for the default context or a context that is not a local socket. A context named
-    but not found is an error: the socket could be anywhere."""
+    for the default context. A context named but not found, or not a local socket, is
+    an error: the socket could be anywhere, or the daemon on another machine."""
     name = os.environ.get("DOCKER_CONTEXT") or _docker_config().get("currentContext")
     if not name or name == "default":
         return None
@@ -480,9 +481,18 @@ def _context_socket() -> Path | None:
         raise SandboxUnavailableError(
             f"cannot find the endpoint of the Docker context {name!r} ({meta}): {error}"
         ) from error
+    return _local_socket(host, f"the Docker context {name!r}")
+
+
+def _local_socket(host: object, where: str) -> Path:
+    """The path of a `unix://` endpoint. Any other daemon is remote, and a bind mount
+    would name a path on the other machine: no sandbox."""
     if isinstance(host, str) and host.startswith("unix://"):
         return Path(host.removeprefix("unix://"))
-    return None
+    raise SandboxUnavailableError(
+        f"{where} points at {host!r}, not a local unix socket: a remote daemon cannot "
+        "see the workspace, so there is no sandbox on it"
+    )
 
 
 def _docker_sockets() -> list[Path]:
@@ -496,8 +506,8 @@ def _docker_sockets() -> list[Path]:
         home / ".docker" / "desktop" / "docker.sock",
     ]
     host = os.environ.get("DOCKER_HOST", "")
-    if host.startswith("unix://"):
-        found.append(Path(host.removeprefix("unix://")))
+    if host:
+        found.append(_local_socket(host, "DOCKER_HOST"))
     if (context := _context_socket()) is not None:
         found.append(context)
     # Both where it really is and where a link to it sits: a tree holding the link

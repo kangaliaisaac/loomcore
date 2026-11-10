@@ -32,7 +32,6 @@ from loomcore.sandbox import (
     ResourceLimits,
     Rules,
     SandboxUnavailableError,
-    _docker_sockets,
     docker_args,
     env_value_problem,
     evaluate,
@@ -228,7 +227,8 @@ def test_the_command_line_isolates_the_container(root: Path) -> None:
     assert "--read-only" in args
     assert "--rm" in args
     assert "--init" in args
-    assert args[args.index(IMAGE) + 1 :] == [SH, "-c", "echo hi"]
+    assert args[args.index(IMAGE) + 1 :] == ["-c", "echo hi"]
+    assert args[args.index(IMAGE) - 2 :][:2] == ["--entrypoint", SH]  # not the image's
 
 
 def test_nothing_that_widens_the_container_is_on_the_command_line(root: Path) -> None:
@@ -381,14 +381,23 @@ def test_a_docker_context_that_cannot_be_found_means_no_sandbox(
         DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
-def test_a_context_that_is_not_a_local_socket_is_not_in_the_way(
+def test_a_docker_context_on_another_machine_means_no_sandbox(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    home = docker_home(tmp_path, monkeypatch, "{}")
-    without_context = _docker_sockets()
-    home.joinpath("config.json").write_text('{"currentContext": "remote"}')
+    home = docker_home(tmp_path, monkeypatch, '{"currentContext": "remote"}')
     add_context(home, "remote", "ssh://me@elsewhere")
-    assert _docker_sockets() == without_context  # nothing was added for it
+    with pytest.raises(SandboxUnavailableError, match="remote"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
+
+
+@pytest.mark.parametrize("host", ["tcp://10.0.0.5:2376", "ssh://me@elsewhere"])
+def test_a_docker_host_on_another_machine_means_no_sandbox(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    docker_home(tmp_path, monkeypatch, "{}")
+    monkeypatch.setenv("DOCKER_HOST", host)
+    with pytest.raises(SandboxUnavailableError, match="DOCKER_HOST"):
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
 @pytest.mark.parametrize("config", ["[]", "{not json", '"text"'])
@@ -696,6 +705,34 @@ def test_an_unusable_working_directory_or_argument_is_a_logged_refusal(
     with pytest.raises(CommandRefusedError):
         watched.run(ECHO, bad, cwd=root)
     assert len(watched.refusals) == 2
+
+
+@needs_docker
+def test_an_images_own_entrypoint_does_not_replace_the_allowed_program(
+    root: Path,
+) -> None:
+    tag = f"loomcore-test-entrypoint:{os.getpid()}"
+    made = subprocess.run(
+        [shutil.which("docker") or "docker", "create", IMAGE, ECHO],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    container = made.stdout.strip()
+    try:
+        subprocess.run(
+            ["docker", "commit", "--change", 'ENTRYPOINT ["/bin/echo", "HIJACKED"]',
+             container, tag],
+            capture_output=True, check=True,
+        )  # fmt: skip
+        watched = Watched(rules_for(root, image=tag))
+        result = watched.run(SH, "-c", "echo ran", cwd=root)
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", container], capture_output=True, check=False
+        )
+        subprocess.run(
+            ["docker", "rmi", "--force", tag], capture_output=True, check=False
+        )
+    assert result.stdout == "ran\n"
 
 
 @needs_docker

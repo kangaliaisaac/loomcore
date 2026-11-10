@@ -39,6 +39,7 @@ _STOP_SECONDS = 20.0  # how long to keep removing a container before killing its
 _DOCKER_CALL_SECONDS = 30.0
 _HOST_ONLY = (Path("/proc"), Path("/sys"), Path("/dev"))  # never mounted from the host
 _KILLED = 137
+_DOCKER_FAILED = 125
 _USER = re.compile(r"[1-9][0-9]*:[1-9][0-9]*\Z")  # uid:gid, neither root
 _ENV_LINE_BYTES = 60 * 1024  # Docker reads an env-file line of at most 64 KB
 
@@ -92,9 +93,9 @@ class ResourceLimits:
 @dataclass(frozen=True)
 class ProcessResult:
     """`returncode` is the command's, as Docker reports it: 137 after a kill (the
-    timeout always, whatever the docker client then reports; the output cap and the
-    memory limit as Docker reports them), 127 when the command could not be started, 125
-    when Docker itself failed."""
+    timeout always, and the output cap when Docker would have said 125 for the
+    container it removed; otherwise, and for the memory limit, as Docker reports it),
+    127 when the command could not be started, 125 when Docker itself failed."""
 
     returncode: int
     stdout: str
@@ -336,19 +337,23 @@ class DockerSandbox:
                 args, stdin=subprocess.DEVNULL, stdout=out, stderr=err
             )
             timed_out = False
+            cut_short = False  # we ended a client that was still running
             started = time.monotonic()
             try:
                 while process.poll() is None:
                     timed_out = time.monotonic() - started > limits.timeout
                     over = _size(out) + _size(err) > limits.max_output_bytes
                     if timed_out or over:
+                        cut_short = True
                         break
                     time.sleep(_POLL_SECONDS)
             finally:
                 self._stop(name, process)  # also if we were interrupted
             stdout, stderr, cut = _read_together(out, err, limits.max_output_bytes)
             code = process.returncode
-            if timed_out or code < 0:  # a kill is a kill, however the client died
+            # A kill is a kill, however the client died: removing a container that
+            # is not yet started (or is going) can make the client say 125 or die.
+            if timed_out or code < 0 or (cut_short and code == _DOCKER_FAILED):
                 code = _KILLED
             return ProcessResult(code, stdout, stderr, timed_out, cut)
 
@@ -508,7 +513,7 @@ def _docker_sockets() -> list[Path]:
     host = os.environ.get("DOCKER_HOST", "")
     if host:
         found.append(_local_socket(host, "DOCKER_HOST"))
-    if (context := _context_socket()) is not None:
+    elif (context := _context_socket()) is not None:  # DOCKER_HOST wins over a context
         found.append(context)
     # Both where it really is and where a link to it sits: a tree holding the link
     # is as unsafe as one holding the socket once the target is reachable too.

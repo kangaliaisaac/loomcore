@@ -712,14 +712,15 @@ def test_an_images_own_entrypoint_does_not_replace_the_allowed_program(
     root: Path,
 ) -> None:
     tag = f"loomcore-test-entrypoint:{os.getpid()}"
+    docker = shutil.which("docker") or "docker"
     made = subprocess.run(
-        [shutil.which("docker") or "docker", "create", IMAGE, ECHO],
+        [docker, "create", IMAGE, ECHO],
         capture_output=True, text=True, check=True,
     )  # fmt: skip
     container = made.stdout.strip()
     try:
         subprocess.run(
-            ["docker", "commit", "--change", 'ENTRYPOINT ["/bin/echo", "HIJACKED"]',
+            [docker, "commit", "--change", 'ENTRYPOINT ["/bin/echo", "HIJACKED"]',
              container, tag],
             capture_output=True, check=True,
         )  # fmt: skip
@@ -727,10 +728,10 @@ def test_an_images_own_entrypoint_does_not_replace_the_allowed_program(
         result = watched.run(SH, "-c", "echo ran", cwd=root)
     finally:
         subprocess.run(
-            ["docker", "rm", "--force", container], capture_output=True, check=False
+            [docker, "rm", "--force", container], capture_output=True, check=False
         )
         subprocess.run(
-            ["docker", "rmi", "--force", tag], capture_output=True, check=False
+            [docker, "rmi", "--force", tag], capture_output=True, check=False
         )
     assert result.stdout == "ran\n"
 
@@ -806,7 +807,7 @@ def test_output_that_exceeds_the_cap_is_flagged_even_if_the_command_exits_first(
         SH, "-c", "head -c 20000 /dev/zero | tr '\\0' a", cwd=root,
         limits=ResourceLimits(timeout=60, max_output_bytes=5000),
     )  # fmt: skip
-    assert result.returncode == 0  # it finished by itself
+    assert result.returncode in (0, 137)  # it finished by itself, or we got there first
     assert result.output_truncated
     assert len(result.stdout) == 5000
 
@@ -911,6 +912,7 @@ def test_runaway_output_is_cut_and_the_container_killed(root: Path) -> None:
     )
     assert result.output_truncated
     assert not result.timed_out
+    assert result.returncode == 137  # killed: never reported as "Docker failed" (125)
     assert len(result.stdout) <= 10_000
     assert leftover_containers() == ""
 

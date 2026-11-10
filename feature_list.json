@@ -77,7 +77,7 @@
     "title": "Retries with backoff and jitter",
     "spec": "1 Retries",
     "acceptance": "the retry policy is pure; 4xx other than 429 is never retried; retry-after is honoured",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f11",

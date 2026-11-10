@@ -552,3 +552,19 @@ def test_a_grant_covers_the_whole_turn_even_after_the_asked_call_completed() -> 
 def test_a_denial_covers_every_interrupted_call_even_after_one_was_failed() -> None:
     why = "denied by me: no"
     assert crash(*decided_turn(False, "a")) == [Fail("b", why)]
+
+
+def test_after_a_crash_every_requested_pending_call_counts_as_interrupted() -> None:
+    """A known limit, pinned so that narrowing it later is a visible change.
+
+    A turn's `tool_requested` lines are written together, so a crash marks calls
+    that cannot have started: calls run one at a time, and under an ask rung none
+    has run. Only the first requested-and-not-completed call can have started.
+    """
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write")]
+    log += [requested(4, "c", "write")]
+    state = RunState()
+    for event in [*log, make("run_resumed", 5, reason="crash")]:
+        state, _ = step(state, event)
+    assert state.interrupted == ("a", "b", "c")  # narrowed to ("a",) in card 06

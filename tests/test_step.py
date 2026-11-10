@@ -557,6 +557,17 @@ def test_no_call_can_have_started_while_the_ladder_holds_the_turn() -> None:
     assert after_crash(*decided_turn(True)).interrupted == ("a",)  # answered
 
 
+def test_no_call_can_have_started_while_a_denied_call_is_still_to_be_failed() -> None:
+    """The denial's Fail effects are written before any call runs."""
+    log = [*judged(3, "b"), asked(6, "b")]
+    log += [make("run_paused", 7, reason="awaiting_approval", resume_from=6)]
+    log += [make("run_resumed", 8, reason="approval", resume_from=6)]
+    log += [make("approval_denied", 9, tool_use_id="b", by="me", note="no")]
+    assert after_crash(*log).interrupted == ()  # a is first, but b's Fail comes first
+    why = "denied by me: no"
+    assert crash(*log) == [Fail("b", why), RunTool("a"), RunTool("c")]
+
+
 def test_a_denial_after_a_crash_in_an_ask_turn_fails_only_the_asked_call() -> None:
     log = [*judged(3, "a"), asked(6, "a")]  # crashed before run_paused
     state = paused_for_approval(*log, reason="crash")
@@ -575,3 +586,25 @@ def test_a_grant_after_a_crash_in_a_nudge_turn_keeps_the_notes() -> None:
     effects = step(state, granted)[1]
     note = ladder.NUDGE
     assert effects == [RunTool("a", note), RunTool("b"), RunTool("c", note)]
+
+
+def test_a_crash_after_a_finish_call_ends_the_run_and_does_not_run_anything() -> None:
+    log = [make("run_started"), finish_call(1, "a")]
+    assert crash(*log) == [Stop("finished", 42, "f")]
+    partly = [*log, make("tool_completed", 2, tool_use_id="f")]
+    assert crash(*partly) == [Stop("finished", 42, "f")]  # a is still pending
+
+
+def test_a_crash_after_every_call_was_settled_still_writes_the_ending() -> None:
+    log = [make("run_started"), finish_call(1)]
+    log.append(make("tool_completed", 2, tool_use_id="f"))
+    assert crash(*log) == [Stop("finished", 42, "f")]
+
+
+def test_a_crash_after_the_stuck_completions_still_stops() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a"), escalation(2, 4, "a")]
+    log += [
+        requested(3, "a", "n"),
+        make("tool_completed", 4, tool_use_id="a", ok=False),
+    ]
+    assert crash(*log) == [Stop("stuck")]

@@ -179,10 +179,14 @@ def _could_have_started(state: RunState) -> tuple[str, ...]:
     requested call without a completion can have.
     """
     requested = {i for i, _ in state.requested}
+    # An ask rung holds the turn; so does stuck, which only completes its calls.
     held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
+    denied = {i for i, granted, _ in state.decided if not granted}
     if not state.pending_tools or (held and not state.decided):
         return ()
     if any(i not in requested for i in state.pending_tools):
+        return ()
+    if denied & set(state.pending_tools):  # their Fails are written before any run
         return ()
     return (state.pending_tools[0],)
 

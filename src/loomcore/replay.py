@@ -25,6 +25,7 @@ from loomcore.events import (
     RunResumed,
     RunStarted,
     ToolCompleted,
+    ToolRequested,
     TurnStarted,
 )
 from loomcore.months import month_key
@@ -41,7 +42,12 @@ class ForkChainError(Exception):
 @dataclass(frozen=True)
 class RunState:
     event_count: int = 0
-    pending_tools: frozenset[str] = frozenset()
+    pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
+    # (id, name) of calls with a tool_requested and no completion: they may have run.
+    requested: tuple[tuple[str, str], ...] = ()
+    # A model_call that asked for no tool ends with (stop_reason,); until the next
+    # model_call a crash resume reads it to know what that call asked for.
+    ended_with: tuple[JsonValue, ...] | None = None
     open_approvals: frozenset[str] = frozenset()
     paused: bool = False
     finished: str | None = None
@@ -95,11 +101,20 @@ def apply(state: RunState, event: Event) -> RunState:
 def _tools_and_approvals(state: RunState, event: Event) -> RunState:
     match event:
         case ModelCall():
-            pending = state.pending_tools | set(tool_use_ids(event.message))
-            state = replace(state, pending_tools=pending)
+            ids = tool_use_ids(event.message)
+            pending = state.pending_tools + tuple(
+                i for i in ids if i not in state.pending_tools
+            )
+            ended = None if ids else (event.message.get("stop_reason"),)
+            state = replace(state, pending_tools=pending, ended_with=ended)
+        case ToolRequested():
+            if event.tool_use_id not in dict(state.requested):
+                requested = (*state.requested, (event.tool_use_id, event.name))
+                state = replace(state, requested=requested)
         case ToolCompleted():
-            pending = state.pending_tools - {event.tool_use_id}
-            state = replace(state, pending_tools=pending)
+            pending = tuple(i for i in state.pending_tools if i != event.tool_use_id)
+            requested = tuple(r for r in state.requested if r[0] != event.tool_use_id)
+            state = replace(state, pending_tools=pending, requested=requested)
         case ApprovalRequested():
             open_ = state.open_approvals | {event.tool_use_id}
             state = replace(state, open_approvals=open_)

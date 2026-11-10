@@ -15,7 +15,7 @@ from strategies import logs
 from loomcore import step as step_module
 from loomcore.events import Event
 from loomcore.replay import RunState, replay, run_events
-from loomcore.step import CallModel, Effect, RunTool, Stop, step
+from loomcore.step import AskHuman, CallModel, Effect, Fail, RunTool, Stop, step
 
 
 def run(*events: Event) -> tuple[RunState, list[Effect]]:
@@ -167,6 +167,7 @@ def test_step_imports_nothing_that_touches_the_world() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
     assert imported <= {
+        "collections.abc",
         "dataclasses",
         "typing",
         "pydantic",
@@ -194,3 +195,68 @@ def test_step_does_no_io(log: list[Event]) -> None:
         state = RunState()
         for event in log:
             state, _ = step(state, event)
+
+
+def asked(seq: int, tool_use_id: str = "a") -> Event:
+    return make("approval_requested", seq, tool_use_id=tool_use_id)
+
+
+def requested(seq: int, tool_use_id: str, name: str) -> Event:
+    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+
+
+def crash(*events: Event, read_only: frozenset[str] = frozenset()) -> list[Effect]:
+    state = RunState()
+    for event in events:
+        state, _ = step(state, event)
+    resumed = make("run_resumed", len(events), reason="crash")
+    return step(state, resumed, lambda name: name in read_only)[1]
+
+
+def test_a_crash_before_the_first_model_call_calls_the_model() -> None:
+    assert crash(make("run_started")) == [CallModel()]
+
+
+def test_a_crash_after_the_last_completion_calls_the_model() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a")]
+    log.append(make("tool_completed", 2, tool_use_id="a"))
+    assert crash(*log) == [CallModel()]
+
+
+def test_a_crash_after_a_final_answer_stops_with_its_reason() -> None:
+    assert crash(make("run_started"), model_call(1, "end_turn")) == [Stop("end_turn")]
+    assert crash(make("run_started"), model_call(1, "max_tokens")) == [CallModel()]
+
+
+def test_a_crash_runs_calls_never_started_and_reruns_read_only_ones() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log.append(requested(2, "a", "search"))
+    assert crash(*log, read_only=frozenset({"search"})) == [RunTool("a"), RunTool("b")]
+
+
+def test_a_crash_asks_before_rerunning_a_call_that_may_have_had_effects() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log.append(requested(2, "a", "write_file"))
+    [effect] = crash(*log, read_only=frozenset({"search"}))
+    assert isinstance(effect, AskHuman)
+    assert effect.tool_use_id == "a"
+
+
+def test_a_crash_with_an_open_approval_pauses_for_it() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a"), asked(2)]
+    assert [type(e) for e in crash(*log)] == [AskHuman]
+
+
+def test_a_grant_runs_every_pending_call_and_a_denial_fails_the_asked_one() -> None:
+    base = [make("run_started"), model_call(1, "tool_use", "a", "b"), asked(2)]
+    base.append(make("run_paused", 3, reason="awaiting_approval", resume_from=2))
+    base.append(make("run_resumed", 4, reason="approval", resume_from=2))
+    granted = make("approval_granted", 5, tool_use_id="a")
+    assert run(*base, granted)[1] == [RunTool("a"), RunTool("b")]
+    denied = make("approval_denied", 5, tool_use_id="a", by="me", note="no")
+    assert run(*base, denied)[1] == [Fail("a", "denied by me: no"), RunTool("b")]
+
+
+def test_a_decision_nobody_asked_for_does_nothing() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a")]
+    assert run(*log, make("approval_granted", 2, tool_use_id="a"))[1] == []

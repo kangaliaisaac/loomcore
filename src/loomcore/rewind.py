@@ -25,7 +25,7 @@ def fork_point_problem(events: Iterable[Event], point: ForkOrigin) -> str | None
     if state.finished is not None:
         problem = f"the run had already finished ({state.finished})"
     elif state.pending_tools:
-        problem = f"tool calls pending: {sorted(state.pending_tools)}"
+        problem = f"tool calls pending: {list(state.pending_tools)}"
     elif state.open_approvals:
         problem = f"approvals open: {sorted(state.open_approvals)}"
     elif state.paused:

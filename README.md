@@ -37,12 +37,12 @@ A short hello-agent example, about twenty lines, will be added here with the dri
 ## How not to use it
 
 - **It is not a framework.** There is no agent DSL, no dependency-injection container and no global state. You pass things in. It is a library you call, not a runtime that calls you.
-- **The sandbox is a policy, not a virtual machine.** It denies by default and checks paths and commands, but it does not replace operating-system isolation. Do not run untrusted code on a machine you care about because `loomcore` is wrapped around it.
+- **The sandbox is a Docker container, not a virtual machine.** It denies by default and runs each command in a locked-down container (no network, read-only root, non-root user, resource limits), but a container shares the host kernel. It needs a running Docker daemon and an image you have pulled; it never pulls and never falls back to the host. Do not run untrusted code on a machine you care about because `loomcore` is wrapped around it.
 - **Allow-listing is on you.** A secret is out of reach of model-run code only until you allow-list the variable or path that holds it.
 - **Tool output is untrusted data.** Never treat what a tool returns, such as a web page or a document, as instructions to the agent.
 - **The event log is sensitive.** It holds prompts, responses and tool results. A post guard can redact a secret from a tool result before it is logged, but only what the post guards you write are built to catch, and the log then holds the redacted content, not the secret; treat the log as sensitive and review it before sharing.
 - **Rewind restores conversation state, not files.** What the old run wrote to the workspace after the fork point is still on disk, and the fork starts from that workspace.
-- **A tool timeout abandons the call; it does not kill it.** Python cannot stop a running thread, so a timed-out tool may keep running and write late. A tool that writes should run through the sandbox, which kills its subprocess on timeout.
+- **A tool timeout abandons the call; it does not kill it.** Python cannot stop a running thread, so a timed-out tool may keep running and write late. A tool that writes should run through the sandbox, which kills its container on timeout.
 - **One writer per session file.** Do not point two processes at the same session; the second waits or fails.
 - **Among the optional extras, version 0.1 ships a plan tool (a plan file kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
 - **No UI, hosted service or database.** Persistence is a JSONL file.

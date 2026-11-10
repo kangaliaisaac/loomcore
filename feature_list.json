@@ -90,10 +90,10 @@
   {
     "id": "f12",
     "card": "06",
-    "title": "Sandbox boundary: Permit or Refusal, env allow-list, timeout",
+    "title": "Sandbox boundary: Permit or Refusal, a Docker container per command",
     "spec": "3.3",
-    "acceptance": "a parent secret never reaches the child; a timeout kills the process; every refusal is logged",
-    "passes": false
+    "acceptance": "a parent secret is never passed to the container; the container has no network, no host files or processes, no capabilities, a read-only root and only the workspace writable; a timeout kills the container and its children; every refusal is logged; no Docker, no sandbox",
+    "passes": true
   },
   {
     "id": "f13",
@@ -108,7 +108,7 @@
     "card": "07",
     "title": "Tool registry: schemas from type hints, execute",
     "spec": "3.2",
-    "acceptance": "schemas for nested types; invalid input gives a useful ok=false result",
+    "acceptance": "schemas for nested types; invalid input gives a useful ok=false result; the registry passes the workspace to tools, and settles how the workspace's and the sandbox's on_refusal callbacks become sandbox_denied events carrying the tool_use_id of the call that caused them, and how on_note becomes note_written (spec 3.2 leaves this to this card)",
     "passes": false
   },
   {

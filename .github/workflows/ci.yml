@@ -12,6 +12,10 @@ permissions:
 jobs:
   gates:
     runs-on: ubuntu-latest
+    env:
+      # The image the sandbox tests run in. tests/test_sandbox.py defaults to the same digest
+      # for local runs: change both together.
+      LOOMCORE_TEST_IMAGE: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
     steps:
       - uses: actions/checkout@v7
 
@@ -21,6 +25,10 @@ jobs:
 
       # uv picks a Python that satisfies requires-python in pyproject.toml.
       - run: uv sync --locked
+
+      # The sandbox tests start real containers; they fail, not skip, without this image.
+      - name: pull the sandbox test image
+        run: docker pull "$LOOMCORE_TEST_IMAGE"
 
       - name: ruff check
         run: uv run --no-sync ruff check .

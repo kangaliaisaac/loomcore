@@ -213,6 +213,11 @@ def test_a_naive_now_is_refused_not_read_as_local_time() -> None:
         month_to_date([line("1", run="x/y")], "s1/r1", datetime(2026, 11, 15))
 
 
+def test_a_naive_now_is_refused_even_when_there_are_no_lines() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        month_to_date([], "s1/r1", datetime(2026, 11, 15))
+
+
 def test_a_line_without_seq_is_skipped_and_reported(tmp_path: Path) -> None:
     path = tmp_path / "spend.jsonl"
     old = '{"at":"2026-11-15T00:00:00Z","usd":0.5,"run":"s1/r1","note":"model_call"}'

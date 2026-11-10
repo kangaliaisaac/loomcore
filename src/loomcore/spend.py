@@ -76,12 +76,9 @@ def read_spend(path: Path) -> SpendRead:
 
 def month_to_date(lines: Iterable[SpendLine], run: str, now: datetime) -> Decimal:
     """Spend in the UTC month of `now`, leaving out this run's own lines."""
+    month = month_key(now)  # first, so a naive `now` is refused even with no lines
     return sum(
-        (
-            line.usd
-            for line in lines
-            if line.run != run and month_key(line.at) == month_key(now)
-        ),
+        (line.usd for line in lines if line.run != run and month_key(line.at) == month),
         Decimal(0),
     )
 

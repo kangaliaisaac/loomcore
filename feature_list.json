@@ -101,7 +101,7 @@
     "title": "Filesystem workspace: resolve_inside, generation counter",
     "spec": "3.4",
     "acceptance": "../, absolute paths, a symlink out and a symlinked parent are all refused; delete bumps the generation",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f14",

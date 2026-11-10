@@ -313,7 +313,7 @@ class Run:
 
     def _ask(self, tool_use_id: str, question: str) -> RunResult:
         if tool_use_id in self.state.open_approvals:
-            question = self._logged_question(tool_use_id, question)
+            question = self._logged_question(tool_use_id)
         else:
             requested = self.emit(
                 "approval_requested", tool_use_id=tool_use_id, question=question
@@ -321,14 +321,13 @@ class Run:
             self.fold([requested])
         return self._pause("awaiting_approval", None, question)
 
-    def _logged_question(self, tool_use_id: str, extra: str) -> str:
-        """The question the log already holds for an open approval, plus any note."""
-        logged = next(
+    def _logged_question(self, tool_use_id: str) -> str:
+        """The question the log already holds for an open approval."""
+        return next(
             e.question
             for e in reversed(self.chain)
             if isinstance(e, ApprovalRequested) and e.tool_use_id == tool_use_id
         )
-        return f"{logged} ({extra})" if extra and extra not in logged else logged
 
     def _pause(
         self, reason: str, limit: str | None, question: str | None = None

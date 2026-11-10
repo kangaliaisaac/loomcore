@@ -182,8 +182,7 @@ def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
         return [ending]
     if state.open_approvals:
         first = state.open_approvals[0]
-        note = _risky_note(state, read_only).removeprefix("; ")
-        return [AskHuman(first, note)]
+        return [AskHuman(first, "")]  # the driver shows the question the log holds
     if state.pending_tools:
         return _resume_turn(state, read_only)
     return _between_turns(state)

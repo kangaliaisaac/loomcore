@@ -260,3 +260,28 @@ def test_a_grant_runs_every_pending_call_and_a_denial_fails_the_asked_one() -> N
 def test_a_decision_nobody_asked_for_does_nothing() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a")]
     assert run(*log, make("approval_granted", 2, tool_use_id="a"))[1] == []
+
+
+def test_a_denial_fails_every_interrupted_call_that_may_have_had_effects() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "search")]
+    log += [requested(4, "c", "write"), asked(5)]
+    log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
+    log += [make("run_resumed", 7, reason="approval", resume_from=5)]
+    denied = make("approval_denied", 8, tool_use_id="a", by="me", note="no")
+    state = RunState()
+    for event in log:
+        state, _ = step(state, event)
+    effects = step(state, denied, lambda name: name == "search")[1]
+    why = "denied by me: no"
+    assert effects == [Fail("a", why), Fail("c", why), RunTool("b")]
+
+
+def test_a_crash_right_after_a_fork_from_a_final_answer_calls_the_model() -> None:
+    parent = [make("run_started"), model_call(1, "end_turn")]
+    origin: dict[str, object] = {"from": {"runId": "r1", "seq": 1}}
+    state = RunState()
+    for event in [*parent, make("run_forked", 0, "r2", **origin)]:
+        state, _ = step(state, event)
+    resumed = make("run_resumed", 1, "r2", reason="crash")
+    assert step(state, resumed)[1] == [CallModel()]

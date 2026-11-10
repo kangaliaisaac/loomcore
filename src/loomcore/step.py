@@ -97,7 +97,7 @@ def _effects(
         case ApprovalGranted() if event.tool_use_id in old.open_approvals:
             effects = [RunTool(i) for i in state.pending_tools]
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
-            effects = _after_denial(state, event)
+            effects = _after_denial(state, event, read_only)
         case ModelCall():
             effects = _after_model_call(event)
         case ToolCompleted() if event.tool_use_id in old.pending_tools and (
@@ -107,10 +107,23 @@ def _effects(
     return effects
 
 
-def _after_denial(state: RunState, event: ApprovalDenied) -> list[Effect]:
+def _after_denial(
+    state: RunState, event: ApprovalDenied, read_only: ReadOnly
+) -> list[Effect]:
+    """A denial covers the asked call and every other call that may have run."""
     reason = f"denied by {event.by}: {event.note}"
-    others = [RunTool(i) for i in state.pending_tools if i != event.tool_use_id]
-    return [Fail(event.tool_use_id, reason), *others]
+    denied = {event.tool_use_id, *_interrupted_risky(state, read_only)}
+    failed = [Fail(i, reason) for i in state.pending_tools if i in denied]
+    others = [RunTool(i) for i in state.pending_tools if i not in denied]
+    return [*failed, *others]
+
+
+def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
+    return [
+        i
+        for i, name in state.requested
+        if i in state.pending_tools and not read_only(name)
+    ]
 
 
 def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
@@ -127,12 +140,9 @@ def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
 def _rerun(state: RunState, read_only: ReadOnly) -> list[Effect]:
     """A call requested but never completed may have run: a read-only tool is run
     again, any other becomes an `AskHuman` first. The question is about the first
-    such call and covers every call of the turn."""
-    risky = [
-        i
-        for i, name in state.requested
-        if i in state.pending_tools and not read_only(name)
-    ]
+    such call and covers every such call of the turn: a grant runs them all, a
+    denial fails them all."""
+    risky = _interrupted_risky(state, read_only)
     if risky:
         return [AskHuman(risky[0], f"{risky[0]} may have run before the crash; again?")]
     return [RunTool(i) for i in state.pending_tools]

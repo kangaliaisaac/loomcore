@@ -42,14 +42,16 @@ The paper's parsed "Thought / Action / Observation" text is not used; extended t
 The core is one pure function:
 
 ```python
-def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]: ...
+def step(
+    state: RunState, event: Event, read_only: Callable[[str], bool] = ...
+) -> tuple[RunState, list[Effect]]: ...   # read_only(tool name); an unknown tool is not read-only
 ```
 
 1. `step` never performs I/O. A thin driver feeds it events, performs the effects it returns (call the model, run a tool, ask a human, stop) and appends each result to the log as the next event. 
 2. `RunState` is a fold over the log: `functools.reduce(apply, events, initial)`, with `apply` pure (it counts the run's own `turn_started` events in `turns`, and a fork starts again at 0, and so does the `turn` its first `turn_started` carries: the fork's turns number from 1). Given the same configuration, a new process can load the log and continue: the configuration (system prompt and tool schemas) is logged in `run_started` with its digest, and again, with its digest, on each switch-strategy `escalation`; `resume` checks two things and refuses to continue if either differs: the configuration the resuming process holds must match `run_started.config_digest` (for a fork, the root's), and the configuration it rebuilds from the latest switch must match that switch's `config_digest`. The latest configuration is this run's own latest switch, else the one in force on its parent chain at `from.seq`, else its root's `run_started`. Limits are logged beside the configuration but are not part of the digest, so they can be changed on resume.
 
 ```python
-# Effect = CallModel | RunTool | AskHuman | Stop
+# Effect = CallModel | RunTool | Fail | AskHuman | Stop   (Fail completes a call ok=false, unrun)
 
 class Driver(Protocol):
     def run(self, task: Task, log: EventLog) -> RunResult: ...
@@ -83,7 +85,7 @@ A run ends on purpose. `run_finished` is terminal and carries the reason. A run 
 | `run_finished` | `stuck` | the escalation ladder ran out |
 | `run_finished` | `killed` | an external signal or the kill switch; a budget cap pauses with `limit`, not `killed` |
 | `run_finished` | `error` | an unrecoverable error, with the message |
-| `run_paused` | `awaiting_approval` | a guard, the escalation ladder, or crash resume of a tool that is not read-only asked for approval; `resume` with a decision appends `run_resumed`, then `approval_granted` or `approval_denied`, and continues the same run. `resume` without a decision on such a pause is an error, and so is a decision on a run that is not paused for approval |
+| `run_paused` | `awaiting_approval` | a guard, the escalation ladder, or crash resume of a tool that is not read-only asked for approval; `resume` with a decision appends `run_resumed`, then `approval_granted` or `approval_denied`, and continues the same run: a grant runs every pending call of the turn; a denial completes the asked-about call, and every other interrupted call of a tool that is not read-only, with `ok=false` and `denied by <by>: <note>`, and runs the rest. `resume` without a decision on such a pause is an error, and so is a decision on a run that is not paused for approval |
 | `run_paused` | `limit` | `max_turns`, `timeout`, `run_cap`, `month_cap` or `max_output_tokens` was reached; the stop is graceful and names which one in `limit`. `resume(ref, limits=...)` must be given and appends `run_resumed` with those limits; the turn count, the spend and the timeout segments carry over. The limits need not be raised: the next `check_limits` decides (for `max_output_tokens`, the `run_resumed` has reset `truncations`, so the run gets fresh attempts), and if a limit is still reached the run pauses again with the same `limit` (a run paused on `month_cap` on the 31st has room again on the 1st). `resume` on a finished run is an error |
 
 Before `run_finished` is written for any reason, including `killed` and `error`, the driver completes every still-pending `tool_use` with `ok=false` and the reason as `content`. A process that dies before it can do so is an ordinary crash: `resume` settles the pending calls as it does after any crash (a `read_only` tool is re-run, any other tool becomes an `Ask`), not by completing them `ok=false`. If the turn's `escalation` event is already logged, `resume` finishes that rung instead: after `stuck` it completes the pending calls `ok=false` and writes `run_finished`; an `approval_requested` with no decision and no `run_paused` is treated as `awaiting_approval`, and `resume` writes the `run_paused` (after its `run_resumed`). After a crash, `resume` appends `run_resumed` before any other event (the `run_paused` it adds for an open approval, the re-run of a read-only tool), because the open segment of the timeout ends at the last event before `run_resumed`: an event written first at the restart would count the downtime as active time. A kill is recorded only by its `run_finished`, so a kill interrupted by a crash is not in the log and a resumed run continues; kill it again.

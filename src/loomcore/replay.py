@@ -151,7 +151,7 @@ def _budget(state: RunState, event: Event) -> RunState:
                 state, spend_by_month=tuple(spend.items()), truncations=truncations
             )
         case RunForked():
-            state = replace(state, spend_by_month=(), truncations=0)
+            state = replace(state, spend_by_month=(), truncations=0, ended_with=None)
         case RunPaused():
             state = replace(state, paused_limit=event.limit)
         case RunResumed():

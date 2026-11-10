@@ -34,13 +34,30 @@ def reply(text: str = "done", stop: str = "end_turn") -> JsonObject:
     return {"content": [{"type": "text", "text": text}], "stop_reason": stop}
 
 
-def use(*calls: tuple[str, str], stop: str = "tool_use") -> JsonObject:
-    """A response that calls tools: pairs of (tool_use_id, tool name)."""
+def use(
+    *calls: tuple[str, str], stop: str = "tool_use", q: str | None = None
+) -> JsonObject:
+    """A response that calls tools: pairs of (tool_use_id, tool name).
+
+    The input is `{"q": id}` unless `q` is given, so calls with the same `q` repeat.
+    """
     blocks: list[JsonValue] = [
-        {"type": "tool_use", "id": i, "name": name, "input": {"q": i}}
+        {"type": "tool_use", "id": i, "name": name, "input": {"q": q or i}}
         for i, name in calls
     ]
     return {"content": blocks, "stop_reason": stop}
+
+
+def finish(result: JsonValue, *others: tuple[str, str]) -> JsonObject:
+    """A response that calls the finish tool, beside any other tool calls."""
+    blocks: list[JsonValue] = [
+        {"type": "tool_use", "id": "fin", "name": "finish", "input": {"result": result}}
+    ]
+    blocks += [
+        {"type": "tool_use", "id": i, "name": name, "input": {"q": i}}
+        for i, name in others
+    ]
+    return {"content": blocks, "stop_reason": "tool_use"}
 
 
 def failure(status: int, retry_after: float | None = None) -> ModelCallError:
@@ -59,10 +76,14 @@ class Clock:
 
 
 class FakePricing:
+    fail = False  # a model the price table does not list
+
     def worst_case(self, request: ModelRequest) -> Decimal:
         return COST
 
     def cost(self, message: JsonObject) -> tuple[Decimal, str]:
+        if self.fail:
+            raise LookupError("no price for this model")
         return COST, "test"
 
 
@@ -78,6 +99,9 @@ class World:
     read_only: set[str] = field(default_factory=set)  # tool names
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
+    crash_on_call: int | None = None  # the Nth tool call kills the run
+    calls_made: int = 0
+    pricing: FakePricing = field(default_factory=FakePricing)
     clock: Clock = field(default_factory=Clock)
     ids: int = 0
 
@@ -90,6 +114,9 @@ class World:
 
     def tool(self, name: str, args: JsonObject) -> ToolResult:
         use_id = str(args["q"])
+        self.calls_made += 1
+        if self.calls_made == self.crash_on_call:
+            raise Crash
         self.clock.advance(self.tool_seconds)
         if use_id in self.crash_in:
             self.crash_in.discard(use_id)
@@ -106,7 +133,7 @@ class World:
             model=self.model,
             tool=self.tool,
             read_only=lambda name: name in self.read_only,
-            pricing=FakePricing(),
+            pricing=self.pricing,
             clock=self.clock,
             monotonic=lambda: 0.0,
             random=lambda: 0.5,

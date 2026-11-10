@@ -26,6 +26,9 @@ class Config:
     model: str
     system: str
     tools: tuple[JsonObject, ...] = ()
+    # What the switch-strategy rung changes to (spec section 1). Not part of the
+    # digest: the log holds this configuration and its digest once it is in force.
+    switch_to: Config | None = None
 
     def to_json(self) -> JsonObject:
         return {"model": self.model, "system": self.system, "tools": list(self.tools)}

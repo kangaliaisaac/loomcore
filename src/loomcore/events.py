@@ -184,6 +184,7 @@ class Escalation(_Envelope):
     call_hash: str | None = None
     config: JsonObject | None = None
     config_digest: str | None = None
+    tripped: list[str] = Field(default_factory=list)  # every call that tripped
 
 
 class NoteWritten(_Envelope):

@@ -11,7 +11,7 @@ from hypothesis import given, settings
 from strategies import logs
 
 from loomcore.events import Event
-from loomcore.replay import RunState, apply, replay
+from loomcore.replay import RunState, apply, replay, run_events
 from loomcore.step import CallModel, Effect, RunTool, Stop, step
 
 
@@ -85,6 +85,24 @@ def test_a_response_cut_off_inside_its_only_tool_use_continues() -> None:
     message = calling("a", stop_reason="max_tokens")
     effects = run(make("run_started"), make("model_call", 1, message=message))[1]
     assert effects == [CallModel()]
+
+
+def test_a_completion_that_finishes_nothing_does_not_call_the_model() -> None:
+    log = [
+        make("run_started"),
+        model_call(1, "tool_use", "a"),
+        make("tool_completed", 2, tool_use_id="a"),
+    ]
+    assert run(*log)[1] == [CallModel()]
+    assert run(*log, make("tool_completed", 3, tool_use_id="a"))[1] == []
+    assert run(*log, make("tool_completed", 3, tool_use_id="ghost"))[1] == []
+
+
+def test_a_fork_counts_its_own_turns_not_its_parents() -> None:
+    parent = [make("run_started"), make("turn_started", 1), make("turn_started", 2)]
+    origin: dict[str, object] = {"from": {"runId": "r1", "seq": 2}}
+    fork = [make("run_forked", 0, "r2", **origin), make("turn_started", 1, "r2")]
+    assert replay(run_events([*parent, *fork], "r2")).turns == 1
 
 
 def test_a_paused_or_finished_run_has_nothing_to_do() -> None:

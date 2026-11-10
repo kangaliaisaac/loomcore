@@ -3,6 +3,10 @@
 `step` does no I/O. The driver appends an event, calls `step`, performs the effects
 it returns and appends each result as the next event. Limits, retries and the
 escalation ladder wrap this core; they are separate features.
+
+Deliberately not covered yet: `AskHuman`, and what follows `run_resumed` for a
+crash or an approval and `approval_granted` / `approval_denied`. They belong to
+the driver's resume (f08) and the ladder (f11), which add them to `Effect`.
 """
 
 from dataclasses import dataclass
@@ -56,18 +60,20 @@ def step(state: RunState, event: Event) -> tuple[RunState, list[Effect]]:
     new = apply(state, event)
     if new.finished is not None or new.paused:
         return new, []
-    return new, _effects(new, event)
+    return new, _effects(state, new, event)
 
 
-def _effects(state: RunState, event: Event) -> list[Effect]:
+def _effects(old: RunState, state: RunState, event: Event) -> list[Effect]:
     effects: list[Effect] = []
     match event:
         case RunStarted() | RunForked() | RunResumed(reason="limit"):
             effects = [CallModel()]
         case ModelCall():
             effects = _after_model_call(event)
-        case ToolCompleted() if not state.pending_tools:
-            effects = [CallModel()]
+        case ToolCompleted() if event.tool_use_id in old.pending_tools and (
+            not state.pending_tools
+        ):
+            effects = [CallModel()]  # the turn's last pending call just finished
     return effects
 
 

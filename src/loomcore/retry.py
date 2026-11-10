@@ -16,7 +16,10 @@ _SERVER_ERRORS = range(500, 600)
 
 @dataclass(frozen=True)
 class CallError:
-    """What a failed model or tool call tells the policy; no SDK types here."""
+    """What a failed model call tells the policy; no SDK types here.
+
+    Tool timeouts never come here: a timed-out tool is abandoned, not retried.
+    """
 
     kind: Literal["http", "connection", "timeout"]
     status: int | None = None  # for "http"

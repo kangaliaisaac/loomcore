@@ -41,7 +41,7 @@ class RunState:
     open_approvals: frozenset[str] = frozenset()
     paused: bool = False
     finished: str | None = None
-    turns: int = 0  # turn_started events folded in; f09 resets it for a fork
+    turns: int = 0  # this run's turn_started events; a fork starts again at 0
 
 
 def tool_use_ids(message: JsonObject) -> list[str]:
@@ -96,6 +96,8 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
     match event:
         case TurnStarted():
             state = replace(state, turns=state.turns + 1)
+        case RunForked():
+            state = replace(state, turns=0)
         case RunPaused():
             state = replace(state, paused=True)
         case RunResumed():

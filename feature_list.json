@@ -60,7 +60,7 @@
     "card": "05",
     "title": "Driver: run, resume, ports and run_resumed",
     "spec": "1 The loop, Ending a run",
-    "acceptance": "a scripted fake model drives a run to finished; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped (month_spend returns them with the total); the spend-log path it reads is logged, since a mistyped path reads as empty; a fork calls ensure_fork_point and then writes run_forked",
+    "acceptance": "a scripted fake model drives a run to finished; step covers a crash or approval resume and approval_granted/approval_denied, with AskHuman in Effect; the driver checks the timeout before a retry sleep; resume refuses a changed digest; a crash then late resume does not time out; resume calls repair_spend with the session lock held; skipped spend lines are surfaced, not dropped (month_spend returns them with the total); the spend-log path it reads is logged, since a mistyped path reads as empty; a fork calls ensure_fork_point and then writes run_forked",
     "passes": false
   },
   {

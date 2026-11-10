@@ -60,9 +60,9 @@ class RunState:
     # The finish call of the latest model_call, (id, result): a crash after it must
     # end the run, not run the call.
     finishing: tuple[str, JsonValue] | None = None
-    # The calls a crash resume found requested and not completed: they may have run.
-    # A requested call need not have started (the turn's lines can be written
-    # together), so only a crash makes a call "interrupted".
+    # The call a crash resume found that may have run (see `_could_have_started`).
+    # A requested call need not have started: the turn's lines are written together
+    # and the calls run one at a time, so only a crash makes a call "interrupted".
     interrupted: tuple[str, ...] = ()
     # A model_call that asked for no tool ends with (stop_reason,); until the next
     # model_call a crash resume reads it to know what that call asked for.
@@ -166,10 +166,29 @@ def _tools(state: RunState, event: Event) -> RunState:
                 interrupted=interrupted,
             )
         case RunResumed(reason="crash"):
-            started = {i for i, _ in state.requested}
-            found = tuple(i for i in state.pending_tools if i in started)
-            state = replace(state, interrupted=found)
+            state = replace(state, interrupted=_could_have_started(state))
     return state
+
+
+def _could_have_started(state: RunState) -> tuple[str, ...]:
+    """The calls a crash may have interrupted: at most the first one still pending.
+
+    Calls run one at a time, in order, and only once every line of the turn is
+    written. So none can have started while a line is missing, or while the ladder
+    holds the turn for a human with no answer logged; otherwise only the first
+    requested call without a completion can have.
+    """
+    requested = {i for i, _ in state.requested}
+    # An ask rung holds the turn; so does stuck, which only completes its calls.
+    held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
+    denied = {i for i, granted, _ in state.decided if not granted}
+    if not state.pending_tools or (held and not state.decided):
+        return ()
+    if any(i not in requested for i in state.pending_tools):
+        return ()
+    if denied & set(state.pending_tools):  # their Fails are written before any run
+        return ()
+    return (state.pending_tools[0],)
 
 
 def _approvals(state: RunState, event: Event) -> RunState:

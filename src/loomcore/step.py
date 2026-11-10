@@ -120,10 +120,10 @@ def _after_tool_event(
             # The escalation, if any, was written first, so the turn is judged.
             effects = _proceed(state, read_only)
         case ApprovalGranted() if event.tool_use_id in old.open_approvals:
-            effects = [RunTool(i) for i in state.pending_tools]
+            effects = _run_pending(state)
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
             reason = {i: r for i, _, r in state.decided}[event.tool_use_id]
-            effects = _deny(state, event.tool_use_id, reason, read_only)
+            effects = _deny(state, event.tool_use_id, reason)
         case ToolCompleted() if event.tool_use_id in old.pending_tools and (
             not state.pending_tools
         ):
@@ -160,14 +160,15 @@ def _ladder(state: RunState) -> list[Effect]:
     return [RunTool(i, note if i in tripped else None) for i in state.pending_tools]
 
 
-def _deny(
-    state: RunState, tool_use_id: str, reason: str, read_only: ReadOnly
-) -> list[Effect]:
-    """A denial covers the asked call and every other call that may have run."""
-    denied = {tool_use_id, *_interrupted_risky(state, read_only)}
-    failed = [Fail(i, reason) for i in state.pending_tools if i in denied]
-    others = [RunTool(i) for i in state.pending_tools if i not in denied]
-    return [*failed, *others]
+def _deny(state: RunState, tool_use_id: str, reason: str) -> list[Effect]:
+    """A denial fails the asked call; the rest of the turn runs as it would after a
+    grant (with the rung's notes), and its Fail is written before any of them."""
+    rest = [
+        e
+        for e in _run_pending(state)
+        if not (isinstance(e, RunTool) and e.tool_use_id == tool_use_id)
+    ]
+    return [Fail(tool_use_id, reason), *rest]
 
 
 def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
@@ -230,12 +231,21 @@ def _after_decision(
     state: RunState, decision: tuple[str, bool, str], read_only: ReadOnly
 ) -> list[Effect]:
     tool_use_id, granted, reason = decision
-    if not granted:
-        return _deny(state, tool_use_id, reason, read_only)
+    if not granted and tool_use_id in state.pending_tools:  # its Fail is not written
+        return _deny(state, tool_use_id, reason)
     # The human answered the ladder's question, not "run a call that may have
     # already written again": that one is asked unless the tool is read-only.
     if _interrupted_risky(state, read_only):
         return _settle(state, read_only)
+    return _run_pending(state)
+
+
+def _run_pending(state: RunState) -> list[Effect]:
+    """Run the turn's calls once a human has answered; a nudge or a switch rung
+    still adds its note to the calls that tripped (an ask rung adds none)."""
+    rung = state.escalated[0] if state.escalated else 0
+    if rung in (ladder.NUDGE_RUNG, ladder.SWITCH_RUNG):
+        return _ladder(state)
     return [RunTool(i) for i in state.pending_tools]
 
 

@@ -66,6 +66,23 @@ def test_an_absolute_path_outside_is_refused_and_one_inside_is_accepted(
     assert len(watched.refusals) == 1
 
 
+def test_a_sibling_directory_that_shares_the_roots_name_as_a_prefix_is_refused(
+    root: Path,
+) -> None:
+    """`work2` starts with `work`: a string-prefix check would let it through."""
+    sibling = root.parent / (root.name + "2")
+    sibling.mkdir()
+    (sibling / "f.txt").write_text("not yours")
+    watched = Watched(root)
+    with pytest.raises(PathRefusedError):
+        watched.workspace.read(f"../{sibling.name}/f.txt")
+    with pytest.raises(PathRefusedError):
+        watched.workspace.write(f"../{sibling.name}/new.txt", "x")
+    with pytest.raises(PathRefusedError):
+        watched.workspace.read(str(sibling / "f.txt"))
+    assert not (sibling / "new.txt").exists()
+
+
 def test_a_symlink_out_of_the_workspace_is_refused(root: Path) -> None:
     (root / "link.txt").symlink_to(root.parent / "outside" / "secret.txt")
     watched = Watched(root)
@@ -225,7 +242,7 @@ def test_deleting_inside_a_symlinked_parent_that_leaves_the_root_is_refused(
     assert watched.refusals[0].target == "dir/secret.txt"
 
 
-def test_a_path_with_a_nul_byte_is_refused_and_logged(root: Path) -> None:
+def test_a_path_the_system_cannot_take_is_refused_and_logged(root: Path) -> None:
     watched = Watched(root)
     for action in (watched.workspace.read, watched.workspace.list):
         with pytest.raises(PathRefusedError):
@@ -233,10 +250,11 @@ def test_a_path_with_a_nul_byte_is_refused_and_logged(root: Path) -> None:
     with pytest.raises(PathRefusedError):
         watched.workspace.write("a\x00b", "x")
     before = watched.workspace.generation
-    with pytest.raises(PathRefusedError):
-        watched.workspace.delete("a\x00b")  # in the last component, not the parent
+    for unusable in ("a\x00b", "\ud800"):  # in the last component, not the parent
+        with pytest.raises(PathRefusedError):
+            watched.workspace.delete(unusable)
     assert watched.workspace.generation == before
-    assert len(watched.refusals) == 4
+    assert len(watched.refusals) == 5
     assert "cannot be resolved" in watched.refusals[0].reason
 
 
@@ -262,7 +280,9 @@ def test_a_link_to_the_notes_file_still_writes_the_notes(root: Path) -> None:
     assert watched.notes == ["notes.md", "notes.md"]  # the file written, by its name
 
 
-SEGMENTS = st.sampled_from(["..", ".", "a", "b", "link", "dirlink", "/", ""])
+SEGMENTS = st.sampled_from(
+    ["..", ".", "a", "b", "link", "dirlink", "outside", "work2", "f", "g", "/", ""]
+)
 OPERATIONS = st.sampled_from(["read", "write", "delete", "list"])
 
 
@@ -282,11 +302,15 @@ def test_nothing_outside_the_root_is_read_or_changed(
 ) -> None:
     """The oracle is what happens on disk, not what resolve_inside says."""
     base = tmp_path_factory.mktemp("ws")
-    root, outside = base / "work", base / "outside"
+    # Six levels down, so that six `..` segments still land inside what is watched.
+    deep = base.joinpath("d1", "d2", "d3", "d4", "d5")
+    root, outside = deep / "work", deep / "outside"
     (root / "a").mkdir(parents=True)
     outside.mkdir()
     (outside / "f").write_text("secret")
     (outside / "g").write_text("other")
+    (deep / "work2").mkdir()  # shares the root's name as a prefix
+    (deep / "work2" / "f").write_text("sibling")
     (root / "link").symlink_to(outside / "f")
     (root / "dirlink").symlink_to(outside, target_is_directory=True)
     before = snapshot(base, skip=root)
@@ -294,13 +318,14 @@ def test_nothing_outside_the_root_is_read_or_changed(
     path = "/".join(parts)
     try:
         if operation == "read":
-            assert ws.read(path) not in ("secret", "other")
+            assert ws.read(path) not in ("secret", "other", "sibling")
         elif operation == "write":
             ws.write(path, "PWNED")
         elif operation == "delete":
             ws.delete(path)
         else:
-            assert not {"f", "g"} & {Path(name).name for name in ws.list(path)}
+            names = {Path(name).name for name in ws.list(path)}
+            assert not {"f", "g"} & names
     except PathRefusedError, OSError:
         pass  # refused, or an ordinary error such as a missing file
     assert snapshot(base, skip=root) == before

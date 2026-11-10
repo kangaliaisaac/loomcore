@@ -7,6 +7,7 @@ symlink in between, so the sandbox (a subprocess with no such access), not this
 class, is what contains hostile code.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
@@ -123,8 +124,8 @@ class FilesystemWorkspace:
         """The entry `path` names, with its parent resolved and checked but the entry
         itself not followed, so a link can be removed even if it points outside."""
         name = Path(path).name
-        if name in ("", ".", "..") or "\x00" in path:
-            return self._resolve(action, path)  # resolve_inside refuses a NUL byte
+        if name in ("", ".", "..") or _unusable(path):
+            return self._resolve(action, path)  # resolve_inside refuses these
         try:
             parent = resolve_inside(self._root, str(Path(path).parent))
         except PathRefusedError as error:
@@ -149,3 +150,13 @@ class FilesystemWorkspace:
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self._root).as_posix()
+
+
+def _unusable(path: str) -> bool:
+    """A path the operating system cannot take: a NUL byte, or text that cannot be
+    encoded (a lone surrogate, which a model's JSON can carry)."""
+    try:
+        os.fsencode(path)
+    except ValueError:
+        return True
+    return "\x00" in path

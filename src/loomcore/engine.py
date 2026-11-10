@@ -342,7 +342,10 @@ class Run:
     def _finish(self, stop: Stop) -> RunResult:
         """End the run: settle every pending call first, then write run_finished."""
         settled = [self._settle_call(i, stop) for i in self.state.pending_tools]
-        result = stop.result if stop.result is not None else self._last_text()
+        # A finish call's result stands even when it is null; other stops report the
+        # model's last words.
+        keep = stop.finish_id is not None or stop.result is not None
+        result = stop.result if keep else self._last_text()
         finished = self.emit("run_finished", reason=stop.reason, result=result)
         self.fold([*settled, finished])
         return RunResult(self.ref, "finished", stop.reason, result=result)

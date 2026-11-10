@@ -18,6 +18,7 @@ from loomcore.events import (
     Event,
     ForkOrigin,
     JsonObject,
+    RunFinished,
     ToolCompleted,
 )
 from loomcore.limits import Limits
@@ -437,6 +438,17 @@ def test_finish_ends_the_run_with_its_result_and_is_not_run_as_a_tool(
     assert world.tool_calls == []
 
 
+def test_a_finish_with_no_result_ends_with_that_not_the_last_words(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[finish(None)])
+    result = start(world, tmp_path)
+    assert (result.reason, result.result) == ("finished", None)
+    assert [e.result for e in all_events(tmp_path) if isinstance(e, RunFinished)] == [
+        None
+    ]
+
+
 def test_the_calls_beside_finish_are_settled_without_running(tmp_path: Path) -> None:
     world = World(script=[finish("done", ("a", "search"))])
     result = start(world, tmp_path)
@@ -496,7 +508,9 @@ def test_a_denied_ladder_ask_fails_that_call_and_the_next_trip_is_stuck(
     assert "denied by me: no" in why
 
 
-def test_a_grant_logged_before_a_crash_is_not_asked_about_again(tmp_path: Path) -> None:
+def test_a_grant_logged_before_a_crash_does_not_license_a_second_run(
+    tmp_path: Path,
+) -> None:
     world = World(script=repeat(6), crash_on_call=4)
     driver = world.driver(tmp_path, LADDER_CONFIG)
     paused = driver.run(REPEATING)
@@ -504,11 +518,13 @@ def test_a_grant_logged_before_a_crash_is_not_asked_about_again(tmp_path: Path) 
         driver.resume(paused.ref, Decision(granted=True, by="me"))
     with pytest.raises(ConfigChangedError):  # the switch is part of the log
         world.driver(tmp_path).resume(paused.ref)
-    done = driver.resume(paused.ref)
+    again = driver.resume(paused.ref)  # c4 may have run: that is a new question
+    assert (again.status, again.reason) == ("paused", "awaiting_approval")
+    assert again.question is not None
+    assert "may have run before the crash" in again.question
+    done = driver.resume(again.ref, Decision(granted=True, by="me"))
     assert (done.status, done.reason) == ("finished", "stuck")
-    kinds_ = events(tmp_path)
-    assert kinds_.count("approval_requested") == 1
-    assert kinds_.count("run_paused") == 1
+    assert events(tmp_path).count("approval_requested") == 2
 
 
 def test_a_fork_from_a_final_answer_with_no_hint_asks_the_model_to_carry_on(

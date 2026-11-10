@@ -212,7 +212,7 @@ def _resume_turn(state: RunState, read_only: ReadOnly) -> list[Effect]:
     if unrequested:
         return [RequestCalls(unrequested)]
     if state.decided:  # the answer was logged; the crash came before the turn ended
-        return _after_decision(state, state.decided[0], read_only)
+        return _after_decision(state, state.decided[-1], read_only)
     return _proceed(state, read_only)
 
 
@@ -230,9 +230,13 @@ def _after_decision(
     state: RunState, decision: tuple[str, bool, str], read_only: ReadOnly
 ) -> list[Effect]:
     tool_use_id, granted, reason = decision
-    if granted:
-        return [RunTool(i) for i in state.pending_tools]
-    return _deny(state, tool_use_id, reason, read_only)
+    if not granted:
+        return _deny(state, tool_use_id, reason, read_only)
+    # The human answered the ladder's question, not "run a call that may have
+    # already written again": that one is asked unless the tool is read-only.
+    if _interrupted_risky(state, read_only):
+        return _settle(state, read_only)
+    return [RunTool(i) for i in state.pending_tools]
 
 
 def _risky_note(state: RunState, read_only: ReadOnly) -> str:

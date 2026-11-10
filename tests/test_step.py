@@ -475,23 +475,33 @@ def test_a_crash_after_a_nudge_finishes_it_but_asks_first_about_risky_calls() ->
     assert isinstance(ask, AskHuman)
 
 
-def decided_then_crash(granted: bool) -> list[Effect]:
+def decided_log(granted: bool) -> list[Event]:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
     log += [requested(2, "a", "write"), requested(3, "b", "write"), asked(4, "a")]
     log += [make("run_paused", 5, reason="awaiting_approval", resume_from=4)]
     log += [make("run_resumed", 6, reason="approval", resume_from=4)]
     kind = "approval_granted" if granted else "approval_denied"
     log += [make(kind, 7, tool_use_id="a", by="me", note="no")]
-    return crash(*log)
+    return log
 
 
 def test_a_grant_logged_before_a_crash_is_settled_not_asked_again() -> None:
-    assert decided_then_crash(True) == [RunTool("a"), RunTool("b")]
+    read_only = frozenset({"write"})  # nothing can have written twice
+    assert crash(*decided_log(True), read_only=read_only) == [
+        RunTool("a"),
+        RunTool("b"),
+    ]
+
+
+def test_a_grant_does_not_license_re_running_a_call_that_may_have_written() -> None:
+    [ask] = crash(*decided_log(True))  # "write" is not read-only
+    assert isinstance(ask, AskHuman)
+    assert "write (a)" in ask.question
 
 
 def test_a_denial_logged_before_a_crash_is_settled_not_asked_again() -> None:
     why = "denied by me: no"
-    assert decided_then_crash(False) == [Fail("a", why), Fail("b", why)]
+    assert crash(*decided_log(False)) == [Fail("a", why), Fail("b", why)]
 
 
 def test_a_crash_after_a_finish_call_ends_the_run_and_does_not_run_anything() -> None:
@@ -535,7 +545,8 @@ def decided_turn(granted: bool, *completed: str) -> list[Event]:
 
 
 def test_a_grant_covers_the_whole_turn_even_after_the_asked_call_completed() -> None:
-    assert crash(*decided_turn(True, "a")) == [RunTool("b")]
+    read_only = frozenset({"write"})
+    assert crash(*decided_turn(True, "a"), read_only=read_only) == [RunTool("b")]
 
 
 def test_a_denial_covers_every_interrupted_call_even_after_one_was_failed() -> None:

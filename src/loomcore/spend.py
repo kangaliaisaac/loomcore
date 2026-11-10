@@ -7,13 +7,14 @@ need no lock, and a leading newline keeps a torn record from absorbing the next.
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from loomcore.events import Event, ModelCall, Usd
+from loomcore.replay import month_key
 
 
 class SpendLine(BaseModel):
@@ -75,13 +76,11 @@ def read_spend(path: Path) -> SpendRead:
 
 def month_to_date(lines: Iterable[SpendLine], run: str, now: datetime) -> Decimal:
     """Spend in the UTC month of `now`, leaving out this run's own lines."""
-    if now.tzinfo is None:
-        raise ValueError("now must be timezone-aware: months are judged in UTC")
     return sum(
         (
             line.usd
             for line in lines
-            if line.run != run and _month(line.at) == _month(now)
+            if line.run != run and month_key(line.at) == month_key(now)
         ),
         Decimal(0),
     )
@@ -132,8 +131,3 @@ def repair_spend(path: Path, events: Iterable[Event], run: str) -> tuple[str, ..
     for line in missing_spend_lines(events, existing.lines, run):
         append_spend(path, line)
     return existing.skipped
-
-
-def _month(moment: datetime) -> tuple[int, int]:
-    utc = moment.astimezone(UTC)
-    return utc.year, utc.month

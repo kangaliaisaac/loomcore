@@ -137,7 +137,8 @@ def test_any_other_call_resets_the_truncation_streak() -> None:
 
 def test_a_fork_starts_with_no_truncations_and_no_spend() -> None:
     parent = [started(), call(1, 9, "max_tokens"), call(2, 9, "max_tokens")]
-    log = run_events([*parent, forked(0, "r2")], "r2")
+    log = run_events([*parent, forked(3, "r2", parent_seq=2)], "r2")
+    assert replay(log).truncations == 0  # the parent's streak is not inherited
     assert check(log, limits(run_cap=1)) == WithinLimits()
 
 
@@ -198,6 +199,7 @@ def test_a_crash_then_a_late_resume_does_not_time_out() -> None:
     day = 86400
     log = [started(), call(40), make("run_resumed", day, reason="crash", resume_from=1)]
     assert check(log, limits(timeout=60), after=10) == WithinLimits()
+    assert check(log, limits(timeout=60), after=21) == LimitReached("timeout")
 
 
 def test_a_forks_clock_starts_at_its_run_forked() -> None:
@@ -238,3 +240,18 @@ def test_a_siblings_override_never_applies() -> None:
 def test_a_chain_with_no_limits_is_refused() -> None:
     with pytest.raises(LimitsMissingError):
         limits_in_force([make("turn_started", 0)])
+
+
+def test_when_several_limits_hold_the_first_in_the_specs_order_is_named() -> None:
+    log = [started(), *turns(3), call(4, 5)]
+    both = limits(max_turns=3, run_cap=1, month_cap=1)
+    assert check(log, both) == LimitReached("max_turns")
+    caps = limits(run_cap=1, month_cap=1)
+    assert check(log, caps, month_to_date="9") == LimitReached("run_cap")
+
+
+def test_an_approval_resume_keeps_the_truncation_streak() -> None:
+    log = [started(), call(1, stop="max_tokens"), call(2, stop="max_tokens")]
+    log += [make("run_paused", 3, reason="awaiting_approval", resume_from=2)]
+    log += [resumed(4, "approval")]
+    assert check(log, limits()) == LimitReached("max_output_tokens")

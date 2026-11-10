@@ -119,11 +119,8 @@ def _after_denial(
 
 
 def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
-    return [
-        i
-        for i, name in state.requested
-        if i in state.pending_tools and not read_only(name)
-    ]
+    names = dict(state.requested)
+    return [i for i in state.interrupted if not read_only(names[i])]
 
 
 def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:

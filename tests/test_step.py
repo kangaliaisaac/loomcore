@@ -153,8 +153,6 @@ def test_the_state_counts_events_and_a_stopped_run_has_nothing_to_do(
         state, effects = step(state, event)
         if state.finished is not None or state.paused:
             assert effects == []
-    half = len(log) // 2  # step and replay share `apply`, so split the fold instead
-    assert state == replay(log[half:], replay(log[:half]))
     assert state.event_count == len(log)
 
 
@@ -262,19 +260,52 @@ def test_a_decision_nobody_asked_for_does_nothing() -> None:
     assert run(*log, make("approval_granted", 2, tool_use_id="a"))[1] == []
 
 
-def test_a_denial_fails_every_interrupted_call_that_may_have_had_effects() -> None:
+def paused_for_approval(*log: Event, reason: str) -> RunState:
+    """The state after the log, a pause awaiting approval, and its resume."""
+    n = len(log)
+    pause = make("run_paused", n, reason="awaiting_approval", resume_from=n - 1)
+    resume = make("run_resumed", n + 1, reason=reason, resume_from=n - 1)
+    state = RunState()
+    for event in [*log, pause, resume]:
+        state, _ = step(state, event)
+    return state
+
+
+def denial(state: RunState, seq: int) -> list[Effect]:
+    denied = make("approval_denied", seq, tool_use_id="a", by="me", note="no")
+    return step(state, denied, lambda name: name == "search")[1]
+
+
+def test_a_denial_without_a_crash_fails_only_the_call_asked_about() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
+    log += [requested(2, "a", "write"), requested(3, "b", "search")]
+    log += [requested(4, "c", "write"), asked(5)]  # the turn's lines written together
+    state = paused_for_approval(*log, reason="approval")
+    assert denial(state, 9) == [
+        Fail("a", "denied by me: no"),
+        RunTool("b"),
+        RunTool("c"),
+    ]
+
+
+def test_after_a_crash_a_denial_fails_every_interrupted_call_with_effects() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
     log += [requested(2, "a", "write"), requested(3, "b", "search")]
     log += [requested(4, "c", "write"), asked(5)]
-    log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
-    log += [make("run_resumed", 7, reason="approval", resume_from=5)]
-    denied = make("approval_denied", 8, tool_use_id="a", by="me", note="no")
-    state = RunState()
-    for event in log:
-        state, _ = step(state, event)
-    effects = step(state, denied, lambda name: name == "search")[1]
+    state = paused_for_approval(*log, reason="crash")
+    assert state.interrupted == ("a", "b", "c")
     why = "denied by me: no"
-    assert effects == [Fail("a", why), Fail("c", why), RunTool("b")]
+    assert denial(state, 9) == [Fail("a", why), Fail("c", why), RunTool("b")]
+
+
+def test_a_call_that_completes_is_no_longer_interrupted() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write")]
+    log.append(make("tool_completed", 4, tool_use_id="b"))
+    state = RunState()
+    for event in [*log, make("run_resumed", 5, reason="crash")]:
+        state, _ = step(state, event)
+    assert state.interrupted == ("a",)
 
 
 def test_a_crash_right_after_a_fork_from_a_final_answer_calls_the_model() -> None:

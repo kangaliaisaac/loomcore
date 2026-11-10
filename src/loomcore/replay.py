@@ -45,6 +45,10 @@ class RunState:
     pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
     # (id, name) of calls with a tool_requested and no completion: they may have run.
     requested: tuple[tuple[str, str], ...] = ()
+    # The calls a crash resume found requested and not completed: they may have run.
+    # A requested call need not have started (the turn's lines can be written
+    # together), so only a crash makes a call "interrupted".
+    interrupted: tuple[str, ...] = ()
     # A model_call that asked for no tool ends with (stop_reason,); until the next
     # model_call a crash resume reads it to know what that call asked for.
     ended_with: tuple[JsonValue, ...] | None = None
@@ -114,7 +118,17 @@ def _tools_and_approvals(state: RunState, event: Event) -> RunState:
         case ToolCompleted():
             pending = tuple(i for i in state.pending_tools if i != event.tool_use_id)
             requested = tuple(r for r in state.requested if r[0] != event.tool_use_id)
-            state = replace(state, pending_tools=pending, requested=requested)
+            interrupted = tuple(i for i in state.interrupted if i != event.tool_use_id)
+            state = replace(
+                state,
+                pending_tools=pending,
+                requested=requested,
+                interrupted=interrupted,
+            )
+        case RunResumed(reason="crash"):
+            started = {i for i, _ in state.requested}
+            found = tuple(i for i in state.pending_tools if i in started)
+            state = replace(state, interrupted=found)
         case ApprovalRequested():
             open_ = state.open_approvals | {event.tool_use_id}
             state = replace(state, open_approvals=open_)
@@ -151,7 +165,13 @@ def _budget(state: RunState, event: Event) -> RunState:
                 state, spend_by_month=tuple(spend.items()), truncations=truncations
             )
         case RunForked():
-            state = replace(state, spend_by_month=(), truncations=0, ended_with=None)
+            state = replace(
+                state,
+                spend_by_month=(),
+                truncations=0,
+                ended_with=None,
+                interrupted=(),
+            )
         case RunPaused():
             state = replace(state, paused_limit=event.limit)
         case RunResumed():

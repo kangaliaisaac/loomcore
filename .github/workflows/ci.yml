@@ -24,7 +24,9 @@ jobs:
 
       # The sandbox tests start real containers; they fail, not skip, without this image.
       - name: pull the sandbox test image
-        run: docker pull alpine:3.20
+        run: docker pull "$LOOMCORE_TEST_IMAGE"
+        env:
+          LOOMCORE_TEST_IMAGE: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
       - name: ruff check
         run: uv run --no-sync ruff check .

@@ -35,10 +35,16 @@ from loomcore.sandbox import (
     write_env_file,
 )
 
-IMAGE = os.environ.get("LOOMCORE_TEST_IMAGE", "alpine:3.20")
+# Ubuntu 24.04 LTS, pinned by digest: the tag can move, the digest cannot. An image is
+# the owner's choice (Rules.image); this is only the one the tests run in.
+IMAGE = os.environ.get(
+    "LOOMCORE_TEST_IMAGE",
+    "ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+)
 SH, CAT, ENV, ECHO = "/bin/sh", "/bin/cat", "/usr/bin/env", "/bin/echo"
+BASH, GETENT = "/bin/bash", "/usr/bin/getent"
 SLEEP, PWD, TOUCH, YES = "/bin/sleep", "/bin/pwd", "/bin/touch", "/usr/bin/yes"
-ALL = frozenset({SH, CAT, ENV, ECHO, SLEEP, PWD, TOUCH, YES})
+ALL = frozenset({SH, CAT, ENV, ECHO, SLEEP, PWD, TOUCH, YES, BASH, GETENT})
 
 
 def docker_has_the_image() -> bool:
@@ -421,7 +427,7 @@ def test_the_command_can_write_the_workspace_and_nothing_else(root: Path) -> Non
 @needs_docker
 def test_the_scratch_directory_cannot_run_programs(root: Path) -> None:
     watched = Watched(rules_for(root))
-    script = "cp -L /bin/busybox /tmp/b && chmod +x /tmp/b && /tmp/b true"
+    script = "cp /bin/ls /tmp/b && chmod +x /tmp/b && /tmp/b"
     result = watched.run(SH, "-c", script, cwd=root)
     assert result.returncode != 0
     assert "Permission denied" in result.stderr
@@ -451,9 +457,12 @@ def test_the_command_has_no_network(root: Path) -> None:
     watched = Watched(rules_for(root))
     routes = watched.run(SH, "-c", "cat /proc/net/route", cwd=root)
     assert len(routes.stdout.strip().splitlines()) == 1  # the header and no route
-    for url in ("http://example.com", "http://1.1.1.1", "http://127.0.0.1:9"):
-        reached = watched.run(SH, "-c", f"wget -q -T 2 -O- {url}", cwd=root)
-        assert reached.returncode != 0, url
+    resolved = watched.run(GETENT, "hosts", "example.com", cwd=root)
+    assert resolved.returncode != 0  # no name resolution
+    for address in ("1.1.1.1/80", "127.0.0.1/9", "example.com/80"):
+        connect = f"exec 3<>/dev/tcp/{address}"
+        reached = watched.run(BASH, "-c", connect, cwd=root)
+        assert reached.returncode != 0, address
 
 
 @needs_docker
@@ -618,6 +627,25 @@ def test_output_within_the_cap_is_not_flagged(root: Path) -> None:
 
 
 @needs_docker
+def test_the_limits_reach_the_containers_cgroup(root: Path) -> None:
+    """A command that is killed proves little: with no limit the VM's own out-of-memory
+    killer would end it too. The values the kernel was given are the proof."""
+    watched = Watched(rules_for(root))
+    limits = ResourceLimits(timeout=60, memory_bytes=48 * 1024 * 1024, pids=21)
+    script = (
+        "for f in memory.max memory.swap.max pids.max; do "
+        'echo "$f=$(cat /sys/fs/cgroup/$f)"; done'
+    )
+    result = watched.run(SH, "-c", script, cwd=root, limits=limits)
+    seen = dict(line.split("=") for line in result.stdout.split())
+    assert seen == {
+        "memory.max": str(48 * 1024 * 1024),
+        "memory.swap.max": "0",  # swap equal to memory means none to hide behind
+        "pids.max": "21",
+    }
+
+
+@needs_docker
 def test_the_memory_limit_kills_a_command_that_eats_memory(root: Path) -> None:
     watched = Watched(rules_for(root))
     result = watched.run(
@@ -641,7 +669,7 @@ def test_the_process_limit_stops_a_fork_bomb(root: Path) -> None:
         cwd=root,
         limits=ResourceLimits(timeout=60, pids=16),
     )
-    assert "can't fork" in result.stderr
+    assert "fork" in result.stderr.lower()  # dash: "Cannot fork"
     assert not result.timed_out
 
 

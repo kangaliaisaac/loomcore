@@ -35,7 +35,7 @@ from loomcore.ports import (
     RunRef,
     RunResult,
 )
-from loomcore.replay import RunState
+from loomcore.replay import RunState, tool_use_ids
 from loomcore.retry import GiveUp, RetryPolicy, decide
 from loomcore.spend import append_spend, month_spend, read_spend, run_key, spend_line
 from loomcore.step import (
@@ -224,32 +224,47 @@ class Run:
             _LOG.warning("spend log line not counted: %r", line)
         return spend.usd
 
-    def _request_calls(self, tool_use_ids: tuple[str, ...]) -> list[Event]:
-        """Write the turn's `tool_requested` lines together, then judge them once."""
+    def _request_calls(self, unrequested: tuple[str, ...]) -> list[Event]:
+        """Judge the whole turn once, then write its missing `tool_requested` lines.
+
+        The escalation, if any, goes first: a crash anywhere in the batch then
+        leaves the rung in the log, and "every line written, no escalation" can only
+        mean the turn was judged clean. A turn already judged is not judged again.
+        """
+        turn = self._turn_calls()
         events: list[Event] = []
-        calls: list[tuple[str, str, str]] = []  # (id, name, call_hash)
-        for tool_use_id in tool_use_ids:
-            name, args = tool_call(self.chain, tool_use_id)
-            digest = call_hash(name, args)
-            events.append(
-                self.emit(
-                    "tool_requested",
-                    tool_use_id=tool_use_id,
-                    name=name,
-                    input=args,
-                    call_hash=digest,
-                )
+        if self.state.escalated is None:
+            hashes = self.state.call_hashes
+            written = len(turn) - len(unrequested)  # their hashes are the last ones
+            hits = ladder.tripped(
+                hashes[: len(hashes) - written],
+                [digest for _, _, digest, _ in turn],
+                self.limits.repeat_window,
+                self.limits.repeat_threshold,
             )
-            calls.append((tool_use_id, name, digest))
-        hits = ladder.tripped(
-            self.state.call_hashes,
-            [digest for _, _, digest in calls],
-            self.limits.repeat_window,
-            self.limits.repeat_threshold,
-        )
-        if hits:
-            events.append(self._escalate([calls[k] for k in hits]))
+            if hits:
+                events.append(self._escalate([turn[k][:3] for k in hits]))
+        for tool_use_id, name, digest, args in turn:
+            if tool_use_id in unrequested:
+                events.append(
+                    self.emit(
+                        "tool_requested",
+                        tool_use_id=tool_use_id,
+                        name=name,
+                        input=args,
+                        call_hash=digest,
+                    )
+                )
         return events
+
+    def _turn_calls(self) -> list[tuple[str, str, str, JsonObject]]:
+        """The latest model_call's tool calls as (id, name, call_hash, input)."""
+        latest = next(e for e in reversed(self.chain) if isinstance(e, ModelCall))
+        calls = []
+        for tool_use_id in tool_use_ids(latest.message):
+            name, args = tool_call(self.chain, tool_use_id)
+            calls.append((tool_use_id, name, call_hash(name, args), args))
+        return calls
 
     def _escalate(self, hits: list[tuple[str, str, str]]) -> Event:
         """Climb one rung for the turn, however many calls tripped."""

@@ -382,10 +382,15 @@ def escalation(seq: int, rung: int, *tripped: str) -> Event:
 
 
 def judged(rung: int, *tripped: str) -> list[Event]:
-    """A turn of calls a, b, c, requested together, then judged at `rung`."""
+    """A turn of calls a, b, c, judged at `rung` (written first), then requested."""
     log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c")]
-    log += [requested(2, "a", "n"), requested(3, "b", "n"), requested(4, "c", "n")]
-    return [*log, escalation(5, rung, *tripped)]
+    log.append(escalation(2, rung, *tripped))
+    return [
+        *log,
+        requested(3, "a", "n"),
+        requested(4, "b", "n"),
+        requested(5, "c", "n"),
+    ]
 
 
 def test_a_nudge_runs_every_call_and_marks_only_the_ones_that_tripped() -> None:
@@ -417,15 +422,16 @@ def test_the_ladder_never_goes_down_and_a_fork_starts_at_zero() -> None:
 
 def test_a_grant_on_a_ladder_ask_forgets_the_earlier_calls_with_that_hash() -> None:
     log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
-    log += [make("tool_requested", 2, tool_use_id="a", name="n", call_hash="h")]
-    log += [make("tool_requested", 3, tool_use_id="b", name="n", call_hash="x")]
-    log += [escalation(4, 3, "a"), asked(5, "a")]
+    log += [escalation(2, 3, "a")]
+    log += [make("tool_requested", 3, tool_use_id="a", name="n", call_hash="h")]
+    log += [make("tool_requested", 4, tool_use_id="b", name="n", call_hash="x")]
+    log += [asked(5, "a")]
     log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
     log += [make("run_resumed", 7, reason="approval", resume_from=5)]
     before, _ = run(*log)
     assert before.call_hashes == ("h", "x")
     after, effects = step(before, make("approval_granted", 8, tool_use_id="a"))
-    assert after.call_hashes == ("x",)  # the asked call's hash no longer counts
+    assert after.call_hashes == ("", "x")  # blanked, so the window does not shift
     assert after.rung == 3  # a human approved the call once, not for good
     assert effects == [RunTool("a"), RunTool("b")]
 
@@ -486,3 +492,52 @@ def test_a_grant_logged_before_a_crash_is_settled_not_asked_again() -> None:
 def test_a_denial_logged_before_a_crash_is_settled_not_asked_again() -> None:
     why = "denied by me: no"
     assert decided_then_crash(False) == [Fail("a", why), Fail("b", why)]
+
+
+def test_a_crash_after_a_finish_call_ends_the_run_and_does_not_run_anything() -> None:
+    log = [make("run_started"), finish_call(1, "a")]
+    assert crash(*log) == [Stop("finished", 42, "f")]
+    partly = [*log, make("tool_completed", 2, tool_use_id="f")]
+    assert crash(*partly) == [Stop("finished", 42, "f")]  # a is still pending
+
+
+def test_a_crash_after_every_call_was_settled_still_writes_the_ending() -> None:
+    log = [make("run_started"), finish_call(1)]
+    log.append(make("tool_completed", 2, tool_use_id="f"))
+    assert crash(*log) == [Stop("finished", 42, "f")]
+
+
+def test_a_crash_after_the_stuck_completions_still_stops() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a"), escalation(2, 4, "a")]
+    log += [
+        requested(3, "a", "n"),
+        make("tool_completed", 4, tool_use_id="a", ok=False),
+    ]
+    assert crash(*log) == [Stop("stuck")]
+
+
+def decided_turn(granted: bool, *completed: str) -> list[Event]:
+    """An ask about `a` in the turn [a, b], answered, with some calls completed."""
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [
+        escalation(2, 3, "a"),
+        requested(3, "a", "write"),
+        requested(4, "b", "write"),
+    ]
+    log += [asked(5, "a")]
+    log += [make("run_paused", 6, reason="awaiting_approval", resume_from=5)]
+    log += [make("run_resumed", 7, reason="approval", resume_from=5)]
+    kind = "approval_granted" if granted else "approval_denied"
+    log += [make(kind, 8, tool_use_id="a", by="me", note="no")]
+    for n, i in enumerate(completed):
+        log.append(make("tool_completed", 9 + n, tool_use_id=i))
+    return log
+
+
+def test_a_grant_covers_the_whole_turn_even_after_the_asked_call_completed() -> None:
+    assert crash(*decided_turn(True, "a")) == [RunTool("b")]
+
+
+def test_a_denial_covers_every_interrupted_call_even_after_one_was_failed() -> None:
+    why = "denied by me: no"
+    assert crash(*decided_turn(False, "a")) == [Fail("b", why)]

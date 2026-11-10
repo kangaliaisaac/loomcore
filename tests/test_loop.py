@@ -5,13 +5,14 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from factories import make
 from fakes import CAPS, CONFIG, COST, Crash, World, failure, finish, kinds, reply, use
 from fakes import ref as run_ref
 
 from loomcore import ladder
-from loomcore.conversation import FORK_CONTINUE
+from loomcore.conversation import FORK_CONTINUE, call_hash
 from loomcore.engine import ResumeRefusedError
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import (
     Escalation,
     Event,
@@ -538,3 +539,46 @@ def test_a_price_that_cannot_be_found_leaves_no_turn_behind(tmp_path: Path) -> N
     with pytest.raises(LookupError):
         start(world, tmp_path)
     assert events(tmp_path) == ["run_started"]
+
+
+def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
+    tmp_path: Path,
+) -> None:
+    """The turn [a, b] repeats one call; only a's tool_requested line was written."""
+    args: JsonObject = {"q": "x"}
+    digest = call_hash("search", args)
+    log = [
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=limits(repeat_threshold=2).to_json(),
+            config_digest=CONFIG.digest(),
+        ),
+        make("turn_started", 1, turn=1),
+        make("model_call", 2, message=use(("a", "search"), ("b", "search"), q="x")),
+        make(
+            "tool_requested",
+            3,
+            tool_use_id="a",
+            name="search",
+            input=args,
+            call_hash=digest,
+        ),
+    ]
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log:
+            writer.append(event)
+    world = World(script=[reply("done")])
+    world.read_only.add("search")
+    result = world.driver(tmp_path).resume(run_ref())
+    assert (result.status, result.result) == ("finished", "done")
+    [escalated] = escalations(tmp_path)
+    assert (escalated.rung, escalated.tripped) == (1, ["b"])  # b repeats a
+    resumed = events(tmp_path)[4:8]
+    assert resumed == ["run_resumed", "escalation", "tool_requested", "tool_completed"]
+    nudged = {
+        e.tool_use_id: ladder.NUDGE in str(e.content) for e in completions(tmp_path)
+    }
+    assert nudged == {"a": False, "b": True}

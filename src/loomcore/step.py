@@ -16,7 +16,6 @@ from loomcore import ladder
 from loomcore.events import (
     ApprovalDenied,
     ApprovalGranted,
-    Escalation,
     Event,
     ModelCall,
     RunForked,
@@ -25,9 +24,7 @@ from loomcore.events import (
     ToolCompleted,
     ToolRequested,
 )
-from loomcore.finish import NAME as FINISH
-from loomcore.finish import result_of
-from loomcore.replay import RunState, apply, content_blocks, tool_use_ids
+from loomcore.replay import RunState, apply, finish_call, tool_use_ids
 
 ReadOnly = Callable[[str], bool]  # by tool name; an unknown tool is not read-only
 
@@ -120,13 +117,12 @@ def _after_tool_event(
     effects: list[Effect] = []
     match event:
         case ToolRequested() if _all_requested(state):
-            effects = _settle(state, read_only)
-        case Escalation():
-            effects = _ladder(state)
+            # The escalation, if any, was written first, so the turn is judged.
+            effects = _proceed(state, read_only)
         case ApprovalGranted() if event.tool_use_id in old.open_approvals:
             effects = [RunTool(i) for i in state.pending_tools]
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
-            reason = f"denied by {event.by}: {event.note}"
+            reason = {i: r for i, _, r in state.decided}[event.tool_use_id]
             effects = _deny(state, event.tool_use_id, reason, read_only)
         case ToolCompleted() if event.tool_use_id in old.pending_tools and (
             not state.pending_tools
@@ -181,15 +177,32 @@ def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
 
 def _after_crash(state: RunState, read_only: ReadOnly) -> list[Effect]:
     """Settle what the log leaves open, as a new process finds it."""
+    if (ending := _unwritten_ending(state)) is not None:
+        return [ending]
     if state.open_approvals:
         first = state.open_approvals[0]
         note = _risky_note(state, read_only).removeprefix("; ")
         return [AskHuman(first, note)]
     if state.pending_tools:
         return _resume_turn(state, read_only)
-    if state.ended_with is not None:
-        return [_stop_effect(state.ended_with[0])]
-    return [CallModel()]
+    return _between_turns(state)
+
+
+def _between_turns(state: RunState) -> list[Effect]:
+    """No call is pending: do what the last model_call asked, or call the model."""
+    if state.ended_with is None:
+        return [CallModel()]
+    return [_stop_effect(state.ended_with[0])]
+
+
+def _unwritten_ending(state: RunState) -> Stop | None:
+    """The `run_finished` a crash kept from being written, if the turn decided one."""
+    if state.finishing is not None:
+        tool_use_id, result = state.finishing
+        return Stop("finished", result, tool_use_id)
+    if state.escalated and state.escalated[0] == ladder.STUCK_RUNG:
+        return Stop("stuck")
+    return None
 
 
 def _resume_turn(state: RunState, read_only: ReadOnly) -> list[Effect]:
@@ -198,9 +211,13 @@ def _resume_turn(state: RunState, read_only: ReadOnly) -> list[Effect]:
     unrequested = tuple(i for i in state.pending_tools if i not in requested)
     if unrequested:
         return [RequestCalls(unrequested)]
-    decided = [d for d in state.decided if d[0] in state.pending_tools]
-    if decided:  # the answer was logged; the crash came before its calls completed
-        return _after_decision(state, decided[0], read_only)
+    if state.decided:  # the answer was logged; the crash came before the turn ended
+        return _after_decision(state, state.decided[0], read_only)
+    return _proceed(state, read_only)
+
+
+def _proceed(state: RunState, read_only: ReadOnly) -> list[Effect]:
+    """The turn's calls are requested and judged: apply its rung, or run them."""
     rung = state.escalated[0] if state.escalated else 0
     # A rung that holds the calls back (ask, stop) comes before any question about
     # calls that may have run; a nudge or a switch yields to that question.
@@ -227,22 +244,11 @@ def _risky_note(state: RunState, read_only: ReadOnly) -> str:
 
 def _after_model_call(event: ModelCall) -> list[Effect]:
     ids = tool_use_ids(event.message)
-    done = _finish_call(event, ids)
-    if done is not None:
-        return [done]
+    if (finishing := finish_call(event.message)) is not None:
+        return [Stop("finished", finishing[1], finishing[0])]
     if ids:
         return [RequestCalls(tuple(ids))]
     return [_stop_effect(event.message.get("stop_reason"))]
-
-
-def _finish_call(event: ModelCall, ids: list[str]) -> Stop | None:
-    """The turn ends the run when the model called `finish`."""
-    for block in content_blocks(event.message):
-        if block.get("name") == FINISH and block.get("id") in ids:
-            args = block.get("input")
-            result = result_of(args if isinstance(args, dict) else {})
-            return Stop("finished", result, str(block["id"]))
-    return None
 
 
 def _stop_effect(reason: JsonValue) -> Effect:

@@ -16,8 +16,9 @@ NUDGE = (
     "change the input, use another tool, or finish with what you have."
 )
 SWITCH = (
-    "You are still repeating the same call, so the approach is changing. Follow the "
-    "new instructions and do not retry what has not worked."
+    "You are still repeating the same call, so the approach has to change. Follow "
+    "any new instructions you have been given, and otherwise use a different tool or "
+    "a different input: do not retry what has not worked."
 )
 
 

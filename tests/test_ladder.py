@@ -7,7 +7,7 @@ def test_a_call_trips_when_the_window_holds_the_threshold_of_it() -> None:
     assert tripped([], ["a", "a", "a"], window=10, threshold=3) == [2]
 
 
-def test_different_calls_never_trip() -> None:
+def test_only_the_repeat_of_a_call_trips_not_the_other_calls() -> None:
     assert tripped(["a", "b"], ["c", "a", "b"], window=10, threshold=2) == [1, 2]
 
 

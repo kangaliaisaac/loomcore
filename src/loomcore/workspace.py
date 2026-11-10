@@ -58,8 +58,8 @@ def _ignore(_value: object) -> None:
 class FilesystemWorkspace:
     """A `Workspace` on a directory.
 
-    `on_refusal` is called with every refusal before the error is raised (the
-    driver turns it into `sandbox_denied`); `on_note` with the path of every write
+    `on_refusal` is called with every refusal before the error is raised (the tool
+    registry turns it into `sandbox_denied`); `on_note` with the path of every write
     to the notes file (it becomes `note_written`).
     """
 

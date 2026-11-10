@@ -207,6 +207,7 @@ def test_the_command_line_isolates_the_container(root: Path) -> None:
     } <= pairs(args)
     assert "--read-only" in args
     assert "--rm" in args
+    assert "--init" in args
     assert args[args.index(IMAGE) + 1 :] == [SH, "-c", "echo hi"]
 
 
@@ -342,7 +343,7 @@ def test_a_docker_proxy_config_means_no_sandbox(
     (config / "config.json").write_text('{"proxies": {"default": {"httpProxy": "x"}}}')
     monkeypatch.setenv("DOCKER_CONFIG", str(config))
     with pytest.raises(SandboxUnavailableError, match="proxies"):
-        DockerSandbox(rules_for(root), on_refusal=lambda _: None)
+        DockerSandbox(rules_for(root), on_refusal=lambda _: None, docker="true")
 
 
 @needs_docker

@@ -78,7 +78,7 @@ class ResourceLimits:
     """Per command."""
 
     timeout: float = 30.0  # wall-clock seconds, then the container is killed
-    cpu_seconds: int = 30
+    cpu_seconds: int = 30  # CPU time of each process, not of the container
     memory_bytes: int = 512 * 1024 * 1024  # swap included
     pids: int = 128
     cpus: float = 1.0

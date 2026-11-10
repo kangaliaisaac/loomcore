@@ -53,7 +53,7 @@
     "title": "RunState, apply and the pure step function",
     "spec": "1 The loop",
     "acceptance": "step does no I/O; state is a fold over the log",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f08",

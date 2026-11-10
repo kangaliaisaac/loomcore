@@ -1,6 +1,5 @@
 """f13: every path is resolved first and must stay inside the workspace root."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,6 @@ from loomcore.workspace import (
     FilesystemWorkspace,
     PathRefusedError,
     Workspace,
-    resolve_inside,
 )
 
 
@@ -188,26 +186,115 @@ def test_listing_a_file_or_reading_a_missing_one_is_an_ordinary_error(
         ws.read("missing.txt")
 
 
-SEGMENTS = st.sampled_from(["..", ".", "a", "b", "link", "dirlink", "/", ""])
-
-
-@given(parts=st.lists(SEGMENTS, max_size=6))
-def test_no_path_resolves_outside_the_root(
-    tmp_path_factory: pytest.TempPathFactory, parts: list[str]
+def test_deleting_a_link_removes_the_link_and_not_what_it_points_to(
+    root: Path,
 ) -> None:
+    ws = Watched(root).workspace
+    ws.write("real.txt", "kept")
+    (root / "alias.txt").symlink_to(root / "real.txt")
+    (root / "sub").mkdir()
+    (root / "dirlink").symlink_to(root / "sub", target_is_directory=True)
+    ws.delete("alias.txt")
+    ws.delete("dirlink")
+    assert ws.read("real.txt") == "kept"
+    assert (root / "sub").is_dir()
+    assert not (root / "alias.txt").is_symlink()
+    assert not (root / "dirlink").is_symlink()
+
+
+def test_a_link_out_or_a_dangling_link_can_be_removed_without_touching_the_target(
+    root: Path,
+) -> None:
+    ws = Watched(root).workspace
+    (root / "out.txt").symlink_to(root.parent / "outside" / "secret.txt")
+    (root / "gone").symlink_to(root / "missing")  # dangling, inside
+    ws.delete("out.txt")
+    ws.delete("gone")
+    assert (root.parent / "outside" / "secret.txt").read_text() == "secret"
+    assert ws.list() == []
+
+
+def test_deleting_inside_a_symlinked_parent_that_leaves_the_root_is_refused(
+    root: Path,
+) -> None:
+    (root / "dir").symlink_to(root.parent / "outside", target_is_directory=True)
+    watched = Watched(root)
+    with pytest.raises(PathRefusedError):
+        watched.workspace.delete("dir/secret.txt")
+    assert (root.parent / "outside" / "secret.txt").read_text() == "secret"
+    assert watched.refusals[0].target == "dir/secret.txt"
+
+
+def test_a_path_with_a_nul_byte_is_refused_and_logged(root: Path) -> None:
+    watched = Watched(root)
+    for action in (watched.workspace.read, watched.workspace.list):
+        with pytest.raises(PathRefusedError):
+            action("a\x00b")
+    with pytest.raises(PathRefusedError):
+        watched.workspace.write("a\x00b", "x")
+    assert len(watched.refusals) == 3
+    assert "cannot be resolved" in watched.refusals[0].reason
+
+
+def test_listing_through_a_link_names_the_entries_as_asked_for(root: Path) -> None:
+    ws = Watched(root).workspace
+    ws.write("sub/x.txt", "x")
+    (root / "alias").symlink_to(root / "sub", target_is_directory=True)
+    assert ws.list("alias") == ["alias/x.txt"]
+
+
+def test_a_notes_file_outside_the_root_is_refused_at_construction(
+    root: Path,
+) -> None:
+    with pytest.raises(PathRefusedError):
+        FilesystemWorkspace(root, notes="../elsewhere.md")
+
+
+def test_a_link_to_the_notes_file_still_writes_the_notes(root: Path) -> None:
+    watched = Watched(root)
+    watched.workspace.write("notes.md", "first")
+    (root / "same.md").symlink_to(root / "notes.md")
+    watched.workspace.write("same.md", "second")
+    assert watched.notes == ["notes.md", "notes.md"]  # the file written, by its name
+
+
+SEGMENTS = st.sampled_from(["..", ".", "a", "b", "link", "dirlink", "/", ""])
+OPERATIONS = st.sampled_from(["read", "write", "delete", "list"])
+
+
+def snapshot(directory: Path) -> dict[str, str]:
+    """Every file under `directory` with its content, and every directory."""
+    return {
+        str(entry.relative_to(directory)): entry.read_text() if entry.is_file() else ""
+        for entry in sorted(directory.rglob("*"))
+    }
+
+
+@given(parts=st.lists(SEGMENTS, max_size=6), operation=OPERATIONS)
+def test_nothing_outside_the_root_is_read_or_changed(
+    tmp_path_factory: pytest.TempPathFactory, parts: list[str], operation: str
+) -> None:
+    """The oracle is what happens on disk, not what resolve_inside says."""
     base = tmp_path_factory.mktemp("ws")
-    root = (base / "work").resolve()
-    (root / "a").mkdir(parents=True, exist_ok=True)
-    (base / "outside").mkdir(exist_ok=True)
-    for name, target in (
-        ("link", base / "outside" / "f"),
-        ("dirlink", base / "outside"),
-    ):
-        if not os.path.lexists(root / name):
-            (root / name).symlink_to(target)
+    root, outside = base / "work", base / "outside"
+    (root / "a").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "f").write_text("secret")
+    (outside / "g").write_text("other")
+    (root / "link").symlink_to(outside / "f")
+    (root / "dirlink").symlink_to(outside, target_is_directory=True)
+    before = snapshot(outside)
+    ws = FilesystemWorkspace(root)
     path = "/".join(parts)
     try:
-        resolved = resolve_inside(root, path)
-    except PathRefusedError:
-        return
-    assert resolved.is_relative_to(root)
+        if operation == "read":
+            assert ws.read(path) not in ("secret", "other")
+        elif operation == "write":
+            ws.write(path, "PWNED")
+        elif operation == "delete":
+            ws.delete(path)
+        else:
+            assert not {"f", "g"} & {Path(name).name for name in ws.list(path)}
+    except PathRefusedError, OSError:
+        pass  # refused, or an ordinary error such as a missing file
+    assert snapshot(outside) == before

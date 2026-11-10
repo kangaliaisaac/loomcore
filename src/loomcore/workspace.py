@@ -8,7 +8,7 @@ class, is what contains hostile code.
 """
 
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
 
 from loomcore.sandbox import Refusal
@@ -30,7 +30,11 @@ def resolve_inside(root: Path, path: str) -> Path:
     link out, or a symlinked parent, leads outside and is refused. The path need not
     exist (a write creates it), and a dangling link is followed as far as it goes.
     """
-    resolved = (root / path).resolve()
+    try:
+        resolved = (root / path).resolve()
+    except (OSError, RuntimeError, ValueError) as error:  # a NUL byte, for one
+        reason = f"the path cannot be resolved ({type(error).__name__})"
+        raise PathRefusedError(Refusal("resolve", path, reason)) from error
     if not resolved.is_relative_to(root):
         reason = "the path resolves outside the workspace"
         raise PathRefusedError(Refusal("resolve", path, reason))
@@ -70,7 +74,7 @@ class FilesystemWorkspace:
         # Resolved once, so a symlinked root such as /tmp on macOS does not make
         # every path look like an escape.
         self._root = root.resolve()
-        self._notes = (self._root / notes).resolve()
+        self._notes = resolve_inside(self._root, notes)  # refused if it escapes
         self._on_refusal = on_refusal
         self._on_note = on_note
         self._generation = 0
@@ -87,7 +91,10 @@ class FilesystemWorkspace:
 
     def list(self, path: str = ".") -> list[str]:
         directory = self._resolve("list", path)
-        return sorted(self._relative(child) for child in directory.iterdir())
+        # Named as asked for, not as resolved: through a link to a directory the
+        # caller gets back `link/x`, not the target's name.
+        prefix = PurePosixPath(path)
+        return sorted((prefix / child.name).as_posix() for child in directory.iterdir())
 
     def write(self, path: str, content: str) -> None:
         target = self._resolve("write", path)
@@ -96,20 +103,38 @@ class FilesystemWorkspace:
             target.write_text(content)
         finally:
             self.bump()
-        if target == self._notes:
+        if self._is_notes(target):
             self._on_note(self._relative(target))
 
     def delete(self, path: str) -> None:
-        target = self._resolve("delete", path)
-        if target == self._root:
+        """Remove the named entry. A link is removed, not what it points to."""
+        entry = self._entry("delete", path)
+        if entry == self._root:
             self._refuse("delete", path, "the workspace root cannot be deleted")
         try:
-            if target.is_dir():
-                target.rmdir()
+            if entry.is_dir() and not entry.is_symlink():
+                entry.rmdir()
             else:
-                target.unlink()
+                entry.unlink()
         finally:
             self.bump()
+
+    def _entry(self, action: str, path: str) -> Path:
+        """The entry `path` names, with its parent resolved and checked but the entry
+        itself not followed, so a link can be removed even if it points outside."""
+        name = Path(path).name
+        if name in ("", ".", ".."):
+            return self._resolve(action, path)
+        try:
+            parent = resolve_inside(self._root, str(Path(path).parent))
+        except PathRefusedError as error:
+            self._refuse(action, path, error.refusal.reason)
+        return parent / name
+
+    def _is_notes(self, target: Path) -> bool:
+        # The same file, not the same spelling: a differently cased name on a
+        # case-insensitive filesystem, or a link, still writes the notes.
+        return self._notes.exists() and target.samefile(self._notes)
 
     def _resolve(self, action: str, path: str) -> Path:
         try:

@@ -9,7 +9,7 @@ from fakes import CAPS, CONFIG, Crash, World, kinds, reply, use
 from fakes import ref as run_ref
 
 from loomcore.eventlog import open_writer, read_events
-from loomcore.events import ApprovalRequested, GuardDecision
+from loomcore.events import ApprovalRequested, GuardDecision, JsonObject, ToolCompleted
 from loomcore.guards import Allow, Ask, Deny, Guards, PreDecision, ToolRequest
 from loomcore.limits import Limits
 from loomcore.loop import Driver
@@ -122,7 +122,9 @@ def test_a_deny_beside_an_ask_fails_at_once_and_the_ask_still_pauses(
     assert (done.status, world.tool_calls) == ("finished", ["b"])
 
 
-def test_a_crash_after_the_grant_runs_the_turn_on_resume(tmp_path: Path) -> None:
+def test_a_crash_after_the_grant_asks_run_again_not_the_guard_question(
+    tmp_path: Path,
+) -> None:
     world = World(script=[use(("a", "write"), ("b", "read")), reply("ok")])
     world.crash_on_call = 1  # the first tool call after the grant kills the run
     rule = Rule(("a",), Ask("write a?"))
@@ -178,7 +180,7 @@ def test_a_run_killed_before_the_question_is_logged_asks_it_on_resume(
 
 def test_no_run_tool_is_produced_while_an_ask_is_unanswered() -> None:
     """Fold a turn event by event: every effect list while a question is open holds
-    no RunTool, whatever the order the answers come in."""
+    no RunTool (a grant, then a denial)."""
     ids = ("a", "b", "c")
     rows = [
         make("model_call", 0, message=calling(*ids)),
@@ -220,3 +222,40 @@ def test_no_run_tool_is_produced_while_an_ask_is_unanswered() -> None:
         if unanswered_asks(state):
             assert not any(isinstance(e, RunTool) for e in effects)
     assert not unanswered_asks(state)
+
+
+REPEATING = Task(
+    "go",
+    Limits.model_validate({"run_cap": None, "month_cap": None, "repeat_threshold": 2}),
+)
+
+
+def repeats(count: int) -> list[JsonObject | Exception]:
+    return [use((f"c{n}", "search"), q="x") for n in range(1, count + 1)]
+
+
+def test_a_guard_denied_call_is_failed_not_asked_about_by_the_ladder(
+    tmp_path: Path,
+) -> None:
+    """c4 reaches the ladder's ask rung, but a guard denied it: nobody is asked."""
+    world = World(script=repeats(6))
+    result = driver(world, tmp_path, Rule(("c4",), Deny("barred"))).run(REPEATING)
+    assert (result.status, result.reason) == ("finished", "stuck")
+    done = [
+        e
+        for e in read_events(tmp_path / "s1.jsonl").events
+        if isinstance(e, ToolCompleted) and e.tool_use_id == "c4"
+    ]
+    assert [e.content for e in done] == ["barred"]
+
+
+def test_the_human_sees_the_guards_question_with_the_ladders(tmp_path: Path) -> None:
+    world = World(script=repeats(6))
+    rule = Rule(("c4",), Ask("this repeats a search; sure?"))
+    paused = driver(world, tmp_path, rule).run(REPEATING)
+    assert paused.question is not None
+    assert "this repeats a search; sure?" in paused.question
+    again = driver(world, tmp_path, rule).resume(
+        paused.ref, Decision(granted=True, by="me")
+    )
+    assert again.status == "finished"  # one answer covers the call: not asked twice

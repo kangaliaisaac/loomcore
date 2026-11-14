@@ -281,6 +281,8 @@ class PromptBuilder(Protocol):
 ```
 
 Deterministic assembly from parts (role, rules, tool docs, environment) in a fixed order, with nothing time-varying in the stable prefix. The result marks the cache breakpoint on its last stable block. Emits none.
+
+`PromptParts` is `role: str`, `rules: tuple[str, ...]`, `tools: tuple[ToolSchema, ...]` and `environment: str`. `SystemPrompt` is a tuple of `Block(name, text)` with the names `role`, `rules`, `tools` and `environment`, in that order; `text` joins the blocks with a blank line and is what the caller puts in `Config.system` (so the configuration digest covers the built prompt, and a prompt that changes between runs refuses a resume). The first three blocks are the stable prefix and the environment, the one part that may vary from run to run, follows it. `cache_breakpoint` is the index of the last stable block (`None` when there is none): the model port puts its cache marker there, because the SDK stays behind that port. A part that is empty leaves out its block. Each part is stripped, rules are a bullet list in the order given, and the tool docs are one `name: description` line each with the description's whitespace collapsed, sorted by name so the order tools were registered in cannot change the bytes. `build` in `prompt.py` is the implementation; `PromptBuilder` is the Protocol for a caller that injects another.
 Tests: byte-identical output for the same inputs (a snapshot test); a changed part changes only what follows it.
 
 ### 3.2 Tool registry (`tools.py`)

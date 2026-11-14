@@ -133,7 +133,7 @@
     "title": "System-prompt builder",
     "spec": "3.1",
     "acceptance": "byte-identical output for the same inputs; a changed part changes only what follows it",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f18",

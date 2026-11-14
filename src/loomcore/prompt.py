@@ -39,7 +39,7 @@ class SystemPrompt:
 
     @property
     def text(self) -> str:
-        """The whole prompt, for `Config.system`."""
+        """The whole prompt: every block, joined."""
         return SEPARATOR.join(block.text for block in self.blocks)
 
     @property
@@ -51,17 +51,14 @@ class SystemPrompt:
 
     @property
     def stable_text(self) -> str:
-        """The prefix up to and including the cache breakpoint: what goes in
-        `Config.system`, so the whole `system` string of a request is the part the
-        model port caches."""
+        """The prefix up to and including the cache breakpoint."""
         end = self.cache_breakpoint
         kept = () if end is None else self.blocks[: end + 1]
         return SEPARATOR.join(block.text for block in kept)
 
     @property
     def variable_text(self) -> str:
-        """What follows the breakpoint (the environment): added by the model port
-        after the cached prefix, outside the configuration digest."""
+        """What follows the breakpoint (the environment)."""
         end = self.cache_breakpoint
         rest = self.blocks if end is None else self.blocks[end + 1 :]
         return SEPARATOR.join(block.text for block in rest)
@@ -73,7 +70,7 @@ def build(parts: PromptParts) -> SystemPrompt:
     Raises `ValueError` for two tools with one name: their order would decide the
     bytes, and a model cannot tell them apart either.
     """
-    names = [tool.name for tool in parts.tools]
+    names = [_line(tool.name) for tool in parts.tools]
     if len(set(names)) != len(names):
         raise ValueError("two tools share a name; a prompt lists each tool once")
     candidates = (
@@ -97,7 +94,7 @@ def _line(text: str) -> str:
 
 
 def _by_name(tools: Iterable[ToolSchema]) -> list[ToolSchema]:
-    return sorted(tools, key=lambda tool: tool.name)
+    return sorted(tools, key=lambda tool: _line(tool.name))
 
 
 def _list(heading: str, lines: Iterable[str]) -> str:

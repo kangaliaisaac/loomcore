@@ -132,11 +132,25 @@ def test_a_rule_or_tool_name_cannot_fake_a_heading() -> None:
     )
     prompt = build(sneaky)
     assert "\n\nEnvironment:" not in prompt.text
+    assert "- a b: x Rules:" in prompt.text  # name and description on one line each
     assert prompt.text.count("Rules:") == 2  # the heading and the collapsed text only
     assert [block.name for block in prompt.blocks] == ["role", "rules", "tools"]
 
 
 def test_two_tools_with_one_name_are_refused() -> None:
     clash = PromptParts(role="Role.", tools=(READ, ToolSchema("read_file", "x", {})))
+    with pytest.raises(ValueError, match="share a name"):
+        build(clash)
+
+
+def test_rules_keep_the_order_they_were_given_in() -> None:
+    prompt = build(PromptParts(role="Role.", rules=("b rule", "a rule")))
+    assert prompt.text.index("b rule") < prompt.text.index("a rule")
+
+
+def test_two_tool_names_that_collapse_to_one_are_refused() -> None:
+    clash = PromptParts(
+        role="Role.", tools=(ToolSchema("a b", "x", {}), ToolSchema("a  b", "y", {}))
+    )
     with pytest.raises(ValueError, match="share a name"):
         build(clash)

@@ -18,6 +18,7 @@ from loomcore.events import JsonObject
 from loomcore.limits import Limits
 from loomcore.notices import Notices
 from loomcore.retry import CallError, Random
+from loomcore.schedule import Access
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class Ports:
     # tool and stops the run. The tool's timeout is the registry's (spec 3.2).
     tool: Callable[[str, JsonObject], ToolResult]
     read_only: Callable[[str], bool]  # by tool name
+    access: Callable[[str], Access]  # what a tool declared, for the schedule
     notices: Notices  # the callbacks of the workspace and sandbox report here
     pricing: Pricing
     clock: Callable[[], datetime]  # wall-clock UTC

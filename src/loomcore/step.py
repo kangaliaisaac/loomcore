@@ -123,7 +123,8 @@ def _after_tool_event(
             effects = _run_pending(state)
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
             reason = {i: r for i, _, r in state.decided}[event.tool_use_id]
-            effects = _deny(state, event.tool_use_id, reason)
+            also = _also_denied(state, read_only, event.tool_use_id)
+            effects = _deny(state, [(event.tool_use_id, reason), *also])
         case ToolCompleted() if event.tool_use_id in old.pending_tools and (
             not state.pending_tools
         ):
@@ -160,15 +161,31 @@ def _ladder(state: RunState) -> list[Effect]:
     return [RunTool(i, note if i in tripped else None) for i in state.pending_tools]
 
 
-def _deny(state: RunState, tool_use_id: str, reason: str) -> list[Effect]:
-    """A denial fails the asked call; the rest of the turn runs as it would after a
-    grant (with the rung's notes), and its Fail is written before any of them."""
+def _deny(state: RunState, failed: list[tuple[str, str]]) -> list[Effect]:
+    """A denial fails the calls it covers; the rest of the turn runs as it would
+    after a grant (with the rung's notes), and the Fails are written before any."""
+    ids = {i for i, _ in failed}
     rest = [
         e
         for e in _run_pending(state)
-        if not (isinstance(e, RunTool) and e.tool_use_id == tool_use_id)
+        if not (isinstance(e, RunTool) and e.tool_use_id in ids)
     ]
-    return [Fail(tool_use_id, reason), *rest]
+    return [*(Fail(i, reason) for i, reason in failed), *rest]
+
+
+def _also_denied(
+    state: RunState, read_only: ReadOnly, besides: str
+) -> list[tuple[str, str]]:
+    """The other calls a denial of the question about an interrupted wave covers:
+    the question named every risky call of the wave, so a denial fails all of them
+    (any may already have written), not only the one it was asked about. A call
+    that is read-only was never in the question and still runs."""
+    names = dict(state.requested)
+    return [
+        (i, reason)
+        for i, reason in state.also_denied
+        if i in state.pending_tools and i != besides and not read_only(names.get(i, ""))
+    ]
 
 
 def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
@@ -230,8 +247,16 @@ def _after_decision(
     state: RunState, decision: tuple[str, bool, str], read_only: ReadOnly
 ) -> list[Effect]:
     tool_use_id, granted, reason = decision
-    if not granted and tool_use_id in state.pending_tools:  # its Fail is not written
-        return _deny(state, tool_use_id, reason)
+    # Their Fails are not all written when the crash came after the denial was
+    # logged: the asked call's, and the calls the same answer denied with it.
+    asked = (
+        []
+        if granted or tool_use_id not in state.pending_tools
+        else [(tool_use_id, reason)]
+    )
+    failed = [*asked, *_also_denied(state, read_only, tool_use_id)]
+    if failed:
+        return _deny(state, failed)
     # The human answered the ladder's question, not "run a call that may have
     # already written again": that one is asked unless the tool is read-only.
     if _interrupted_risky(state, read_only):

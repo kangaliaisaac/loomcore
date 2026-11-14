@@ -49,6 +49,8 @@ class RunState:
     pending_tools: tuple[str, ...] = ()  # in the order the model asked for them
     # (id, name) of the calls with a tool_requested and no completion.
     requested: tuple[tuple[str, str], ...] = ()
+    # (id, wave) of the same calls: where each runs in the turn (see `ToolRequested`).
+    call_waves: tuple[tuple[str, int], ...] = ()
     # The escalation ladder (spec section 1): the rung reached, this run's call
     # hashes in order, the (call, hash) of each ladder ask, this turn's rung with the
     # calls that tripped and why, and decisions not yet followed by a completion.
@@ -57,12 +59,16 @@ class RunState:
     ladder_asks: tuple[tuple[str, str], ...] = ()
     escalated: tuple[int, tuple[str, ...], str] | None = None
     decided: tuple[tuple[str, bool, str], ...] = ()
+    # (id, reason) of the other calls a denial of the question about an interrupted
+    # wave denied with it (the risky ones: the question named them all).
+    also_denied: tuple[tuple[str, str], ...] = ()
     # The finish call of the latest model_call, (id, result): a crash after it must
     # end the run, not run the call.
     finishing: tuple[str, JsonValue] | None = None
     # The call a crash resume found that may have run (see `_could_have_started`).
     # A requested call need not have started: the turn's lines are written together
-    # and the calls run one at a time, so only a crash makes a call "interrupted".
+    # and its waves run one after the other, so only a crash makes a call
+    # "interrupted".
     interrupted: tuple[str, ...] = ()
     # A model_call that asked for no tool ends with (stop_reason,); until the next
     # model_call a crash resume reads it to know what that call asked for.
@@ -146,6 +152,7 @@ def _tools(state: RunState, event: Event) -> RunState:
                 ended_with=ended,
                 escalated=None,
                 decided=(),  # a decision covers its turn, which this call ends
+                also_denied=(),
                 finishing=finish_call(event.message),
             )
         case ToolRequested():
@@ -153,16 +160,23 @@ def _tools(state: RunState, event: Event) -> RunState:
                 event.tool_use_id not in dict(state.requested)
             ):
                 requested = (*state.requested, (event.tool_use_id, event.name))
+                # No wave in the log: it ran alone, after the calls before it.
+                wave = len(state.requested) if event.wave is None else event.wave
+                waves = (*state.call_waves, (event.tool_use_id, wave))
                 hashes = (*state.call_hashes, event.call_hash)
-                state = replace(state, requested=requested, call_hashes=hashes)
+                state = replace(
+                    state, requested=requested, call_waves=waves, call_hashes=hashes
+                )
         case ToolCompleted():
             pending = tuple(i for i in state.pending_tools if i != event.tool_use_id)
             requested = tuple(r for r in state.requested if r[0] != event.tool_use_id)
+            waves = tuple(w for w in state.call_waves if w[0] != event.tool_use_id)
             interrupted = tuple(i for i in state.interrupted if i != event.tool_use_id)
             state = replace(
                 state,
                 pending_tools=pending,
                 requested=requested,
+                call_waves=waves,
                 interrupted=interrupted,
             )
         case RunResumed(reason="crash"):
@@ -171,24 +185,29 @@ def _tools(state: RunState, event: Event) -> RunState:
 
 
 def _could_have_started(state: RunState) -> tuple[str, ...]:
-    """The calls a crash may have interrupted: at most the first one still pending.
+    """The calls a crash may have interrupted: those of the first wave that still
+    has a pending call.
 
-    Calls run one at a time, in order, and only once every line of the turn is
-    written. So none can have started while a line is missing, or while the ladder
-    holds the turn for a human with no answer logged; otherwise only the first
-    requested call without a completion can have.
+    A wave starts when the one before it is complete, and only once every line of
+    the turn is written. So none can have started while a line is missing, or while
+    the ladder holds the turn for a human with no answer logged; otherwise any call
+    of the first wave with a call still pending can have, and no call of a later
+    wave. In a log where every call is its own wave that is the first pending call.
     """
     requested = {i for i, _ in state.requested}
     # An ask rung holds the turn; so does stuck, which only completes its calls.
     held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
     denied = {i for i, granted, _ in state.decided if not granted}
+    denied |= {i for i, _ in state.also_denied}
     if not state.pending_tools or (held and not state.decided):
         return ()
     if any(i not in requested for i in state.pending_tools):
         return ()
     if denied & set(state.pending_tools):  # their Fails are written before any run
         return ()
-    return (state.pending_tools[0],)
+    waves = dict(state.call_waves)
+    first = min(waves[i] for i in state.pending_tools)
+    return tuple(i for i in state.pending_tools if waves[i] == first)
 
 
 def _approvals(state: RunState, event: Event) -> RunState:
@@ -217,11 +236,17 @@ def _decide(state: RunState, event: ApprovalGranted | ApprovalDenied) -> RunStat
     granted = isinstance(event, ApprovalGranted)
     reason = "" if granted else f"denied by {event.by}: {event.note}"
     decided = (*state.decided, (event.tool_use_id, granted, reason))
+    also = state.also_denied
+    if not granted and event.tool_use_id in state.interrupted:
+        # The question named every risky call of the interrupted wave: so does the
+        # denial, and it must still hold after a second crash recomputes the wave.
+        others = (i for i in state.interrupted if i != event.tool_use_id)
+        also = (*also, *((i, reason) for i in others))
     hashes = state.call_hashes
     asked = dict(state.ladder_asks).get(event.tool_use_id)
     if granted and asked is not None:
         hashes = tuple("" if h == asked else h for h in hashes)  # keep the window
-    return replace(state, decided=decided, call_hashes=hashes)
+    return replace(state, decided=decided, also_denied=also, call_hashes=hashes)
 
 
 def _lifecycle(state: RunState, event: Event) -> RunState:
@@ -240,6 +265,7 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
                 ladder_asks=(),
                 escalated=None,
                 decided=(),
+                also_denied=(),
                 finishing=None,
             )
         case RunPaused():

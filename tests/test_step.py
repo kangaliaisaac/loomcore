@@ -219,8 +219,10 @@ def asked(seq: int, tool_use_id: str = "a") -> Event:
     return make("approval_requested", seq, tool_use_id=tool_use_id)
 
 
-def requested(seq: int, tool_use_id: str, name: str) -> Event:
-    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+def requested(seq: int, tool_use_id: str, name: str, wave: int | None = None) -> Event:
+    if wave is None:
+        return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name, wave=wave)
 
 
 def crashed(
@@ -638,3 +640,101 @@ def test_a_grant_logged_before_a_crash_in_a_nudge_turn_keeps_the_notes() -> None
     log += [make("tool_completed", 11, tool_use_id="a")]
     effects = crash(*log, read_only=frozenset({"n"}))  # b is the first pending call
     assert effects == [RunTool("b"), RunTool("c", ladder.NUDGE)]
+
+
+# --- f15: calls of one wave run together ---------------------------------------
+
+
+def waved_turn() -> list[Event]:
+    """a and b are wave 0, c is wave 1, d is wave 2."""
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c", "d")]
+    return [
+        *log,
+        requested(2, "a", "read", 0),
+        requested(3, "b", "read", 0),
+        requested(4, "c", "write", 1),
+        requested(5, "d", "write", 2),
+    ]
+
+
+def test_after_a_crash_every_pending_call_of_the_first_wave_counts_as_interrupted() -> (
+    None
+):
+    log = waved_turn()
+    assert after_crash(*log).interrupted == ("a", "b")
+    log.append(make("tool_completed", 6, tool_use_id="a"))
+    assert after_crash(*log).interrupted == ("b",)  # a finished; b may not have
+    log.append(make("tool_completed", 7, tool_use_id="b"))
+    assert after_crash(*log).interrupted == ("c",)  # the next wave
+
+
+def test_a_later_wave_never_counts_while_an_earlier_one_has_a_call_pending() -> None:
+    interrupted = after_crash(*waved_turn()).interrupted
+    assert "c" not in interrupted
+    assert "d" not in interrupted
+
+
+def test_a_log_without_waves_still_means_one_call_at_a_time() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write")]
+    assert after_crash(*log).interrupted == ("a",)
+
+
+def test_the_question_names_every_risky_call_of_the_interrupted_wave() -> None:
+    log = waved_turn()
+    effects = crashed(*log, read_only=frozenset({"read"}))[1]
+    assert effects == [RunTool("a"), RunTool("b"), RunTool("c"), RunTool("d")]
+    effects = crashed(*log)[1]  # nothing read-only: a and b may have written
+    assert len(effects) == 1
+    assert isinstance(effects[0], AskHuman)
+    assert "read (a), read (b)" in effects[0].question
+
+
+def test_a_denied_question_about_an_interrupted_wave_fails_every_call_it_named() -> (
+    None
+):
+    state = paused_for_approval(*waved_turn(), asked(6, "a"), reason="crash")
+    assert state.interrupted == ("a", "b")
+    why = "denied by me: no"
+    assert denial(state, 9) == [
+        Fail("a", why),
+        Fail("b", why),
+        RunTool("c"),
+        RunTool("d"),
+    ]
+
+
+def denied_wave(*completed: str) -> list[Event]:
+    """Wave [a, b] interrupted by a crash, asked about, denied; then a second crash."""
+    log = waved_turn()
+    log.append(make("run_resumed", 6, reason="crash", resume_from=5))
+    log += [asked(7, "a")]
+    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
+    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    log += [make("approval_denied", 10, tool_use_id="a", by="me", note="no")]
+    for n, i in enumerate(completed):
+        log.append(make("tool_completed", 11 + n, tool_use_id=i))
+    return log
+
+
+def test_a_second_crash_before_the_fails_still_fails_the_whole_denied_wave() -> None:
+    why = "denied by me: no"
+    assert crash(*denied_wave()) == [
+        Fail("a", why),
+        Fail("b", why),
+        RunTool("c"),
+        RunTool("d"),
+    ]
+
+
+def test_a_crash_between_the_fails_does_not_ask_again_about_the_other_denied_call() -> (
+    None
+):
+    why = "denied by me: no"
+    assert crash(*denied_wave("a")) == [Fail("b", why), RunTool("c"), RunTool("d")]
+
+
+def test_a_denial_does_not_fail_a_read_only_call_of_the_wave() -> None:
+    effects = crash(*denied_wave(), read_only=frozenset({"read"}))
+    # nothing risky was in the question, so no one was denied; both just re-run
+    assert Fail("b", "denied by me: no") not in effects

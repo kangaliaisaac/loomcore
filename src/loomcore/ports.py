@@ -16,6 +16,7 @@ from pydantic import JsonValue
 
 from loomcore.events import JsonObject
 from loomcore.limits import Limits
+from loomcore.notices import Notices
 from loomcore.retry import CallError, Random
 
 
@@ -82,8 +83,11 @@ class Pricing(Protocol):
 @dataclass(frozen=True)
 class Ports:
     model: Callable[[ModelRequest], JsonObject]  # raises ModelCallError
-    tool: Callable[[str, JsonObject], ToolResult]  # never raises; has its own timeout
+    # ok=false for a failure the model can fix; any other exception is a bug in the
+    # tool and stops the run. The tool's timeout is the registry's (spec 3.2).
+    tool: Callable[[str, JsonObject], ToolResult]
     read_only: Callable[[str], bool]  # by tool name
+    notices: Notices  # the callbacks of the workspace and sandbox report here
     pricing: Pricing
     clock: Callable[[], datetime]  # wall-clock UTC
     monotonic: Callable[[], float]  # durations

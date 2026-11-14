@@ -186,7 +186,12 @@ def test_a_write_to_the_notes_file_is_reported_and_others_are_not(
 
 def test_the_notes_file_is_the_one_asked_for(root: Path) -> None:
     notes: list[str] = []
-    ws = FilesystemWorkspace(root, notes="memory/keep.md", on_note=notes.append)
+    ws = FilesystemWorkspace(
+        root,
+        notes="memory/keep.md",
+        on_refusal=lambda _: None,
+        on_note=notes.append,
+    )
     ws.write("notes.md", "x")
     ws.write("memory/keep.md", "y")
     assert notes == ["memory/keep.md"]
@@ -269,7 +274,7 @@ def test_a_notes_file_outside_the_root_is_refused_at_construction(
     root: Path,
 ) -> None:
     with pytest.raises(PathRefusedError):
-        FilesystemWorkspace(root, notes="../elsewhere.md")
+        FilesystemWorkspace(root, notes="../elsewhere.md", on_refusal=lambda _: None)
 
 
 def test_a_link_to_the_notes_file_still_writes_the_notes(root: Path) -> None:
@@ -314,7 +319,7 @@ def test_nothing_outside_the_root_is_read_or_changed(
     (root / "link").symlink_to(outside / "f")
     (root / "dirlink").symlink_to(outside, target_is_directory=True)
     before = snapshot(base, skip=root)
-    ws = FilesystemWorkspace(root)
+    ws = FilesystemWorkspace(root, on_refusal=lambda _: None)
     path = "/".join(parts)
     try:
         if operation == "read":

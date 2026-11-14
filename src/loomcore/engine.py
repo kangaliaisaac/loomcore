@@ -26,6 +26,7 @@ from loomcore.events import (
     make_event,
 )
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
+from loomcore.notices import Notice
 from loomcore.ports import (
     Config,
     Decision,
@@ -292,12 +293,23 @@ class Run:
     def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
-        result = self.ports.tool(name, args)
+        with self.ports.notices.collecting() as bucket:
+            try:
+                result = self.ports.tool(name, args)
+                ms = self._since(started)  # before the log writes below
+            finally:
+                # Whether the tool returned or broke, what it caused is logged, and
+                # a refusal precedes the call's completion.
+                caused = self._emit_notices(tool_use_id, bucket)
         content = _annotated(result.content, note)
-        done = self._complete(
-            tool_use_id, ok=result.ok, content=content, ms=self._since(started)
-        )
-        return [done]
+        done = self._complete(tool_use_id, ok=result.ok, content=content, ms=ms)
+        return [*caused, done]
+
+    def _emit_notices(self, tool_use_id: str, notices: list[Notice]) -> list[Event]:
+        return [
+            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
+            for notice in notices
+        ]
 
     def _complete(
         self, tool_use_id: str, *, ok: bool, content: JsonValue, ms: int = 0

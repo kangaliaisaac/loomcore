@@ -6,7 +6,19 @@ from pathlib import Path
 
 import pytest
 from factories import make
-from fakes import CAPS, CONFIG, COST, Crash, World, failure, finish, kinds, reply, use
+from fakes import (
+    CAPS,
+    CONFIG,
+    COST,
+    Crash,
+    ToolBugError,
+    World,
+    failure,
+    finish,
+    kinds,
+    reply,
+    use,
+)
 from fakes import ref as run_ref
 
 from loomcore import ladder
@@ -18,7 +30,9 @@ from loomcore.events import (
     Event,
     ForkOrigin,
     JsonObject,
+    NoteWritten,
     RunFinished,
+    SandboxDenied,
     ToolCompleted,
 )
 from loomcore.limits import Limits
@@ -30,6 +44,7 @@ from loomcore.loop import (
 )
 from loomcore.ports import Config, Decision, RunResult, Task
 from loomcore.rewind import ForkRefusedError
+from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
 
 TASK = Task("find it", CAPS)
@@ -633,3 +648,61 @@ def test_an_open_approval_question_is_not_repeated_after_a_crash(
     paused = World(script=[]).driver(tmp_path).resume(run_ref())
     assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
     assert paused.question == asked  # not "... (may have run before the crash: ...)"
+
+
+# --- f14: what a call caused is logged with the call's id ---------------------
+
+
+def test_a_refusal_and_a_note_are_logged_before_their_call_completes(
+    tmp_path: Path,
+) -> None:
+    world = World(
+        script=[use(("t1", "search")), reply()],
+        refused_in={"t1": Refusal("read", "/etc", "no")},
+        noted_in={"t1": "notes.md"},
+    )
+    start(world, tmp_path)
+    log = read_events(tmp_path / "s1.jsonl").events
+    assert [e.kind for e in log if e.run_id == "r1"][3:7] == [
+        "tool_requested",
+        "sandbox_denied",
+        "note_written",
+        "tool_completed",
+    ]
+    denied = next(e for e in log if isinstance(e, SandboxDenied))
+    noted = next(e for e in log if isinstance(e, NoteWritten))
+    assert (denied.tool_use_id, denied.target) == ("t1", "/etc")
+    assert (noted.tool_use_id, noted.path) == ("t1", "notes.md")
+
+
+def test_a_tool_that_breaks_still_has_its_notices_logged_and_its_bug_raised(
+    tmp_path: Path,
+) -> None:
+    world = World(
+        script=[use(("t1", "search")), reply()],
+        noted_in={"t1": "notes.md"},
+        bug_in={"t1"},
+    )
+    with pytest.raises(ToolBugError):
+        start(world, tmp_path)
+    log = read_events(tmp_path / "s1.jsonl").events
+    noted = next(e for e in log if isinstance(e, NoteWritten))
+    assert noted.tool_use_id == "t1"
+    assert not any(isinstance(e, ToolCompleted) for e in log)
+
+
+def test_a_run_stopped_by_a_tool_bug_resumes_past_its_unmatched_notices(
+    tmp_path: Path,
+) -> None:
+    world = World(
+        script=[use(("t1", "search")), reply("done")],
+        noted_in={"t1": "notes.md"},
+        bug_in={"t1"},
+    )
+    world.read_only.add("search")
+    driver = world.driver(tmp_path)
+    with pytest.raises(ToolBugError):
+        driver.run(TASK)
+    world.bug_in.clear()  # the tool is fixed; the log holds a note with no completion
+    result = driver.resume(run_ref())
+    assert (result.status, world.tool_calls) == ("finished", ["t1"])

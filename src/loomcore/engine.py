@@ -29,6 +29,7 @@ from loomcore.events import (
     RunStarted,
     make_event,
 )
+from loomcore.guards import Allow, Ask, Deny, Guards, ToolRequest, run_pre
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
 from loomcore.notices import Notice
 from loomcore.ports import (
@@ -88,6 +89,7 @@ class Run:
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
     counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
+    guards: Guards = field(default_factory=Guards)
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -331,6 +333,7 @@ class Run:
         """
         turn = self._turn_calls()
         events: list[Event] = []
+        verdicts = self._verdicts(turn, unrequested)
         if self.state.escalated is None:
             hashes = self.state.call_hashes
             written = len(turn) - len(unrequested)  # their hashes are the last ones
@@ -340,8 +343,13 @@ class Run:
                 self.limits.repeat_window,
                 self.limits.repeat_threshold,
             )
+            # A call a guard denied is never asked about: the escalation names the
+            # first tripped call that is not denied (False sorts first, order kept).
+            denied = {i for i, v, _ in verdicts if v == "deny"}
+            hits.sort(key=lambda k: turn[k][0] in denied)
             if hits:
                 events.append(self._escalate([turn[k][:3] for k in hits]))
+        events.extend(self._judge(verdicts))
         wave_of = self._waves(turn, unrequested)
         for k, (tool_use_id, name, digest, args) in enumerate(turn):
             if tool_use_id in unrequested:
@@ -356,6 +364,41 @@ class Run:
                     )
                 )
         return events
+
+    def _verdicts(
+        self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]
+    ) -> list[tuple[str, str, str]]:
+        """The pre guards' verdicts that are not an allow, as (id, verdict, reason),
+        for the calls not yet requested and not already judged. Pure: nothing is
+        written, so the escalation can be chosen with the denials known."""
+        judged = {i for i, _, _ in self.state.guarded}
+        found: list[tuple[str, str, str]] = []
+        for tool_use_id, name, digest, args in turn:
+            if tool_use_id not in unrequested or tool_use_id in judged:
+                continue
+            request = ToolRequest(tool_use_id, name, args, digest)
+            match run_pre(self.guards, request, self.state):
+                case Allow():
+                    continue
+                case Deny(reason):
+                    found.append((tool_use_id, "deny", reason))
+                case Ask(question):
+                    found.append((tool_use_id, "ask", question))
+        return found
+
+    def _judge(self, verdicts: list[tuple[str, str, str]]) -> list[Event]:
+        """Write the verdicts, before any `tool_requested` line: a crash in the batch
+        then leaves every verdict in the log (a call with none is judged again)."""
+        return [
+            self.emit(
+                "guard_decision",
+                stage="pre",
+                tool_use_id=tool_use_id,
+                decision=verdict,
+                reason=why,
+            )
+            for tool_use_id, verdict, why in verdicts
+        ]
 
     def _waves(
         self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]
@@ -558,6 +601,9 @@ class Run:
     def _settle_call(self, tool_use_id: str, stop: Stop) -> Event:
         ok = tool_use_id == stop.finish_id  # the finish call itself succeeded
         content = "finished" if ok else f"run ended: {stop.reason}"
+        # A call a guard denied keeps the reason the model should have seen.
+        denied = {i: why for i, v, why in self.state.guarded if v == "deny"}
+        content = denied.get(tool_use_id, content) if not ok else content
         return self._complete(tool_use_id, ok=ok, content=content)
 
     def _last_text(self) -> str:

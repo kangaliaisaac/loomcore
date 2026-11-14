@@ -24,7 +24,7 @@ from loomcore.events import (
     ToolCompleted,
     ToolRequested,
 )
-from loomcore.replay import RunState, apply, finish_call, tool_use_ids
+from loomcore.replay import RunState, apply, finish_call, tool_use_ids, unanswered_asks
 
 ReadOnly = Callable[[str], bool]  # by tool name; an unknown tool is not read-only
 
@@ -94,7 +94,38 @@ def step(
     new = apply(state, event)
     if new.finished is not None or new.paused:
         return new, []
-    return new, _effects(state, new, event, read_only)
+    return new, _guard(new, _effects(state, new, event, read_only))
+
+
+def _guard(state: RunState, effects: list[Effect]) -> list[Effect]:
+    """Hold back what the turn's pre guards forbid (spec 3.7): a denied call fails
+    with the guard's reason, before whatever else the effects do, and never runs;
+    while any asked call has no answer the human is asked about the first and
+    nothing runs."""
+    # A stop settles every pending call itself, and a turn not yet fully requested
+    # has no `tool_requested` lines to put a completion after.
+    leaves = any(isinstance(e, Stop | RequestCalls) for e in effects)
+    if not effects or leaves or not _all_requested(state):
+        return effects
+    denied = _guard_denied(state)
+    failing = {e.tool_use_id for e in effects if isinstance(e, Fail)}
+    fails = [Fail(i, reason) for i, reason in denied.items() if i not in failing]
+    kept = [
+        e for e in effects if not (isinstance(e, RunTool) and e.tool_use_id in denied)
+    ]
+    asks = unanswered_asks(state)
+    if asks and any(isinstance(e, RunTool) for e in effects):
+        held = [e for e in kept if not isinstance(e, RunTool)]
+        return [*fails, *held, AskHuman(*asks[0])]
+    return [*fails, *kept]
+
+
+def _guard_denied(state: RunState) -> dict[str, str]:
+    return {
+        i: reason
+        for i, verdict, reason in state.guarded
+        if verdict == "deny" and i in state.pending_tools
+    }
 
 
 def _effects(
@@ -156,9 +187,20 @@ def _ladder(state: RunState) -> list[Effect]:
     if rung == ladder.STUCK_RUNG:
         return [Stop("stuck")]
     if rung == ladder.ASK_RUNG:
-        return [AskHuman(tripped[0], why)]
+        return _ask_rung(state, tripped, why)
     note = ladder.NUDGE if rung == ladder.NUDGE_RUNG else ladder.SWITCH
     return [RunTool(i, note if i in tripped else None) for i in state.pending_tools]
+
+
+def _ask_rung(state: RunState, tripped: tuple[str, ...], why: str) -> list[Effect]:
+    """A call a guard denied is failed, not asked about; a call a guard also asks
+    about gets both questions, as one answer covers both."""
+    askable = [i for i in tripped if i not in _guard_denied(state)]
+    if tripped and not askable:
+        return [RunTool(i) for i in state.pending_tools]  # `_guard` fails them
+    guard_asked = {i: q for i, v, q in state.guarded if v == "ask"}
+    extra = f"; {guard_asked[askable[0]]}" if askable[0] in guard_asked else ""
+    return [AskHuman(askable[0], why + extra)]
 
 
 def _deny(state: RunState, failed: list[tuple[str, str]]) -> list[Effect]:

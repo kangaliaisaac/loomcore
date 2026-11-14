@@ -11,6 +11,7 @@ from factories import START
 from pydantic import JsonValue
 
 from loomcore.events import Event, JsonObject
+from loomcore.guards import Guards
 from loomcore.limits import Limits
 from loomcore.loop import Driver
 from loomcore.notices import Notices
@@ -180,8 +181,15 @@ class World:
             new_run_id=self.new_run_id,
         )
 
-    def driver(self, tmp: Path, config: Config = CONFIG) -> Driver:
-        return Driver(config, self.ports(), tmp / "s1.jsonl", tmp / "spend.jsonl")
+    def driver(
+        self,
+        tmp: Path,
+        config: Config = CONFIG,
+        guards: Guards = Guards(),  # noqa: B008
+    ) -> Driver:
+        return Driver(
+            config, self.ports(), tmp / "s1.jsonl", tmp / "spend.jsonl", guards=guards
+        )
 
 
 def ref(run_id: str = "r1") -> RunRef:

@@ -11,6 +11,7 @@ from pathlib import Path
 from loomcore.engine import ResumeRefusedError, Run
 from loomcore.eventlog import EventWriter, open_writer, read_events
 from loomcore.events import Escalation, Event, ForkOrigin, RunStarted
+from loomcore.guards import Guards
 from loomcore.limits import Limits, limits_in_force
 from loomcore.ports import Config, Decision, Ports, RunRef, RunResult, Task
 from loomcore.replay import replay, run_events
@@ -36,13 +37,15 @@ class SpendLogMissingError(Exception):
 class Driver:
     """Runs a task, resumes a paused or crashed run, forks one from a clean point."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  (the composition root's settings, all read once)
         self,
         config: Config,
         ports: Ports,
         session_path: Path,
         spend_path: Path,
         retry: RetryPolicy = RetryPolicy(),  # noqa: B008  (frozen, so shared safely)
+        *,
+        guards: Guards = Guards(),  # noqa: B008  (frozen, so shared safely)
     ) -> None:
         if not spend_path.parent.is_dir():
             raise SpendLogMissingError(
@@ -54,6 +57,7 @@ class Driver:
         self._session_path = session_path
         self._spend_path = spend_path
         self._retry = retry
+        self._guards = guards
 
     def run(self, task: Task) -> RunResult:
         with open_writer(self._session_path) as writer:
@@ -119,6 +123,7 @@ class Driver:
             switch_to=self._config.switch_to,
             ports=self._ports,
             retry=self._retry,
+            guards=self._guards,
             spend_path=self._spend_path,
             writer=writer,
             ref=ref,

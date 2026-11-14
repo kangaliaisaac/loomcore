@@ -26,6 +26,7 @@ from loomcore.ports import (
 from loomcore.retry import CallError
 from loomcore.sandbox import Refusal
 from loomcore.schedule import Access
+from loomcore.verify import Verifier
 
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
@@ -63,10 +64,17 @@ def use(
     return {"content": blocks, "stop_reason": stop}
 
 
-def finish(result: JsonValue, *others: tuple[str, str]) -> JsonObject:
+def finish(
+    result: JsonValue, *others: tuple[str, str], call_id: str = "fin"
+) -> JsonObject:
     """A response that calls the finish tool, beside any other tool calls."""
     blocks: list[JsonValue] = [
-        {"type": "tool_use", "id": "fin", "name": "finish", "input": {"result": result}}
+        {
+            "type": "tool_use",
+            "id": call_id,
+            "name": "finish",
+            "input": {"result": result},
+        }
     ]
     blocks += [
         {"type": "tool_use", "id": i, "name": name, "input": {"q": i}}
@@ -186,9 +194,15 @@ class World:
         tmp: Path,
         config: Config = CONFIG,
         guards: Guards = Guards(),  # noqa: B008
+        verifier: Verifier | None = None,
     ) -> Driver:
         return Driver(
-            config, self.ports(), tmp / "s1.jsonl", tmp / "spend.jsonl", guards=guards
+            config,
+            self.ports(),
+            tmp / "s1.jsonl",
+            tmp / "spend.jsonl",
+            guards=guards,
+            verifier=verifier,
         )
 
 

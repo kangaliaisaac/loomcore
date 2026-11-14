@@ -31,6 +31,8 @@ from loomcore.events import (
     ToolCompleted,
     ToolRequested,
     TurnStarted,
+    VerificationFailed,
+    VerificationPassed,
 )
 from loomcore.finish import NAME as FINISH
 from loomcore.finish import result_of
@@ -88,6 +90,11 @@ class RunState:
     paused: bool = False
     finished: str | None = None
     turns: int = 0  # this run's turn_started events; a fork starts again at 0
+    # The verifier (spec 3.6): this run's `verification_failed` events, and whether
+    # the claim of the latest model_call has passed (so a crash after the pass does
+    # not ask the verifier again).
+    verification_failures: int = 0
+    verified: bool = False
     # Own model_call cost by UTC month ("2026-11"): a fork starts empty, because it
     # inherits its parent's events for context but not for spend.
     spend_by_month: tuple[tuple[str, Decimal], ...] = ()
@@ -146,7 +153,33 @@ def apply(state: RunState, event: Event) -> RunState:
     """
     state = replace(state, event_count=state.event_count + 1)
     state = _lifecycle(_approvals(_tools(state, event), event), event)
+    state = _verification(state, event)
     return _clock(_context(_budget(state, event), event), event)
+
+
+def _verification(state: RunState, event: Event) -> RunState:
+    """A rejected claim is not the run's ending any more: a failure clears what the
+    crash rules would re-issue, and a rejected `finish` call (completed `ok=false`,
+    which a finish that ends the run never is) clears it the same way."""
+    match event:
+        case ModelCall():
+            state = replace(state, verified=False)
+        case VerificationPassed():
+            state = replace(state, verified=True)
+        case VerificationFailed():
+            state = replace(
+                state,
+                verification_failures=state.verification_failures + 1,
+                ended_with=None,
+                finishing=None,
+            )
+        case ToolCompleted(ok=False) if (
+            state.finishing is not None and state.finishing[0] == event.tool_use_id
+        ):
+            state = replace(state, finishing=None)
+        case RunForked():
+            state = replace(state, verification_failures=0, verified=False)
+    return state
 
 
 def _context(state: RunState, event: Event) -> RunState:

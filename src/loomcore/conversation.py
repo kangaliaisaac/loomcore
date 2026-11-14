@@ -15,8 +15,16 @@ from loomcore.context import (
     ItemKind,
     clear_results,
 )
-from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
+from loomcore.events import (
+    Event,
+    JsonObject,
+    ModelCall,
+    RunForked,
+    ToolCompleted,
+    VerificationFailed,
+)
 from loomcore.replay import content_blocks, tool_use_ids
+from loomcore.verify import critique
 
 FORK_CONTINUE = "Carry on with the task."
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
@@ -80,9 +88,14 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
             kind, key = "exchange", f"seq:{event.run_id}:{event.seq}"
             if _updates_plan(event.message, done):
                 plan_at = len(items)  # the index this exchange is appended at
-        elif isinstance(event, RunForked):
-            messages = _after_fork(last, event)
-            kind, key = "hint", f"hint:{event.run_id}"
+        elif isinstance(event, RunForked | VerificationFailed):
+            messages = _hint(last, event)
+            kind = "hint"
+            key = (
+                f"hint:{event.run_id}"
+                if isinstance(event, RunForked)
+                else f"verify:{event.run_id}:{event.seq}"
+            )
         if messages:
             last = str(messages[-1]["role"])
             items.append(_item(key, kind, len(items), messages, count))
@@ -165,6 +178,16 @@ def _after_fork(last: str, event: RunForked) -> list[JsonObject]:
     if last == "assistant":
         return [{"role": "user", "content": FORK_CONTINUE}]
     return []
+
+
+def _hint(last: str, event: RunForked | VerificationFailed) -> list[JsonObject]:
+    """The user message a fork hint or a rejected claim adds. After a `finish` call
+    the tool result already carries the critique, so only a bare reply needs one."""
+    if isinstance(event, RunForked):
+        return _after_fork(last, event)
+    if last != "assistant":
+        return []
+    return [{"role": "user", "content": critique(event.verifier, event.message)}]
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

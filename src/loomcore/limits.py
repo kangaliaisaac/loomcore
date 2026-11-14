@@ -23,7 +23,14 @@ from loomcore.events import (
 from loomcore.months import month_key
 from loomcore.replay import RunState, open_segment, spent, spent_in
 
-LimitName = Literal["max_output_tokens", "max_turns", "timeout", "run_cap", "month_cap"]
+LimitName = Literal[
+    "max_output_tokens",
+    "max_turns",
+    "max_verifications",
+    "timeout",
+    "run_cap",
+    "month_cap",
+]
 
 _TRUNCATIONS_BEFORE_PAUSE = 2  # the first cut-off continues, the second pauses
 
@@ -36,6 +43,7 @@ class Limits(BaseModel):
     run_cap: Annotated[Usd, Field(ge=0)] | None
     month_cap: Annotated[Usd, Field(ge=0)] | None
     max_turns: int = Field(50, gt=0)
+    max_verifications: int = Field(3, gt=0)  # rejected claims before a pause
     timeout: float = Field(600.0, gt=0)  # seconds of active time
     max_output_tokens: int = Field(8192, gt=0)
     repeat_window: int = Field(10, gt=0)
@@ -122,6 +130,7 @@ def check_limits(
     checks: tuple[tuple[LimitName, bool], ...] = (
         ("max_output_tokens", state.truncations >= _TRUNCATIONS_BEFORE_PAUSE),
         ("max_turns", state.turns >= limits.max_turns),
+        ("max_verifications", state.verification_failures >= limits.max_verifications),
         ("timeout", elapsed(state, now) >= timedelta(seconds=limits.timeout)),
         ("run_cap", _crosses(limits.run_cap, run_spend + worst_case)),
         (

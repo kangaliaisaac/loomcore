@@ -63,6 +63,7 @@ from loomcore.step import (
     Stop,
     step,
 )
+from loomcore.verify import Verdict, Verifier, critique
 from loomcore.window import Budget, Carried, Window, build_window
 
 _LOG = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class Run:
     next_seq: int = 0
     counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
     guards: Guards = field(default_factory=Guards)
+    verifier: Verifier | None = None
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -187,7 +189,7 @@ class Run:
             case AskHuman(tool_use_id, question):
                 outcome = self._ask(tool_use_id, question)
             case Stop():
-                outcome = self._finish(effect)
+                outcome = self._conclude(effect)
         return outcome
 
     def _call_model(self) -> list[Event] | RunResult:
@@ -615,6 +617,43 @@ class Run:
         )
         self.fold([paused])
         return RunResult(self.ref, "paused", reason, limit, question)
+
+    def _conclude(self, stop: Stop) -> list[Event] | RunResult:
+        """The model claims it is done: the verifier, if there is one, checks the
+        claim first (spec 3.6). Stops that are not a claim (refused, stuck, error)
+        and a claim that already passed before a crash are not checked again."""
+        claim = stop.reason in ("finished", "end_turn")
+        if self.verifier is None or not claim or self.state.verified:
+            return self._finish(stop)
+        verdict = self.verifier(self.state)
+        if verdict.passed:
+            self.fold(
+                [
+                    self.emit(
+                        "verification_passed", verifier=verdict.verifier, message=""
+                    )
+                ]
+            )
+            return self._finish(stop)
+        return self._reject(stop, verdict)
+
+    def _reject(self, stop: Stop, verdict: Verdict) -> list[Event]:
+        """A failed claim goes back to the model: a rejected `finish` call is
+        completed `ok=false` with the critique as its result (the turn's other calls
+        were not run), then the failure is written."""
+        text = critique(verdict.verifier, verdict.message)
+        events = [
+            self._complete(
+                i,
+                ok=False,
+                content=text if i == stop.finish_id else "not run: finish was rejected",
+            )
+            for i in self.state.pending_tools
+        ]
+        failed = self.emit(
+            "verification_failed", verifier=verdict.verifier, message=verdict.message
+        )
+        return [*events, failed]
 
     def _finish(self, stop: Stop) -> RunResult:
         """End the run: settle every pending call first, then write run_finished."""

@@ -18,6 +18,7 @@ from loomcore.replay import replay, run_events
 from loomcore.retry import RetryPolicy
 from loomcore.rewind import ensure_fork_point
 from loomcore.spend import repair_spend, run_key
+from loomcore.verify import Verifier
 
 _LOG = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class Driver:
         retry: RetryPolicy = RetryPolicy(),  # noqa: B008  (frozen, so shared safely)
         *,
         guards: Guards = Guards(),  # noqa: B008  (frozen, so shared safely)
+        verifier: Verifier | None = None,
     ) -> None:
         if not spend_path.parent.is_dir():
             raise SpendLogMissingError(
@@ -58,6 +60,7 @@ class Driver:
         self._spend_path = spend_path
         self._retry = retry
         self._guards = guards
+        self._verifier = verifier
 
     def run(self, task: Task) -> RunResult:
         with open_writer(self._session_path) as writer:
@@ -124,6 +127,7 @@ class Driver:
             ports=self._ports,
             retry=self._retry,
             guards=self._guards,
+            verifier=self._verifier,
             spend_path=self._spend_path,
             writer=writer,
             ref=ref,

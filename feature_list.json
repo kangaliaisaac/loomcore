@@ -165,7 +165,7 @@
     "title": "Verifier hook: verify then reflect",
     "spec": "3.6",
     "acceptance": "a failing verifier prevents finished and feeds back; a passing one ends the run",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f21",

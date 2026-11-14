@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from fakes import CAPS, World, kinds, reply, use
 
 from loomcore import ladder
@@ -132,3 +133,32 @@ def test_the_ladders_note_is_added_after_the_guards(tmp_path: Path) -> None:
     assert "token=[redacted] ok" in nudged
     assert ladder.NUDGE in nudged
     assert SECRET.encode() not in (tmp_path / "s1.jsonl").read_bytes()
+
+
+class GuardBugError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Breaks:
+    id: str
+
+    def check(
+        self, request: ToolRequest, result: ToolResult, state: RunState
+    ) -> PostDecision:
+        if request.tool_use_id == self.id:
+            raise GuardBugError(self.id)
+        return Allow()
+
+
+def test_a_guard_that_raises_in_a_wave_does_not_lose_the_other_calls(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[use(("a", "read"), ("b", "read"), ("c", "read"))])
+    world.together = {"read"}
+    world.noted_in["c"] = "notes.md"
+    with pytest.raises(GuardBugError):
+        world.driver(tmp_path, guards=Guards(post=(Breaks("b"),))).run(TASK)
+    done = set(completed(tmp_path))
+    assert done == {"a", "c"}  # b was interrupted; the others are logged
+    assert "note_written" in kinds(events(tmp_path))  # c's notice, after b's failure

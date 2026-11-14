@@ -29,7 +29,16 @@ from loomcore.events import (
     RunStarted,
     make_event,
 )
-from loomcore.guards import Allow, Ask, Deny, Guards, ToolRequest, run_post, run_pre
+from loomcore.guards import (
+    Allow,
+    Ask,
+    Deny,
+    Guards,
+    Screened,
+    ToolRequest,
+    run_post,
+    run_pre,
+)
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
 from loomcore.notices import Notice
 from loomcore.ports import (
@@ -40,7 +49,6 @@ from loomcore.ports import (
     Ports,
     RunRef,
     RunResult,
-    ToolResult,
 )
 from loomcore.replay import RunState, tool_use_ids
 from loomcore.retry import GiveUp, RetryPolicy, decide
@@ -467,20 +475,23 @@ class Run:
     def _run_tool(self, run: RunTool) -> list[Event]:
         caused: dict[str, tuple[Notice, ...]] = {}
         try:
-            result, ms = self._call(run.tool_use_id, caused)
+            screened, ms = self._call(run.tool_use_id, caused)
         finally:
             # Whether the tool returned or broke, what it caused is logged, and a
             # refusal precedes the call's completion. The bucket was closed when the
             # call ended, so a notice that arrives later is not logged, only warned
             # about (spec 3.2).
             written = self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
-        return [*written, *self._completed(run, result, ms)]
+        return [*written, *self._completed(run, screened, ms)]
 
     def _call(
         self, tool_use_id: str, caused: dict[str, tuple[Notice, ...]]
-    ) -> tuple[ToolResult, int]:
+    ) -> tuple[Screened, int]:
         """Run one tool in a bucket of its own; what it caused goes into `caused`
-        whether it returns or breaks. Writes nothing: it may run on a thread."""
+        whether it returns or breaks. Then the post guards screen the result: pure,
+        so they may run on the thread too, and a guard that raises is carried back
+        like a tool that breaks, after the wave's other calls are logged. Writes
+        nothing."""
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
         try:
@@ -489,7 +500,8 @@ class Run:
                 ms = self._since(started)  # before any log write
         finally:
             caused[tool_use_id] = bucket.snapshot()
-        return result, ms
+        request = ToolRequest(tool_use_id, name, args, call_hash(name, args))
+        return run_post(self.guards, request, result, self.state), ms
 
     def _run_together(self, wave: list[RunTool]) -> list[Event]:
         """Run independent calls on threads. A thread only runs its tool and keeps
@@ -515,8 +527,8 @@ class Run:
             events += self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
             error = future.exception()
             if error is None:
-                result, ms = future.result()
-                events += self._completed(run, result, ms)
+                screened, ms = future.result()
+                events += self._completed(run, screened, ms)
             elif bug is None:
                 bug = error  # the first, in the order the model emitted the calls
             else:
@@ -527,13 +539,10 @@ class Run:
             raise bug  # what the other calls caused and finished is already logged
         return events
 
-    def _completed(self, run: RunTool, result: ToolResult, ms: int) -> list[Event]:
-        """The post guards' decisions and then the call's completion. The guards see
-        the raw result and the log only ever holds what they leave (spec 3.7); the
-        ladder's note is added after them, so the log holds what the model sees."""
-        name, args = tool_call(self.chain, run.tool_use_id)
-        request = ToolRequest(run.tool_use_id, name, args, call_hash(name, args))
-        screened = run_post(self.guards, request, result, self.state)
+    def _completed(self, run: RunTool, screened: Screened, ms: int) -> list[Event]:
+        """The post guards' decisions and then the call's completion. The log holds
+        what the guards left, never the raw result (spec 3.7); the ladder's note is
+        added after them, so it holds what the model sees."""
         events: list[Event] = [
             self.emit(
                 "guard_decision",

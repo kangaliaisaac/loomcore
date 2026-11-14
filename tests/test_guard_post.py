@@ -83,9 +83,18 @@ def test_a_post_deny_replaces_the_result_with_its_reason(tmp_path: Path) -> None
     run(world, tmp_path, Refuse(("a",)))
     done = completed(tmp_path)["a"]
     assert (done.ok, done.content, done.cached) == (False, "too large", True)
+    [decision] = [e for e in events(tmp_path) if isinstance(e, GuardDecision)]
+    assert (decision.stage, decision.decision, decision.reason) == (
+        "post",
+        "deny",
+        "too large",
+    )
+    log = kinds(events(tmp_path))
+    assert log.index("guard_decision") < log.index("tool_completed")
+    assert "too large" in str(world.requests[-1].messages[-1]["content"])
 
 
-def test_a_cached_result_is_redacted_each_time(tmp_path: Path) -> None:
+def test_a_result_flagged_cached_is_redacted_like_any_other(tmp_path: Path) -> None:
     world = World(script=[use(("a", "read")), use(("b", "read")), reply("ok")])
     world.tool_results["a"] = ToolResult(True, f"k={SECRET}", cached=True)
     world.tool_results["b"] = ToolResult(True, f"k={SECRET}", cached=True)

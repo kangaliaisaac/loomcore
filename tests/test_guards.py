@@ -55,15 +55,28 @@ def test_with_no_pre_guard_or_only_allows_a_call_is_allowed() -> None:
     )
 
 
-def test_the_first_deny_or_ask_in_order_wins_and_later_guards_are_not_asked() -> None:
+def test_the_first_deny_wins_and_the_guards_after_it_are_not_asked() -> None:
     later = Says(Deny("never"))
-    deny_first = Guards(pre=(Says(Allow()), Says(Deny("no")), later))
-    assert run_pre(deny_first, REQUEST, STATE) == Deny("no")
+    guards = Guards(pre=(Says(Allow()), Says(Deny("no")), later))
+    assert run_pre(guards, REQUEST, STATE) == Deny("no")
     assert later.asked == 0
-    ask_first = Guards(pre=(Says(Ask("sure?")), Says(Deny("no"))))
-    assert run_pre(ask_first, REQUEST, STATE) == Ask("sure?")
-    deny_then_ask = Guards(pre=(Says(Deny("no")), Says(Ask("sure?"))))
-    assert run_pre(deny_then_ask, REQUEST, STATE) == Deny("no")
+
+
+def test_a_deny_after_an_ask_still_wins_over_it() -> None:
+    guards = Guards(pre=(Says(Ask("sure?")), Says(Deny("no"))))
+    assert run_pre(guards, REQUEST, STATE) == Deny("no")
+    asked_first = Says(Ask("sure?"))
+    assert run_pre(Guards(pre=(asked_first, Says(Deny("no")))), REQUEST, STATE) == Deny(
+        "no"
+    )
+    assert asked_first.asked == 1
+
+
+def test_with_no_deny_the_first_ask_wins_and_every_guard_was_asked() -> None:
+    last = Says(Ask("second"))
+    guards = Guards(pre=(Says(Allow()), Says(Ask("first")), last))
+    assert run_pre(guards, REQUEST, STATE) == Ask("first")
+    assert last.asked == 1
 
 
 def test_a_pre_guard_cannot_redact() -> None:
@@ -110,7 +123,7 @@ def test_a_post_deny_replaces_the_result_with_its_reason_and_stops() -> None:
         post=(Rewrites(Redact("clean", "r")), Rewrites(Deny("too big")), after)
     )
     screened = run_post(guards, REQUEST, ToolResult(True, "raw", cached=True), STATE)
-    assert screened.result == ToolResult(False, "too big")  # not ok, not cached
+    assert screened.result == ToolResult(False, "too big", cached=True)  # not ok
     assert screened.decisions == (Redact("clean", "r"), Deny("too big"))
     assert after.saw == []
 

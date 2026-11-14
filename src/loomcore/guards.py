@@ -17,7 +17,8 @@ from loomcore.replay import RunState
 
 @dataclass(frozen=True)
 class ToolRequest:
-    """The call a guard judges."""
+    """The call a guard judges. A guard must not change `input`: it is the object
+    the call runs with and the log holds."""
 
     tool_use_id: str
     name: str
@@ -32,7 +33,7 @@ class Allow:
 
 @dataclass(frozen=True)
 class Deny:
-    reason: str  # logged; for a pre guard also the observation the model sees
+    reason: str  # logged, and the observation the model sees (instead of the call or of its result)
 
 
 @dataclass(frozen=True)
@@ -85,17 +86,22 @@ class Screened:
 
 
 def run_pre(guards: Guards, request: ToolRequest, state: RunState) -> PreDecision:
-    """The first `Deny` or `Ask` in guard order, else `Allow`."""
+    """The first `Deny` in guard order if any guard denies (later guards are then not
+    asked), else the first `Ask`, else `Allow`. A guard that asks does not stop the
+    others: a human must never approve a call that a later guard would refuse."""
+    asking: Ask | None = None
     for guard in guards.pre:
         decision = guard.check(request, state)
         match decision:
             case Allow():
                 continue
-            case Deny() | Ask():
+            case Deny():
                 return decision
+            case Ask():
+                asking = asking or decision
             case _:
                 raise GuardError(f"a pre guard returned {type(decision).__name__}")
-    return Allow()
+    return asking or Allow()
 
 
 def run_post(
@@ -116,7 +122,8 @@ def run_post(
                 decisions.append(decision)
             case Deny():
                 decisions.append(decision)
-                return Screened(ToolResult(False, decision.reason), tuple(decisions))
+                denied = ToolResult(False, decision.reason, cached=current.cached)
+                return Screened(denied, tuple(decisions))
             case _:
                 raise GuardError(f"a post guard returned {type(decision).__name__}")
     return Screened(current, tuple(decisions))

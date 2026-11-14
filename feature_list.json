@@ -157,7 +157,7 @@
     "title": "Guard pipeline: pre and post guards, Redact, Ask",
     "spec": "3.7",
     "acceptance": "a deny stops the tool and is logged; a post guard redacts a secret and the raw result never reaches the log; an ask pauses the run and resume continues from the log",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f20",

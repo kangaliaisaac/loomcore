@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 from loomcore.notices import Notices
-from loomcore.ports import Notice, ToolResult
+from loomcore.ports import Notice, ToolCrashedError, ToolResult
 from loomcore.sandbox import CommandRefusedError, Refusal
 from loomcore.tools import ToolError, ToolRegistry
 from loomcore.workspace import FilesystemWorkspace, PathRefusedError, Workspace
@@ -24,6 +24,7 @@ class Registry:
 
     def __init__(self, root: Path) -> None:
         root.mkdir()
+        self.workspace_root = root
         self.notices = Notices()
         self.workspace = FilesystemWorkspace(
             root, on_refusal=self.notices.refused, on_note=self.notices.noted
@@ -143,7 +144,7 @@ def test_a_bug_in_a_tool_is_not_swallowed_and_leaves_no_bucket_behind(
 
     tools.registry.register(boom)
     tools.registry.register(write_note)
-    with pytest.raises(RuntimeError, match="no luck"):
+    with pytest.raises(ToolCrashedError, match="no luck"):
         tools.registry.execute("boom", {})
     # the next call collects only its own notices
     assert [
@@ -282,3 +283,24 @@ def test_a_nested_call_does_not_take_the_outer_calls_notices(tmp_path: Path) -> 
     result = outer.registry.execute("delegate", {})
     assert seen[0].notices == ()  # the note belongs to the outer call
     assert [n.kind for n in result.notices] == ["note_written"]
+
+
+def test_a_binary_file_is_a_failed_result_not_a_crash(tools: Registry) -> None:
+    tools.registry.register(read_file, read_only=True)
+    (tools.workspace_root / "blob.bin").write_bytes(b"\xff\xfe\x00")
+    result = tools.registry.execute("read_file", {"path": "blob.bin"})
+    assert not result.ok
+    assert "not valid UTF-8" in str(result.content)
+
+
+def test_a_crashing_tool_still_hands_over_what_it_had_caused(tools: Registry) -> None:
+    def half_then_bug() -> str:
+        """Writes a note, then breaks."""
+        tools.workspace.write("notes.md", "n")
+        raise RuntimeError("no luck")
+
+    tools.registry.register(half_then_bug)
+    with pytest.raises(ToolCrashedError) as crashed:
+        tools.registry.execute("half_then_bug", {})
+    assert isinstance(crashed.value.error, RuntimeError)
+    assert [n.kind for n in crashed.value.notices] == ["note_written"]

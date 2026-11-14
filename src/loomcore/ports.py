@@ -77,6 +77,18 @@ class ToolResult:
     notices: tuple[Notice, ...] = ()
 
 
+class ToolCrashedError(Exception):
+    """A tool raised something nobody planned for. `notices` are what the call had
+    already caused (a refusal it handled, a note it wrote) and `error` is the bug;
+    the driver writes the notices, then re-raises the bug, so the log holds what
+    happened before the run stops."""
+
+    def __init__(self, error: Exception, notices: tuple[Notice, ...]) -> None:
+        super().__init__(f"{type(error).__name__}: {error}")
+        self.error = error
+        self.notices = notices
+
+
 class Pricing(Protocol):
     """Prices from recorded tokens; the vendored table arrives with card 10."""
 

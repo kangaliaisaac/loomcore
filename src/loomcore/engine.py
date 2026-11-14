@@ -31,9 +31,11 @@ from loomcore.ports import (
     Decision,
     ModelCallError,
     ModelRequest,
+    Notice,
     Ports,
     RunRef,
     RunResult,
+    ToolCrashedError,
 )
 from loomcore.replay import RunState, tool_use_ids
 from loomcore.retry import GiveUp, RetryPolicy, decide
@@ -292,16 +294,25 @@ class Run:
     def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
-        result = self.ports.tool(name, args)
+        try:
+            result = self.ports.tool(name, args)
+        except ToolCrashedError as crash:
+            self._emit_notices(tool_use_id, crash.notices)
+            raise crash.error from crash
         ms = self._since(started)  # before the log writes below
         # What the call caused is written first, so a refusal precedes its completion.
-        caused = [
-            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
-            for notice in result.notices
-        ]
+        caused = self._emit_notices(tool_use_id, result.notices)
         content = _annotated(result.content, note)
         done = self._complete(tool_use_id, ok=result.ok, content=content, ms=ms)
         return [*caused, done]
+
+    def _emit_notices(
+        self, tool_use_id: str, notices: tuple[Notice, ...]
+    ) -> list[Event]:
+        return [
+            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
+            for notice in notices
+        ]
 
     def _complete(
         self, tool_use_id: str, *, ok: bool, content: JsonValue, ms: int = 0

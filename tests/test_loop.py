@@ -1,6 +1,7 @@
 """f08 and f09: a scripted model drives runs to finished, paused and resumed."""
 
 import logging
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,7 +31,15 @@ from loomcore.loop import (
     RunIdTakenError,
     SpendLogMissingError,
 )
-from loomcore.ports import Config, Decision, Notice, RunResult, Task, ToolResult
+from loomcore.ports import (
+    Config,
+    Decision,
+    Notice,
+    RunResult,
+    Task,
+    ToolCrashedError,
+    ToolResult,
+)
 from loomcore.rewind import ForkRefusedError
 from loomcore.spend import SpendLine, append_spend, read_spend
 
@@ -663,3 +672,31 @@ def test_a_refusal_and_a_note_are_logged_before_their_call_completes(
     noted = next(e for e in log if isinstance(e, NoteWritten))
     assert (denied.tool_use_id, denied.target) == ("t1", "/etc")
     assert (noted.tool_use_id, noted.path) == ("t1", "notes.md")
+
+
+def test_a_tool_that_crashes_still_has_its_notices_logged_and_its_bug_raised(
+    tmp_path: Path,
+) -> None:
+    caused = (Notice("note_written", {"path": "notes.md"}),)
+
+    class BugError(Exception):
+        pass
+
+    world = World(script=[use(("t1", "search")), reply()])
+    ports = world.ports()
+
+    def tool(name: str, args: JsonObject) -> ToolResult:
+        raise ToolCrashedError(BugError("broken"), caused)
+
+    driver = Driver(
+        CONFIG,
+        replace(ports, tool=tool),
+        tmp_path / "s1.jsonl",
+        tmp_path / "spend.jsonl",
+    )
+    with pytest.raises(BugError):
+        driver.run(TASK)
+    log = read_events(tmp_path / "s1.jsonl").events
+    noted = next(e for e in log if isinstance(e, NoteWritten))
+    assert noted.tool_use_id == "t1"
+    assert not any(isinstance(e, ToolCompleted) for e in log)

@@ -18,7 +18,7 @@ from pydantic import create_model as pydantic_model
 from loomcore import finish
 from loomcore.events import JsonObject
 from loomcore.notices import Notices
-from loomcore.ports import ToolResult
+from loomcore.ports import ToolCrashedError, ToolResult
 from loomcore.sandbox import CommandRefusedError
 from loomcore.workspace import PathRefusedError, Workspace
 
@@ -107,7 +107,12 @@ class ToolRegistry:
             known = ", ".join(sorted(self._tools)) or "none"
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
         with self._notices.collecting() as bucket:
-            result = self._run(name, tool, input)
+            try:
+                result = self._run(name, tool, input)
+            except Exception as error:
+                # Not caught: a bug stops the run. The notices are kept, though, so
+                # what the call caused before it broke still reaches the log.
+                raise ToolCrashedError(error, tuple(bucket)) from error
         return replace(result, notices=tuple(bucket))
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
@@ -133,6 +138,10 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     except (ToolError, PathRefusedError, CommandRefusedError) as error:
         # Written for the model: what was asked and why it cannot be done.
         return ToolResult(False, f"{name} failed: {error}")
+    except UnicodeError:
+        # A file that is not UTF-8 text (a binary file) or text that cannot be
+        # written as such: the model can pick another file or other content.
+        return ToolResult(False, f"{name} failed: the content is not valid UTF-8 text")
     except OSError as error:
         # Not str(error): it names the absolute host path, which does not belong
         # in the log or in front of the model.

@@ -49,6 +49,10 @@ class Window:
     newly_cleared: tuple[str, ...]  # to record in `context_compacted.cleared`
 
 
+def _no_count(messages: Sequence[JsonObject]) -> int:
+    return 0
+
+
 def build_window(
     task: JsonValue,
     events: Sequence[Event],
@@ -59,9 +63,9 @@ def build_window(
     """The messages for the next request. With no budget it is the whole history. An
     `over` window (the pinned items alone exceed the budget) is sent as it is and
     records nothing: it is one turn's failure, not a decision about the history."""
+    if budget is None:  # nothing is packed, so nothing is counted either
+        return Window(render(exchanges(task, events, _no_count)), None, 0, (), ())
     items = exchanges(task, events, count)
-    if budget is None:
-        return Window(render(items), None, 0, (), ())
     kept = [item for item in items if item.id not in carried.dropped]
     shown = apply_cleared(kept, carried.cleared, count)
     before = sum(item.tokens for item in shown)

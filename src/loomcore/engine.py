@@ -17,7 +17,8 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from loomcore import ladder, schedule
-from loomcore.conversation import build_messages, call_hash, final_text, tool_call
+from loomcore.context import STRATEGY
+from loomcore.conversation import call_hash, final_text, tool_call
 from loomcore.eventlog import EventWriter
 from loomcore.events import (
     ApprovalRequested,
@@ -52,6 +53,7 @@ from loomcore.step import (
     Stop,
     step,
 )
+from loomcore.window import Budget, Carried, Window, build_window
 
 _LOG = logging.getLogger(__name__)
 
@@ -79,6 +81,7 @@ class Run:
     switch_to: Config | None = None  # the configuration the switch rung changes to
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
+    counted: dict[str, int] = field(default_factory=dict)  # token counts, by text
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -224,14 +227,70 @@ class Run:
 
     def _request(self) -> ModelRequest:
         root = next(e for e in self.chain if isinstance(e, RunStarted))
+        window = build_window(
+            root.task,
+            self.chain,
+            Carried(self.state.dropped, self.state.cleared),
+            self._budget(),
+            self._count,
+        )
+        self._record(window)
         return ModelRequest(
             model=self.config.model,
             system=self.config.system,
-            messages=build_messages(root.task, self.chain),
+            messages=window.messages,
             tools=self.config.tools,
             max_tokens=self.limits.max_output_tokens,
             cache_prefix=self.config.cache_prefix,
         )
+
+    def _budget(self) -> Budget | None:
+        """Tokens left for the history: the budget less the system prompt and the tool
+        schemas, which every request carries."""
+        if self.limits.context_budget is None:
+            return None
+        fixed = self._count([{"role": "user", "content": self.config.system}])
+        tools = json.dumps(list(self.config.tools), sort_keys=True)
+        fixed += self._count([{"role": "user", "content": tools}])
+        left = max(self.limits.context_budget - fixed, 0)
+        return Budget(left, self.limits.compact_at, self.limits.compact_to)
+
+    def _count(self, messages: Sequence[JsonObject]) -> int:
+        """The edge's token count, asked once for each distinct text."""
+        key = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+        if key not in self.counted:
+            self.counted[key] = self.ports.count_tokens(messages)
+        return self.counted[key]
+
+    def _record(self, window: Window) -> None:
+        """Write what the window newly dropped and cleared, and fold it so the next
+        window starts from here. Before the model call: these are decisions about the
+        history, which hold whether or not the call is made."""
+        packed = window.packed
+        if packed is None:
+            return
+        events: list[Event] = []
+        if window.newly_dropped:
+            events.append(
+                self.emit(
+                    "context_packed",
+                    selected=[item.id for item in packed.selected],
+                    dropped=list(window.newly_dropped),
+                    tokens=packed.tokens,
+                    budget=packed.budget,
+                )
+            )
+        if window.newly_cleared:
+            events.append(
+                self.emit(
+                    "context_compacted",
+                    strategy=STRATEGY,
+                    tokens_before=window.tokens_before,
+                    tokens_after=packed.tokens,
+                    cleared=list(window.newly_cleared),
+                )
+            )
+        self.fold(events)
 
     def _month_to_date(self) -> Decimal:
         key = run_key(self.ref.session_id, self.ref.run_id)

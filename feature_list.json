@@ -141,7 +141,7 @@
     "title": "Plan tool",
     "spec": "1 Extension seams",
     "acceptance": "the plan file is always kept in context",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f25",

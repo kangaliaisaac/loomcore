@@ -44,7 +44,7 @@ A short hello-agent example, about twenty lines, will be added here with the dri
 - **Rewind restores conversation state, not files.** What the old run wrote to the workspace after the fork point is still on disk, and the fork starts from that workspace.
 - **A tool timeout abandons the call; it does not kill it.** Python cannot stop a running thread, so a timed-out tool may keep running and write late. A tool that writes should run through the sandbox, which kills its container on timeout.
 - **One writer per session file.** Do not point two processes at the same session; the second waits or fails.
-- **Among the optional extras, version 0.1 ships a plan tool (a plan file kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
+- **Among the optional extras, version 0.1 ships a plan tool (the model's latest plan is written to a file and kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
 - **No UI, hosted service or database.** Persistence is a JSONL file.
 
 ## Design

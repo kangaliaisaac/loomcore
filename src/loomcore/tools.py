@@ -1,8 +1,9 @@
 """The tool registry: typed Python functions become tools (spec section 3.2).
 
 The type hints are the only source of the JSON Schema, and the docstring is the
-description. `execute` never raises: a bad call comes back as `ok=False` with a
-message that says how to fix it. The registry emits no events; what the call caused
+description. A bad call comes back as `ok=False` with a message that says how to
+fix it: invalid input, an unknown tool, a `ToolError`, a refusal, an `OSError`.
+Nothing else is caught. The registry emits no events; what the call caused
 (refusals, notes) rides on the `ToolResult` for the driver to write.
 """
 
@@ -18,10 +19,19 @@ from loomcore import finish
 from loomcore.events import JsonObject
 from loomcore.notices import Notices
 from loomcore.ports import ToolResult
-from loomcore.workspace import Workspace
+from loomcore.sandbox import CommandRefusedError
+from loomcore.workspace import PathRefusedError, Workspace
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _VALUES = frozenset({"default", "const", "enum", "examples"})  # data, not schema
+
+
+class ToolError(Exception):
+    """What a tool raises when the call cannot be done and the model can fix it
+    (a name that does not exist, a value out of range). The message goes to the
+    model and into the log, so it must not name a host path. Any other exception
+    is a bug in the tool and is not caught: the run stops and is resumed from its
+    log."""
 
 
 @dataclass(frozen=True)
@@ -120,12 +130,13 @@ class ToolRegistry:
 def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         value = tool.fn(**kwargs)
+    except (ToolError, PathRefusedError, CommandRefusedError) as error:
+        # Written for the model: what was asked and why it cannot be done.
+        return ToolResult(False, f"{name} failed: {error}")
     except OSError as error:
         # Not str(error): it names the absolute host path, which does not belong
         # in the log or in front of the model.
         return ToolResult(False, f"{name} failed: {error.strerror or 'I/O error'}")
-    except Exception as error:
-        return ToolResult(False, f"{name} failed: {type(error).__name__}: {error}")
     try:
         return ToolResult(True, _JSON.validate_python(value))
     except ValidationError:

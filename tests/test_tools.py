@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from loomcore.notices import Notices
 from loomcore.ports import Notice, ToolResult
 from loomcore.sandbox import CommandRefusedError, Refusal
-from loomcore.tools import ToolRegistry
+from loomcore.tools import ToolError, ToolRegistry
 from loomcore.workspace import FilesystemWorkspace, PathRefusedError, Workspace
 
 
@@ -112,21 +112,43 @@ def test_an_unknown_tool_names_the_ones_there_are(tools: Registry) -> None:
     assert tools.registry.read_only("nope") is False
 
 
-def test_a_tool_that_raises_or_returns_non_json_is_a_failed_result(
-    tools: Registry,
-) -> None:
-    def boom() -> str:
-        """Fails."""
-        raise RuntimeError("no luck")
+def test_a_tool_error_is_a_failed_result_with_its_own_message(tools: Registry) -> None:
+    def pick(name: str) -> str:
+        """Picks a thing by name."""
+        raise ToolError(f"there is no {name!r}; try 'a' or 'b'")
 
+    tools.registry.register(pick)
+    result = tools.registry.execute("pick", {"name": "z"})
+    assert (result.ok, result.content) == (
+        False,
+        "pick failed: there is no 'z'; try 'a' or 'b'",
+    )
+
+
+def test_a_return_value_that_is_not_json_is_a_failed_result(tools: Registry) -> None:
     def odd() -> object:
         """Returns a thing that is not JSON."""
         return object()
 
-    tools.registry.register(boom)
     tools.registry.register(odd)
-    assert "RuntimeError: no luck" in str(tools.registry.execute("boom", {}).content)
     assert "not JSON" in str(tools.registry.execute("odd", {}).content)
+
+
+def test_a_bug_in_a_tool_is_not_swallowed_and_leaves_no_bucket_behind(
+    tools: Registry,
+) -> None:
+    def boom() -> str:
+        """Fails in a way nobody planned for."""
+        raise RuntimeError("no luck")
+
+    tools.registry.register(boom)
+    tools.registry.register(write_note)
+    with pytest.raises(RuntimeError, match="no luck"):
+        tools.registry.execute("boom", {})
+    # the next call collects only its own notices
+    assert [
+        n.kind for n in tools.registry.execute("write_note", {"text": "x"}).notices
+    ] == ["note_written"]
 
 
 def test_registering_checks_the_tool(tools: Registry) -> None:
@@ -222,19 +244,6 @@ def test_a_missing_file_does_not_put_the_host_path_in_the_result(
     assert not result.ok
     assert "No such file" in str(result.content)
     assert str(tmp_path) not in str(result.content)
-
-
-def test_a_validation_error_inside_a_tool_keeps_its_own_message(
-    tools: Registry,
-) -> None:
-    def parse(text: str) -> int:
-        """Parses a point."""
-        return Point.model_validate_json(text).x
-
-    tools.registry.register(parse)
-    content = str(tools.registry.execute("parse", {"text": "{}"}).content)
-    assert "ValidationError" in content
-    assert "not JSON" not in content
 
 
 def test_a_sandbox_refusal_reported_by_a_tool_becomes_a_notice(tools: Registry) -> None:

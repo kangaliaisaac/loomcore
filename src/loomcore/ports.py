@@ -92,7 +92,9 @@ class Pricing(Protocol):
 @dataclass(frozen=True)
 class Ports:
     model: Callable[[ModelRequest], JsonObject]  # raises ModelCallError
-    tool: Callable[[str, JsonObject], ToolResult]  # never raises; has its own timeout
+    tool: Callable[
+        [str, JsonObject], ToolResult
+    ]  # ok=false for fixable failures, a bug raises; has its own timeout
     read_only: Callable[[str], bool]  # by tool name
     pricing: Pricing
     clock: Callable[[], datetime]  # wall-clock UTC

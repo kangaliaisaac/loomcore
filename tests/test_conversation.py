@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from factories import calling, make
 
-from loomcore.context import CLEARED
+from loomcore.context import CLEARED, pack
 from loomcore.conversation import (
     CONTINUE,
     FORK_CONTINUE,
@@ -16,6 +16,7 @@ from loomcore.conversation import (
     render,
 )
 from loomcore.events import JsonObject
+from loomcore.replay import run_events
 
 
 def size(messages: Sequence[JsonObject]) -> int:
@@ -114,8 +115,8 @@ def test_the_history_is_cut_into_exchanges_with_the_latest_pinned() -> None:
     items = exchanges("go", log, size)
     assert [(i.id, i.kind, i.pinned) for i in items] == [
         ("task", "task", True),
-        ("seq:1", "exchange", False),
-        ("seq:3", "exchange", True),
+        ("seq:r1:1", "exchange", False),
+        ("seq:r1:3", "exchange", True),
     ]
     assert [i.order for i in items] == [0, 1, 2]
     assert render(items) == build_messages("go", log)
@@ -156,7 +157,7 @@ def test_dropping_a_whole_exchange_keeps_the_roles_alternating() -> None:
     task, first, second, third = exchanges("go", log, size)
     roles = [m["role"] for m in render([task, second, third])]
     assert roles == ["user", "assistant", "user", "assistant", "user"]
-    assert first.id == "seq:1"
+    assert first.id == "seq:r1:1"
 
 
 def test_a_fork_hint_is_pinned_and_a_fork_from_an_answer_asks_to_carry_on() -> None:
@@ -171,3 +172,30 @@ def test_a_fork_hint_is_pinned_and_a_fork_from_an_answer_asks_to_carry_on() -> N
     hints = [i for i in items if i.kind == "hint"]
     assert [i.pinned for i in hints] == [True, True]
     assert [i.messages[0]["content"] for i in hints] == [FORK_CONTINUE, "try b"]
+
+
+def test_item_ids_stay_unique_in_a_fork_of_a_fork_because_seq_restarts_per_run() -> (
+    None
+):
+    answer = {"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn"}
+    log = [
+        make("run_started", 0, "r1"),
+        make("model_call", 1, "r1", message=answer),
+        make("run_forked", 0, "r2", hint="b", **{"from": {"runId": "r1", "seq": 1}}),
+        make("model_call", 1, "r2", message=answer),
+        make("run_forked", 0, "r3", hint="c", **{"from": {"runId": "r2", "seq": 1}}),
+        make("model_call", 1, "r3", message=answer),
+    ]
+    items = exchanges("go", run_events(log, "r3"), size)
+    names = [i.id for i in items]
+    assert len(set(names)) == len(names)
+    assert names == [
+        "task",
+        "seq:r1:1",
+        "hint:r2",
+        "seq:r2:1",
+        "hint:r3",
+        "seq:r3:1",
+    ]
+    pinned = [i for i in items if i.pinned]
+    pack([i for i in items if not i.pinned], 10_000, pinned)  # the first window works

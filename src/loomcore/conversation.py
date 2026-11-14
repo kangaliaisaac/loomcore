@@ -2,16 +2,15 @@
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 
 from pydantic import JsonValue
 
-from loomcore.context import CLEARED, Cleared, Item, ItemKind
+from loomcore.context import Cleared, Counter, Item, ItemKind, clear_results
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
 from loomcore.replay import content_blocks, tool_use_ids
 
-Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 FORK_CONTINUE = "Carry on with the task."
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
 
@@ -69,10 +68,10 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
                 messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
                 messages.append(reply)
-            kind, key = "exchange", f"seq:{event.seq}"
+            kind, key = "exchange", f"seq:{event.run_id}:{event.seq}"
         elif isinstance(event, RunForked):
             messages = _after_fork(last, event)
-            kind, key = "hint", f"hint:{event.seq}"
+            kind, key = "hint", f"hint:{event.run_id}"
         if messages:
             last = str(messages[-1]["role"])
             items.append(_item(key, kind, len(items), messages, count))
@@ -102,26 +101,11 @@ def _item(
 def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared | None:
     """The exchange with its results cleared, or None when that would not make it
     smaller (no result, or one shorter than the placeholder)."""
-    blank = [_blank_results(message) for message in messages]
+    blank = clear_results(messages)
+    if blank == tuple(messages):
+        return None  # no tool result to clear, so nothing to count
     cleared = count(blank)
-    return (
-        None
-        if blank == messages or cleared >= tokens
-        else Cleared(tuple(blank), cleared)
-    )
-
-
-def _blank_results(message: JsonObject) -> JsonObject:
-    content = message["content"]
-    if not isinstance(content, list):
-        return message
-    kept: list[JsonValue] = [
-        {**block, "content": CLEARED}
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-        else block
-        for block in content
-    ]
-    return {**message, "content": kept}
+    return None if cleared >= tokens else Cleared(blank, cleared)
 
 
 def _pin_latest(items: list[Item]) -> list[Item]:

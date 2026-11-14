@@ -6,14 +6,17 @@ among them. A model never sees a `tool_use` without its `tool_result`, because a
 item is a whole exchange.
 """
 
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Literal
 
+from pydantic import JsonValue
+
 from loomcore.events import JsonObject
 
 ItemKind = Literal["task", "exchange", "hint"]
+Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 CLEARED = "[tool result cleared to save context]"
 STRATEGY = "clear_tool_results"  # what `context_compacted` names for `compact`
 
@@ -28,7 +31,7 @@ class Cleared:
 
 @dataclass(frozen=True)
 class Item:
-    id: str  # "task", "hint:<seq>" or "seq:<seq of the model_call>"
+    id: str  # "task", "hint:<run>" or "seq:<run>:<seq of the model_call>"
     kind: ItemKind
     order: int  # position in the history; a later item is worth more
     tokens: int  # counted at the edge, never here
@@ -48,7 +51,9 @@ class Packed:
 
 
 def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Packed:
-    """Pinned items are always in. The rest are taken by value per token, a later
+    """Pinned items are always in. If everything together is over the budget, the
+    oldest unpinned tool results are cleared first, so nothing is dropped that a
+    cleared form would have kept. The rest are taken by value per token, a later
     item being worth more, and an item that no longer fits is skipped. Ties are
     broken by order, then id, so the result never depends on the input order.
 
@@ -59,16 +64,18 @@ def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Pac
     base = sum(item.tokens for item in pinned)
     if base > budget:
         return Packed(_in_order(pinned), _in_order(candidates), base, budget, over=True)
+    total = base + sum(item.tokens for item in candidates)
+    items, cleared = _clear_oldest(_in_order(candidates), total, budget)
     left = budget - base
     chosen: list[Item] = []
-    for item in _by_value(candidates):
+    for item in _by_value(items):
         if item.tokens <= left:
             chosen.append(item)
             left -= item.tokens
     kept = {item.id for item in chosen}
-    dropped = [item for item in candidates if item.id not in kept]
+    dropped = [item for item in items if item.id not in kept]
     selected = _in_order([*pinned, *chosen])
-    return Packed(selected, _in_order(dropped), budget - left, budget)
+    return Packed(selected, _in_order(dropped), budget - left, budget, cleared=cleared)
 
 
 def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
@@ -77,41 +84,77 @@ def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
     so is a window that is already within its threshold."""
     if packed.over or packed.tokens < compact_at * packed.budget:
         return packed
-    tokens = packed.tokens
-    items = list(packed.selected)
-    cleared: list[str] = []
-    for k, item in enumerate(items):
-        if tokens <= compact_to * packed.budget:
-            break
-        if item.pinned or item.cleared is None:
-            continue
-        tokens -= item.tokens - item.cleared.tokens
-        items[k] = replace(
-            item,
-            messages=item.cleared.messages,
-            tokens=item.cleared.tokens,
-            cleared=None,
-        )
-        cleared.append(item.id)
+    items, cleared = _clear_oldest(
+        packed.selected, packed.tokens, compact_to * packed.budget
+    )
     if not cleared:
         return packed  # nothing left to clear: a second call changes nothing
-    return replace(packed, selected=tuple(items), tokens=tokens, cleared=tuple(cleared))
+    tokens = sum(item.tokens for item in items)
+    return replace(
+        packed,
+        selected=tuple(items),
+        tokens=tokens,
+        cleared=(*packed.cleared, *cleared),
+    )
 
 
-def apply_cleared(items: Sequence[Item], cleared: Collection[str]) -> list[Item]:
-    """Show the items whose ids were cleared in an earlier window in their cleared
-    form, so a window starts from where the last one left off."""
+def _clear_oldest(
+    items: Sequence[Item], total: int, target: float
+) -> tuple[tuple[Item, ...], tuple[str, ...]]:
+    """Replace the tool results of the oldest unpinned items with their cleared form
+    until the window (`total` tokens now, `items` and perhaps others) is down to
+    `target` or none is left."""
+    out: list[Item] = []
+    cleared: list[str] = []
+    for item in items:
+        if total > target and not item.pinned and item.cleared is not None:
+            total -= item.tokens - item.cleared.tokens
+            cleared.append(item.id)
+            out.append(_as_cleared(item, item.cleared))
+        else:
+            out.append(item)
+    return tuple(out), tuple(cleared)
+
+
+def _as_cleared(item: Item, cleared: Cleared) -> Item:
+    return replace(item, messages=cleared.messages, tokens=cleared.tokens, cleared=None)
+
+
+def clear_results(messages: Sequence[JsonObject]) -> tuple[JsonObject, ...]:
+    """The messages with the content of every tool result replaced by `CLEARED`
+    (the `tool_use_id` and `is_error` stay)."""
+    return tuple(_clear_message(message) for message in messages)
+
+
+def apply_cleared(
+    items: Sequence[Item], cleared: Collection[str], count: Counter
+) -> list[Item]:
+    """Show the items cleared in an earlier window in their cleared form, so a
+    window starts from where the last one left off. The messages are blanked here,
+    from the log's own text, not read from `Item.cleared`, so what is shown does
+    not depend on what a counter said when the item was built."""
     return [
-        replace(
-            item,
-            messages=item.cleared.messages,
-            tokens=item.cleared.tokens,
-            cleared=None,
-        )
-        if item.id in cleared and item.cleared is not None and not item.pinned
-        else item
+        _shown_cleared(item, count) if item.id in cleared and not item.pinned else item
         for item in items
     ]
+
+
+def _shown_cleared(item: Item, count: Counter) -> Item:
+    blank = clear_results(item.messages)
+    return replace(item, messages=blank, tokens=count(blank), cleared=None)
+
+
+def _clear_message(message: JsonObject) -> JsonObject:
+    content = message["content"]
+    if not isinstance(content, list):
+        return message
+    kept: list[JsonValue] = [
+        {**block, "content": CLEARED}
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+        else block
+        for block in content
+    ]
+    return {**message, "content": kept}
 
 
 def _check_split(candidates: Sequence[Item], pinned: Sequence[Item]) -> None:

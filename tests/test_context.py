@@ -1,6 +1,8 @@
 """f16, part 1: packing and compaction are pure choices among counted items."""
 
+import json
 import random
+from collections.abc import Sequence
 from dataclasses import replace
 
 import pytest
@@ -17,6 +19,13 @@ from loomcore.context import (
     pack,
 )
 from loomcore.events import JsonObject
+
+RESULT: JsonObject = {
+    "role": "user",
+    "content": [
+        {"type": "tool_result", "tool_use_id": "a", "content": "ok", "is_error": False}
+    ],
+}
 
 
 def item(
@@ -179,14 +188,67 @@ def test_a_window_still_high_after_everything_is_cleared_is_left_alone_again() -
     assert compact(once, 0.8, 0.1) is once
 
 
+def messages_size(messages: Sequence[JsonObject]) -> int:
+    return len(json.dumps(messages))
+
+
 def test_items_cleared_in_an_earlier_window_start_this_one_cleared() -> None:
-    items = [item(0, 100, cleared_tokens=5), item(1, 100, cleared_tokens=5)]
-    shown = apply_cleared(items, {"i0"})
-    assert [i.tokens for i in shown] == [5, 100]
-    assert shown[0].messages[0]["content"] == CLEARED
+    results: JsonObject = {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "x" * 90,
+                "is_error": True,
+            }
+        ],
+    }
+    big = replace(item(0, 100), messages=(results,))
+    other = item(1, 100)
+    shown = apply_cleared([big, other], {"i0", "i1"}, messages_size)
+    content = shown[0].messages[0]["content"]
+    assert isinstance(content, list)
+    [block] = content
+    assert isinstance(block, dict)
+    assert block["content"] == CLEARED
+    assert block["is_error"] is True
+    assert shown[0].tokens == messages_size(shown[0].messages)  # recounted
     assert shown[0].cleared is None  # it cannot be cleared twice
-    pinned = [replace(items[0], pinned=True)]
-    assert apply_cleared(pinned, {"i0"}) == pinned  # a pinned item is never cleared
+    assert shown[1].messages == other.messages  # no tool result in it: as it was
+    pinned = [replace(big, pinned=True)]
+    assert apply_cleared(pinned, {"i0"}, messages_size) == pinned  # never a pinned one
+
+
+def test_what_is_shown_cleared_does_not_depend_on_what_the_counter_said_before() -> (
+    None
+):
+    log_item = replace(
+        item(0, 100), messages=(RESULT,), cleared=None
+    )  # counter: no gain
+    shown = apply_cleared([log_item], {"i0"}, messages_size)
+    assert shown[0].messages != log_item.messages  # the log decided, not the counter
+
+
+def test_clearing_comes_before_dropping_when_the_whole_window_is_over_budget() -> None:
+    items = [item(0, 300, cleared_tokens=10), item(1, 300, cleared_tokens=10)]
+    pinned = [item(2, 300, pinned=True)]
+    packed = pack(items, 700, pinned)
+    assert packed.dropped == ()  # 900 > 700: but clearing the oldest saves enough
+    assert packed.cleared == ("i0",)
+    assert packed.tokens == 610
+    tight = pack(items, 400, pinned)  # clearing both still leaves 320, then a drop
+    assert tight.cleared == ("i0", "i1")
+    assert tight.tokens <= 400
+
+
+def test_a_window_that_is_over_clears_and_drops_nothing_of_its_own() -> None:
+    over = pack([item(0, 50, cleared_tokens=1)], 10, [item(1, 50, pinned=True)])
+    assert over.over
+    assert over.cleared == ()
+    assert ids(over.dropped) == [
+        "i0"
+    ]  # left out of this window; the driver records none
 
 
 def test_pack_refuses_items_the_caller_split_wrongly() -> None:

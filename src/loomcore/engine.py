@@ -29,7 +29,7 @@ from loomcore.events import (
     RunStarted,
     make_event,
 )
-from loomcore.guards import Allow, Ask, Deny, Guards, ToolRequest, run_pre
+from loomcore.guards import Allow, Ask, Deny, Guards, ToolRequest, run_post, run_pre
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
 from loomcore.notices import Notice
 from loomcore.ports import (
@@ -474,7 +474,7 @@ class Run:
             # call ended, so a notice that arrives later is not logged, only warned
             # about (spec 3.2).
             written = self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
-        return [*written, self._completed(run, result, ms)]
+        return [*written, *self._completed(run, result, ms)]
 
     def _call(
         self, tool_use_id: str, caused: dict[str, tuple[Notice, ...]]
@@ -516,7 +516,7 @@ class Run:
             error = future.exception()
             if error is None:
                 result, ms = future.result()
-                events.append(self._completed(run, result, ms))
+                events += self._completed(run, result, ms)
             elif bug is None:
                 bug = error  # the first, in the order the model emitted the calls
             else:
@@ -527,14 +527,34 @@ class Run:
             raise bug  # what the other calls caused and finished is already logged
         return events
 
-    def _completed(self, run: RunTool, result: ToolResult, ms: int) -> Event:
-        return self._complete(
-            run.tool_use_id,
-            ok=result.ok,
-            content=_annotated(result.content, run.note),
-            ms=ms,
-            cached=result.cached,
+    def _completed(self, run: RunTool, result: ToolResult, ms: int) -> list[Event]:
+        """The post guards' decisions and then the call's completion. The guards see
+        the raw result and the log only ever holds what they leave (spec 3.7); the
+        ladder's note is added after them, so the log holds what the model sees."""
+        name, args = tool_call(self.chain, run.tool_use_id)
+        request = ToolRequest(run.tool_use_id, name, args, call_hash(name, args))
+        screened = run_post(self.guards, request, result, self.state)
+        events: list[Event] = [
+            self.emit(
+                "guard_decision",
+                stage="post",
+                tool_use_id=run.tool_use_id,
+                decision="deny" if isinstance(decision, Deny) else "redact",
+                reason=decision.reason,
+            )
+            for decision in screened.decisions
+        ]
+        shown = screened.result
+        events.append(
+            self._complete(
+                run.tool_use_id,
+                ok=shown.ok,
+                content=_annotated(shown.content, run.note),
+                ms=ms,
+                cached=shown.cached,
+            )
         )
+        return events
 
     def _emit_notices(self, tool_use_id: str, notices: Sequence[Notice]) -> list[Event]:
         return [

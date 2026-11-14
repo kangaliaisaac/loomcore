@@ -364,18 +364,40 @@ Tests, written first: `../`, absolute paths, a symlink out of the workspace, a s
 ```python
 class ContextStore(Protocol):
     def pack(
-        self, 
-        candidates: Sequence[Item], 
-        budget: int, 
+        self,
+        candidates: Sequence[Item],
+        budget: int,
         pinned: Sequence[Item]) -> Packed: ...
-    def compact(self, packed: Packed) -> Packed: ...
+    def compact(self, packed: Packed, compact_at: float, compact_to: float) -> Packed: ...
 
 class Formatter(Protocol):
-    def render(self, events: Sequence[Event]) -> list[Message]: ...
+    def exchanges(self, task: JsonValue, events: Sequence[Event], count: Callable[[str], int]) -> list[Item]: ...
+    def render(self, items: Sequence[Item]) -> list[JsonObject]: ...
 ```
 
-`pack` is pure: each `Item` carries its token count, measured at the edge, so `pack` does no counting itself. Pinned items (system prompt, tool definitions, the latest user turn and tool results) are always in; the rest are chosen greedily by value per token with a heap, ties broken deterministically. Compaction runs at a threshold (for example 80% of the budget): clear old tool results first, then summarise. A notes file in the workspace holds what the agent wants to keep outside the window. Resolved errors and failed calls are hidden from later windows. The formatter is swappable, so the same log can render as messages or as tagged blocks. Tokens are counted, not estimated. Emits `context_packed` and `context_compacted`.
-Tests: packing respects the budget and always includes pinned items; compaction fires at the threshold; the stable prefix is identical across turns.
+`pack` and `compact` are pure functions in `context.py`; the formatter is `exchanges` and `render` in `conversation.py`. Tokens are counted, not estimated: an `Item` carries its token count, measured at the edge by a function the caller supplies (`count`, which takes a text and returns a number), so `pack` and `compact` do no counting themselves.
+
+**Items.** The history is cut into items. A model must never see a `tool_use` without its `tool_result`, so an item is a whole exchange: one `model_call` with its tool results (`kind` `exchange`, id `seq:<seq of the model_call>`). The task (`task`) and a fork's hint (`hint:<seq of the run_forked>`, which also covers the "carry on" message a fork from a final answer gets) are items too. An `Item` has an `order` (its place in the history, from 0), `tokens`, its `messages`, `pinned`, and optionally a `cleared` form: the same exchange with each tool result's content replaced by `[tool result cleared to save context]` (the `tool_use_id` and `is_error` stay), with its own count. An exchange has no `cleared` form when there is no result to clear or when the placeholder would not make it smaller. The items rendered in order are exactly the messages a request carried before the store existed, so a run with no budget is unchanged.
+
+**Pinned.** The task, every hint and the latest exchange (the latest model response with its tool results) are pinned and always in. The system prompt and the tool schemas are always sent and are counted against the budget by the caller before it calls `pack`. (The plan file, a pinned item too, arrives with the plan tool.)
+
+**`pack(candidates, budget, pinned)`** returns `Packed(selected, dropped, tokens, budget, over, cleared)`. Pinned items are always in. The rest are chosen greedily by value per token: an item's value is its `order` plus one (a later item is worth more), taken in decreasing value per token (exact fractions, not floating point), an item that no longer fits is skipped and smaller ones still chosen, and an item of no tokens is always in. Ties are broken by `order`, then `id`, so the result does not depend on the order the candidates come in. `selected` is in history order whatever order it was chosen in. If the pinned items alone exceed the budget, `over` is true, only the pinned items are selected and every candidate is dropped; the driver sends that window anyway, so the provider's error takes the existing retry and give-up path (there is no limit kind for it).
+
+**`compact(packed, compact_at, compact_to)`** leaves a window alone unless `tokens >= compact_at * budget` (and it is not `over`). Then it takes the unpinned selected items oldest first and replaces each one that has a `cleared` form with it, until `tokens <= compact_to * budget` or none is left; the ids it cleared are `cleared` and the strategy is named `clear_tool_results`. The gap between `compact_at` (80% by default) and `compact_to` (60%) is on purpose: clearing rewrites old messages, which ends the cached prefix, so it should happen rarely and make room for many turns. It is idempotent.
+
+**Summarising (named here, built as the follow-on feature f25).** After clearing every clearable item, a window still above `compact_to * budget` is summarised: the compaction goes on, "clear old tool results first, then summarise".
+- The seam is a port `Ports.summarise: Callable[[SummaryRequest], SummaryResult] | None` (`None`, the default, means summarising is off and compaction stops at clearing). `SummaryRequest` carries the messages of the items to summarise and a `max_tokens`; `SummaryResult` carries the text and the usage, and the call fails with `ModelCallError` and goes through the same retry policy as the model port.
+- It summarises the oldest unpinned items as one contiguous run, as many as needed, into one `summary` item (`kind` `summary`, unpinned, like any other item for later windows). Pinned items are never summarised, and a window with nothing left to summarise stays as it is.
+- It is a model call, so it is in the log: a new event `context_summarised` {`covers` (the ids of the items replaced, which may include earlier summaries), `text`, `model`, `usage`, `cost_usd`, `pricing_version`}, written before the `model_call` that uses it, so replaying the log rebuilds the window without calling a model again. It appends a spend line and counts toward `run_cap` and `month_cap` exactly like a `model_call`; `check_limits` runs first with the summary call's `worst_case`, and a call that would reach a cap is not made (the window keeps its cleared form).
+- A summariser that fails after its retries never fails the run: the window keeps its cleared form and the failure is a warning in the process log.
+- A summary whose event was not written when the process died is made again (at least once); a written summary stays in every later window, and a later summary may cover an earlier one.
+- Tests for f25: replay reproduces the window without a model call; the cost counts toward the caps and a call that would exceed one is skipped; a failing summariser falls back to clearing; a crash before the event is written makes the summary again; `covers` never straddles a fork point.
+
+**Not built in this version, named so they can be:** hiding "resolved errors and failed calls" from later windows (what "resolved" means is open, and a hidden result must not break the rule that the log holds what the model saw), and the tagged-blocks formatter. A notes file in the workspace holds what the agent wants to keep outside the window.
+
+How the driver uses the store in a run (the budget and thresholds in `Limits`, the token counter in `Ports`, `context_packed` and `context_compacted`, the plan file) is the next step of this section; this step is the pure part.
+Emits `context_packed` and `context_compacted`.
+Tests: packing respects the budget and always includes pinned items (a property test, with the over-budget case and the order-independence of the result); compaction fires at the threshold, stops at the target, never touches a pinned item and is idempotent; an exchange can be shown with its results cleared and a whole exchange can be dropped without breaking the roles; the stable prefix is identical across turns (with the driver).
 
 ### 3.6 Feedback and self-verification hook (`verify.py`)
 

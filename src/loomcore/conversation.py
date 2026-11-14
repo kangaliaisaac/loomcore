@@ -7,7 +7,14 @@ from dataclasses import replace
 
 from pydantic import JsonValue
 
-from loomcore.context import Cleared, Counter, Item, ItemKind, clear_results
+from loomcore.context import (
+    PLAN_TOOL,
+    Cleared,
+    Counter,
+    Item,
+    ItemKind,
+    clear_results,
+)
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
 from loomcore.replay import content_blocks, tool_use_ids
 
@@ -55,11 +62,13 @@ def render(items: Sequence[Item]) -> list[JsonObject]:
 def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[Item]:
     """The history as items: the task, each response with its tool results as one
     exchange, and a fork's hint. `count` measures an item's messages at the edge, so
-    the edge can count the shape the provider receives. The task, any hint and the
-    latest exchange are pinned."""
+    the edge can count the shape the provider receives. The task, any hint, the latest
+    exchange and the latest exchange with a successful `update_plan` call (the plan the
+    model keeps) are pinned."""
     done = {e.tool_use_id: e for e in events if isinstance(e, ToolCompleted)}
     items = [_item("task", "task", 0, [{"role": "user", "content": task}], count)]
     last = "user"
+    plan_at: int | None = None
     for event in events:
         messages: list[JsonObject] = []
         kind: ItemKind
@@ -69,13 +78,15 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
             if reply := _reply(event.message, done):
                 messages.append(reply)
             kind, key = "exchange", f"seq:{event.run_id}:{event.seq}"
+            if _updates_plan(event.message, done):
+                plan_at = len(items)  # the index this exchange is appended at
         elif isinstance(event, RunForked):
             messages = _after_fork(last, event)
             kind, key = "hint", f"hint:{event.run_id}"
         if messages:
             last = str(messages[-1]["role"])
             items.append(_item(key, kind, len(items), messages, count))
-    return _pin_latest(items)
+    return _pin_latest(items, plan_at)
 
 
 def _item(
@@ -121,13 +132,28 @@ def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared
     return None if cleared >= tokens else Cleared(blank, cleared)
 
 
-def _pin_latest(items: list[Item]) -> list[Item]:
+def _pin_latest(items: list[Item], plan_at: int | None) -> list[Item]:
     latest = max(
         (k for k, item in enumerate(items) if item.kind == "exchange"), default=None
     )
-    if latest is not None:
-        items[latest] = replace(items[latest], pinned=True)
+    for k in (latest, plan_at):
+        if k is not None:
+            items[k] = replace(items[k], pinned=True)
     return items
+
+
+def _updates_plan(message: JsonObject, done: dict[str, ToolCompleted]) -> bool:
+    """Whether the response made an `update_plan` call that succeeded (a failed one
+    left the plan as it was)."""
+    ids = set(tool_use_ids(message))
+    return any(
+        block.get("type") == "tool_use"
+        and block.get("name") == PLAN_TOOL
+        and block.get("id") in ids
+        and (result := done.get(str(block.get("id")))) is not None
+        and result.ok
+        for block in content_blocks(message)
+    )
 
 
 def _after_fork(last: str, event: RunForked) -> list[JsonObject]:

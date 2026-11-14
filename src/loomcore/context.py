@@ -18,6 +18,7 @@ from loomcore.events import JsonObject
 ItemKind = Literal["task", "exchange", "hint"]
 Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 CLEARED = "[tool result cleared to save context]"
+PLAN_TOOL = "update_plan"  # the exchange of its latest successful call is pinned
 STRATEGY = "clear_tool_results"  # what `context_compacted` names for `compact`
 
 

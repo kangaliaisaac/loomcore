@@ -8,6 +8,7 @@ pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 import json
 import logging
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -36,6 +37,7 @@ from loomcore.ports import (
     Ports,
     RunRef,
     RunResult,
+    ToolResult,
 )
 from loomcore.replay import RunState, tool_use_ids
 from loomcore.retry import GiveUp, RetryPolicy, decide
@@ -100,7 +102,16 @@ class Run:
     def drive(self, effects: list[Effect]) -> RunResult:
         queue = list(effects)
         while queue:
-            outcome = self._perform(queue.pop(0))
+            effect = queue.pop(0)
+            if isinstance(effect, RunTool):
+                # The turn's calls come together; their waves decide what overlaps.
+                batch = [effect]
+                while queue and isinstance(following := queue[0], RunTool):
+                    batch.append(following)
+                    queue.pop(0)
+                outcome: list[Event] | RunResult = self._run_tools(batch)
+            else:
+                outcome = self._perform(effect)
             if isinstance(outcome, RunResult):
                 return outcome
             queue = self.fold(outcome) + queue
@@ -148,8 +159,8 @@ class Run:
                 outcome = self._call_model()
             case RequestCalls(tool_use_ids):
                 outcome = self._request_calls(tool_use_ids)
-            case RunTool(tool_use_id, note):
-                outcome = self._run_tool(tool_use_id, note)
+            case RunTool():
+                outcome = self._run_tools([effect])
             case Fail(tool_use_id, reason):
                 outcome = [self._complete(tool_use_id, ok=False, content=reason)]
             case AskHuman(tool_use_id, question):
@@ -299,8 +310,23 @@ class Run:
             **fields,
         )
 
-    def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
-        name, args = tool_call(self.chain, tool_use_id)
+    def _run_tools(self, batch: list[RunTool]) -> list[Event]:
+        """Run the calls, one wave after the other. The waves were written into the
+        log with the `tool_requested` lines, so a resume reads the same ones."""
+        waves = dict(self.state.call_waves)
+        events: list[Event] = []
+        for wave in sorted({waves[run.tool_use_id] for run in batch}):
+            together = [run for run in batch if waves[run.tool_use_id] == wave]
+            events += self._run_wave(together)
+        return events
+
+    def _run_wave(self, wave: list[RunTool]) -> list[Event]:
+        if len(wave) == 1:
+            return self._run_tool(wave[0])
+        return self._run_together(wave)
+
+    def _run_tool(self, run: RunTool) -> list[Event]:
+        name, args = tool_call(self.chain, run.tool_use_id)
         started = self.ports.monotonic()
         try:
             with self.ports.notices.collecting() as bucket:
@@ -311,12 +337,51 @@ class Run:
             # refusal precedes the call's completion. The bucket was closed when the
             # block exited, so a notice that arrives later is not logged, only
             # warned about (spec 3.2).
-            caused = self._emit_notices(tool_use_id, bucket.snapshot())
-        content = _annotated(result.content, note)
-        done = self._complete(
-            tool_use_id, ok=result.ok, content=content, ms=ms, cached=result.cached
+            caused = self._emit_notices(run.tool_use_id, bucket.snapshot())
+        return [*caused, self._completed(run, result, ms)]
+
+    def _run_together(self, wave: list[RunTool]) -> list[Event]:
+        """Run independent calls on threads. A thread only runs its tool and keeps
+        what the call caused; the log has one writer, so this thread writes every
+        event afterwards, each call's notices and then its completion, in the order
+        the model emitted the calls."""
+        caused: dict[str, tuple[Notice, ...]] = {}
+
+        def work(tool_use_id: str) -> tuple[ToolResult, int]:
+            name, args = tool_call(self.chain, tool_use_id)
+            started = self.ports.monotonic()
+            try:
+                with self.ports.notices.collecting() as bucket:
+                    result = self.ports.tool(name, args)
+                    ms = self._since(started)
+            finally:
+                caused[tool_use_id] = bucket.snapshot()
+            return result, ms
+
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            futures = [pool.submit(work, run.tool_use_id) for run in wave]
+        events: list[Event] = []
+        bug: BaseException | None = None
+        for run, future in zip(wave, futures, strict=True):
+            events += self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+            error = future.exception()
+            if error is None:
+                result, ms = future.result()
+                events.append(self._completed(run, result, ms))
+            elif bug is None:
+                bug = error  # the first, in the order the model emitted the calls
+        if bug is not None:
+            raise bug  # what the other calls caused and finished is already logged
+        return events
+
+    def _completed(self, run: RunTool, result: ToolResult, ms: int) -> Event:
+        return self._complete(
+            run.tool_use_id,
+            ok=result.ok,
+            content=_annotated(result.content, run.note),
+            ms=ms,
+            cached=result.cached,
         )
-        return [*caused, done]
 
     def _emit_notices(self, tool_use_id: str, notices: Sequence[Notice]) -> list[Event]:
         return [

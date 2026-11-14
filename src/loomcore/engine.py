@@ -5,6 +5,7 @@ the state, and performs the effects `step` returns until the run finishes or
 pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Sequence
@@ -17,7 +18,8 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from loomcore import ladder, schedule
-from loomcore.conversation import build_messages, call_hash, final_text, tool_call
+from loomcore.context import STRATEGY
+from loomcore.conversation import call_hash, final_text, tool_call
 from loomcore.eventlog import EventWriter
 from loomcore.events import (
     ApprovalRequested,
@@ -52,6 +54,7 @@ from loomcore.step import (
     Stop,
     step,
 )
+from loomcore.window import Budget, Carried, Window, build_window
 
 _LOG = logging.getLogger(__name__)
 
@@ -60,6 +63,11 @@ MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queu
 
 class ResumeRefusedError(Exception):
     """`resume` was called in a state it cannot continue from; the message says how."""
+
+
+class ContextBudgetError(Exception):
+    """`context_budget` leaves no room for the history: the system prompt and the
+    tool schemas alone fill it."""
 
 
 class LoopStalledError(Exception):
@@ -79,6 +87,7 @@ class Run:
     switch_to: Config | None = None  # the configuration the switch rung changes to
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
+    counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -172,7 +181,10 @@ class Run:
         return outcome
 
     def _call_model(self) -> list[Event] | RunResult:
-        request = self._request()
+        try:
+            request = self._request()
+        except ContextBudgetError as error:
+            return self._finish(Stop("error", str(error)))
         reached = check_limits(
             self.state,
             self.limits,
@@ -224,13 +236,84 @@ class Run:
 
     def _request(self) -> ModelRequest:
         root = next(e for e in self.chain if isinstance(e, RunStarted))
+        window = build_window(
+            root.task,
+            self.chain,
+            Carried(self.state.dropped, self.state.cleared),
+            self._budget(),
+            self._count,
+        )
+        self._record(window)
+        if window.packed is not None and window.packed.over:
+            _LOG.warning(
+                "context window over its budget: the pinned items alone are %d tokens "
+                "of %d; sending the history unpacked",
+                window.packed.tokens,
+                window.packed.budget,
+            )
         return ModelRequest(
             model=self.config.model,
             system=self.config.system,
-            messages=build_messages(root.task, self.chain),
+            messages=window.messages,
             tools=self.config.tools,
             max_tokens=self.limits.max_output_tokens,
+            cache_prefix=self.config.cache_prefix,
         )
+
+    def _budget(self) -> Budget | None:
+        """Tokens left for the history: the budget less the system prompt and the tool
+        schemas, which every request carries."""
+        if self.limits.context_budget is None:
+            return None
+        fixed = self._count([{"role": "user", "content": self.config.system}])
+        tools = json.dumps(list(self.config.tools), sort_keys=True)
+        fixed += self._count([{"role": "user", "content": tools}])
+        left = self.limits.context_budget - fixed
+        if left <= 0:
+            raise ContextBudgetError(
+                f"context_budget {self.limits.context_budget} leaves no room: the "
+                f"system prompt and the tool schemas are {fixed} tokens; raise the "
+                "budget or shorten them"
+            )
+        return Budget(left, self.limits.compact_at, self.limits.compact_to)
+
+    def _count(self, messages: Sequence[JsonObject]) -> int:
+        """The edge's token count, asked once for each distinct text."""
+        text = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(text.encode()).hexdigest()  # not the text: it is large
+        if key not in self.counted:
+            self.counted[key] = self.ports.count_tokens(messages)
+        return self.counted[key]
+
+    def _record(self, window: Window) -> None:
+        """Write what the window newly dropped and cleared, and fold it so the next
+        window starts from here. Before the model call: these are decisions about the
+        history, which hold whether or not the call is made."""
+        packed = window.packed
+        if packed is None:
+            return
+        events: list[Event] = []
+        if window.newly_dropped:
+            events.append(
+                self.emit(
+                    "context_packed",
+                    selected=[item.id for item in packed.selected],
+                    dropped=list(window.newly_dropped),
+                    tokens=packed.tokens,
+                    budget=packed.budget,
+                )
+            )
+        if window.newly_cleared:
+            events.append(
+                self.emit(
+                    "context_compacted",
+                    strategy=STRATEGY,
+                    tokens_before=window.tokens_before,
+                    tokens_after=packed.tokens,
+                    cleared=list(window.newly_cleared),
+                )
+            )
+        self.fold(events)
 
     def _month_to_date(self) -> Decimal:
         key = run_key(self.ref.session_id, self.ref.run_id)

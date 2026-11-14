@@ -8,9 +8,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from loomcore.events import (
     Event,
@@ -40,6 +40,19 @@ class Limits(BaseModel):
     max_output_tokens: int = Field(8192, gt=0)
     repeat_window: int = Field(10, gt=0)
     repeat_threshold: int = Field(3, gt=0)
+    # The context window (spec 3.5): None means no packing, and requests carry the
+    # whole history. `compact_at` and `compact_to` are fractions of the budget.
+    context_budget: int | None = Field(None, gt=0)
+    compact_at: float = Field(0.8, gt=0, le=1)
+    compact_to: float = Field(0.6, gt=0, lt=1)
+
+    @model_validator(mode="after")
+    def _compaction_has_room(self) -> Self:
+        if self.compact_to >= self.compact_at:
+            raise ValueError(
+                "compact_to must be below compact_at, or it never gains room"
+            )
+        return self
 
     def to_json(self) -> JsonObject:
         """The form the log holds, for `run_started`, `run_forked`, `run_resumed`."""

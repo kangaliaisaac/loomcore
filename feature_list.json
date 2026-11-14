@@ -125,7 +125,7 @@
     "title": "Context store: pack and compact",
     "spec": "3.5",
     "acceptance": "packing respects the budget and always includes pinned items; compaction fires at the threshold; the stable prefix is identical across turns",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f17",

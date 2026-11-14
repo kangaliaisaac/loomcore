@@ -1,5 +1,7 @@
 """Scripted ports for driving a run: a fake model, fake tools, a clock, a sleep."""
 
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -27,6 +29,11 @@ from loomcore.schedule import Access
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
 COST = Decimal("0.01")
+
+
+def fake_count(messages: Sequence[JsonObject]) -> int:
+    """A deterministic stand-in for the edge's counter (the serialised length / 4)."""
+    return len(json.dumps(messages, sort_keys=True)) // 4 + 1
 
 
 class ToolBugError(Exception):
@@ -113,6 +120,7 @@ class World:
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
     crash_on_call: int | None = None  # the Nth tool call kills the run
+    crash_on_model: int | None = None  # the Nth model call kills the run
     calls_made: int = 0
     pricing: FakePricing = field(default_factory=FakePricing)
     clock: Clock = field(default_factory=Clock)
@@ -120,6 +128,8 @@ class World:
 
     def model(self, request: ModelRequest) -> JsonObject:
         self.requests.append(request)
+        if len(self.requests) == self.crash_on_model:
+            raise Crash
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -162,6 +172,7 @@ class World:
             access=self.access,
             notices=self.notices,
             pricing=self.pricing,
+            count_tokens=fake_count,
             clock=self.clock,
             monotonic=lambda: 0.0,
             random=lambda: 0.5,

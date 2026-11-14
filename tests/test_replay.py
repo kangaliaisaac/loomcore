@@ -177,3 +177,29 @@ def test_a_fork_of_a_fork_whose_middle_run_has_no_events_is_an_error() -> None:
     ]
     with pytest.raises(ForkChainError, match="b"):
         run_events(log, "c")
+
+
+def test_what_windows_dropped_and_cleared_is_folded_and_only_grows() -> None:
+    log = [
+        make("run_started"),
+        make("context_packed", 1, dropped=["seq:r1:1", "seq:r1:2"]),
+        make("context_compacted", 2, cleared=["seq:r1:3"]),
+        make("context_packed", 3, dropped=["seq:r1:2", "seq:r1:4", 7]),  # a repeat
+        make("context_compacted", 4),  # an older line, or nothing newly cleared
+    ]
+    state = replay(log)
+    assert state.dropped == ("seq:r1:1", "seq:r1:2", "seq:r1:4")  # no number, no repeat
+    assert state.cleared == ("seq:r1:3",)
+
+
+def test_a_fork_keeps_what_its_parent_had_dropped_and_cleared() -> None:
+    parent = [
+        make("run_started", 0, "r1"),
+        make("context_packed", 1, "r1", dropped=["seq:r1:1"]),
+        make("context_compacted", 2, "r1", cleared=["seq:r1:2"]),
+        make("context_packed", 3, "r1", dropped=["seq:r1:9"]),  # after the fork point
+    ]
+    fork = make("run_forked", 0, "r2", **{"from": {"runId": "r1", "seq": 2}})
+    state = replay(run_events([*parent, fork], "r2"))
+    assert state.dropped == ("seq:r1:1",)
+    assert state.cleared == ("seq:r1:2",)

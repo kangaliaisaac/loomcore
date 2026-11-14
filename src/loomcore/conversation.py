@@ -98,6 +98,19 @@ def _item(
     )
 
 
+def recount(items: Sequence[Item], count: Counter) -> list[Item]:
+    """The items with their tokens, and the cleared form's, counted. `exchanges` can
+    build them without counting; the caller counts only the ones it keeps."""
+    return [
+        replace(
+            item,
+            tokens=(tokens := count(item.messages)),
+            cleared=_cleared(list(item.messages), tokens, count),
+        )
+        for item in items
+    ]
+
+
 def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared | None:
     """The exchange with its results cleared, or None when that would not make it
     smaller (no result, or one shorter than the placeholder)."""

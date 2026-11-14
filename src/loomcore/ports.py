@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 
 from pydantic import JsonValue
 
+from loomcore.context import Counter
 from loomcore.events import JsonObject
 from loomcore.limits import Limits
 from loomcore.notices import Notices
@@ -28,12 +29,31 @@ class Config:
     model: str
     system: str
     tools: tuple[JsonObject, ...] = ()
+    # How many leading characters of `system` are its stable prefix (see
+    # `prompt.SystemPrompt.stable_text`): the model port puts its cache marker there.
+    # In the digest only when set, so a configuration without it keeps its digest.
+    cache_prefix: int | None = None
     # What the switch-strategy rung changes to (spec section 1). Not part of the
     # digest: the log holds this configuration and its digest once it is in force.
     switch_to: Config | None = None
 
+    def __post_init__(self) -> None:
+        if self.cache_prefix is not None and not 0 < self.cache_prefix <= len(
+            self.system
+        ):
+            raise ValueError(
+                "cache_prefix must be within the system prompt (1 to its length)"
+            )
+
     def to_json(self) -> JsonObject:
-        return {"model": self.model, "system": self.system, "tools": list(self.tools)}
+        config: JsonObject = {
+            "model": self.model,
+            "system": self.system,
+            "tools": list(self.tools),
+        }
+        if self.cache_prefix is not None:
+            config["cache_prefix"] = self.cache_prefix
+        return config
 
     def digest(self) -> str:
         canonical = json.dumps(self.to_json(), sort_keys=True, separators=(",", ":"))
@@ -53,6 +73,7 @@ class ModelRequest:
     messages: list[JsonObject]
     tools: tuple[JsonObject, ...]
     max_tokens: int
+    cache_prefix: int | None = None  # from `Config.cache_prefix`, for the model port
 
 
 class ModelCallError(Exception):
@@ -92,6 +113,7 @@ class Ports:
     access: Callable[[str], Access]  # what a tool declared, for the schedule
     notices: Notices  # the callbacks of the workspace and sandbox report here
     pricing: Pricing
+    count_tokens: Counter  # tokens in a list of messages, counted at the edge
     clock: Callable[[], datetime]  # wall-clock UTC
     monotonic: Callable[[], float]  # durations
     random: Random  # jitter

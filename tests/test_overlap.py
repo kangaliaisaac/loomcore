@@ -2,17 +2,21 @@
 
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from factories import make
 from fakes import CAPS, CONFIG, ToolBugError, World, reply, use
 from fakes import ref as run_ref
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from loomcore.eventlog import read_events
+from loomcore.conversation import call_hash
+from loomcore.engine import MAX_TOGETHER
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
 from loomcore.loop import Driver
 from loomcore.ports import RunResult, Task, ToolResult
@@ -179,3 +183,83 @@ def test_any_mix_of_tools_keeps_conflicting_calls_in_order_and_the_log_in_order(
                 ended = lanes.marks.index(f"end {first}")
                 started = lanes.marks.index(f"start {ids[j]}")
                 assert ended < started  # a conflicting pair never overlaps
+
+
+def test_lines_a_crash_left_unwritten_go_after_every_wave_already_in_the_log(
+    tmp_path: Path,
+) -> None:
+    args: JsonObject = {"q": "a"}
+    log_events = [
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=CAPS.to_json(),
+            config_digest=CONFIG.digest(),
+        ),
+        make("turn_started", 1, turn=1),
+        make(
+            "model_call",
+            2,
+            message=use(("a", "other"), ("b", "scan"), ("c", "scan")),
+        ),
+        make(
+            "tool_requested",
+            3,
+            tool_use_id="a",
+            name="other",
+            input=args,
+            call_hash=call_hash("other", args),
+            wave=5,  # whatever the old process worked out
+        ),
+    ]
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log_events:
+            writer.append(event)
+    world = World(script=[reply("done")], together={"scan"})
+    result = driver(world, tmp_path, Lanes().tool).resume(run_ref())
+    assert result.status == "finished"
+    waves = {
+        e.tool_use_id: e.wave for e in log(tmp_path) if isinstance(e, ToolRequested)
+    }
+    assert waves == {"a": 5, "b": 6, "c": 6}
+
+
+def test_a_second_bug_in_a_wave_is_warned_about_while_the_first_is_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = World(
+        script=[use(("t1", "scan"), ("t2", "scan")), reply()], together={"scan"}
+    )
+    meet = threading.Barrier(2, timeout=5)
+
+    def tool(name: str, args: JsonObject) -> ToolResult:
+        meet.wait()
+        raise ToolBugError(str(args["q"]))
+
+    with caplog.at_level("WARNING"), pytest.raises(ToolBugError, match="t1"):
+        driver(world, tmp_path, tool).run(TASK)
+    assert "t2 also failed" in caplog.text
+
+
+def test_no_more_than_the_cap_of_a_wave_runs_at_once(tmp_path: Path) -> None:
+    ids = [f"t{k}" for k in range(MAX_TOGETHER + 4)]
+    world = World(script=[use(*((i, "scan") for i in ids)), reply()], together={"scan"})
+    lock = threading.Lock()
+    running = {"now": 0, "most": 0}
+
+    def tool(name: str, args: JsonObject) -> ToolResult:
+        with lock:
+            running["now"] += 1
+            running["most"] = max(running["most"], running["now"])
+        time.sleep(0.02)
+        with lock:
+            running["now"] -= 1
+        return ToolResult(True, str(args["q"]))
+
+    result = driver(world, tmp_path, tool).run(TASK)
+    assert result.status == "finished"
+    done = [e.tool_use_id for e in log(tmp_path) if isinstance(e, ToolCompleted)]
+    assert done == ids
+    assert 1 < running["most"] <= MAX_TOGETHER

@@ -55,6 +55,8 @@ from loomcore.step import (
 
 _LOG = logging.getLogger(__name__)
 
+MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
+
 
 class ResumeRefusedError(Exception):
     """`resume` was called in a state it cannot continue from; the message says how."""
@@ -257,7 +259,7 @@ class Run:
             )
             if hits:
                 events.append(self._escalate([turn[k][:3] for k in hits]))
-        wave_of = self._waves(turn)
+        wave_of = self._waves(turn, unrequested)
         for k, (tool_use_id, name, digest, args) in enumerate(turn):
             if tool_use_id in unrequested:
                 events.append(
@@ -272,11 +274,22 @@ class Run:
                 )
         return events
 
-    def _waves(self, turn: list[tuple[str, str, str, JsonObject]]) -> dict[int, int]:
-        """Which wave each call of the turn runs in, from what its tool declared.
-        Written into the log, so a resume never works it out again."""
-        grouped = schedule.waves([self.ports.access(name) for _, name, _, _ in turn])
-        return {k: wave for wave, calls in enumerate(grouped) for k in calls}
+    def _waves(
+        self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]
+    ) -> dict[int, int]:
+        """Which wave each call still to be requested runs in, from what its tool
+        declared. Written into the log, so a resume never works it out again.
+
+        Lines a crash left unwritten go after every wave already in the log, so a
+        registry that changed since cannot put them beside a call they conflict with.
+        """
+        missing = [k for k, call in enumerate(turn) if call[0] in unrequested]
+        written = dict(self.state.call_waves).values()
+        base = max(written, default=-1) + 1
+        grouped = schedule.waves([self.ports.access(turn[k][1]) for k in missing])
+        return {
+            missing[j]: base + wave for wave, calls in enumerate(grouped) for j in calls
+        }
 
     def _turn_calls(self) -> list[tuple[str, str, str, JsonObject]]:
         """The latest model_call's tool calls as (id, name, call_hash, input)."""
@@ -358,7 +371,7 @@ class Run:
                 caused[tool_use_id] = bucket.snapshot()
             return result, ms
 
-        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(wave), MAX_TOGETHER)) as pool:
             futures = [pool.submit(work, run.tool_use_id) for run in wave]
         events: list[Event] = []
         bug: BaseException | None = None
@@ -370,6 +383,10 @@ class Run:
                 events.append(self._completed(run, result, ms))
             elif bug is None:
                 bug = error  # the first, in the order the model emitted the calls
+            else:
+                _LOG.warning(
+                    "%s also failed, after another call: %r", run.tool_use_id, error
+                )
         if bug is not None:
             raise bug  # what the other calls caused and finished is already logged
         return events

@@ -688,3 +688,17 @@ def test_the_question_names_every_risky_call_of_the_interrupted_wave() -> None:
     assert len(effects) == 1
     assert isinstance(effects[0], AskHuman)
     assert "read (a), read (b)" in effects[0].question
+
+
+def test_a_denied_question_about_an_interrupted_wave_fails_every_call_it_named() -> (
+    None
+):
+    state = paused_for_approval(*waved_turn(), asked(6, "a"), reason="crash")
+    assert state.interrupted == ("a", "b")
+    why = "denied by me: no"
+    assert denial(state, 9) == [
+        Fail("a", why),
+        Fail("b", why),
+        RunTool("c"),
+        RunTool("d"),
+    ]

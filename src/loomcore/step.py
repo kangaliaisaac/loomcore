@@ -123,7 +123,7 @@ def _after_tool_event(
             effects = _run_pending(state)
         case ApprovalDenied() if event.tool_use_id in old.open_approvals:
             reason = {i: r for i, _, r in state.decided}[event.tool_use_id]
-            effects = _deny(state, event.tool_use_id, reason)
+            effects = _deny(state, event.tool_use_id, reason, read_only)
         case ToolCompleted() if event.tool_use_id in old.pending_tools and (
             not state.pending_tools
         ):
@@ -160,15 +160,25 @@ def _ladder(state: RunState) -> list[Effect]:
     return [RunTool(i, note if i in tripped else None) for i in state.pending_tools]
 
 
-def _deny(state: RunState, tool_use_id: str, reason: str) -> list[Effect]:
+def _deny(
+    state: RunState, tool_use_id: str, reason: str, read_only: ReadOnly
+) -> list[Effect]:
     """A denial fails the asked call; the rest of the turn runs as it would after a
-    grant (with the rung's notes), and its Fail is written before any of them."""
+    grant (with the rung's notes), and its Fail is written before any of them.
+
+    The question about calls a crash may have run names every risky call of the
+    interrupted wave, so its denial fails all of them, not only the first: any of
+    them may already have written.
+    """
+    failed = [tool_use_id]
+    if tool_use_id in state.interrupted:
+        failed += [i for i in _interrupted_risky(state, read_only) if i != tool_use_id]
     rest = [
         e
         for e in _run_pending(state)
-        if not (isinstance(e, RunTool) and e.tool_use_id == tool_use_id)
+        if not (isinstance(e, RunTool) and e.tool_use_id in failed)
     ]
-    return [Fail(tool_use_id, reason), *rest]
+    return [*(Fail(i, reason) for i in failed), *rest]
 
 
 def _interrupted_risky(state: RunState, read_only: ReadOnly) -> list[str]:
@@ -231,7 +241,7 @@ def _after_decision(
 ) -> list[Effect]:
     tool_use_id, granted, reason = decision
     if not granted and tool_use_id in state.pending_tools:  # its Fail is not written
-        return _deny(state, tool_use_id, reason)
+        return _deny(state, tool_use_id, reason, read_only)
     # The human answered the ladder's question, not "run a call that may have
     # already written again": that one is asked unless the tool is read-only.
     if _interrupted_risky(state, read_only):

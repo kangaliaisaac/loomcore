@@ -2,10 +2,17 @@
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from fakes import CAPS, CONFIG, World, reply, use
 
+from loomcore.eventlog import read_events
+from loomcore.events import ToolCompleted
+from loomcore.loop import Driver
+from loomcore.notices import Notices
+from loomcore.ports import Task
 from loomcore.tools import ToolRegistry
 from loomcore.workspace import FilesystemWorkspace
 
@@ -189,3 +196,89 @@ def test_no_timeout_runs_the_call_in_the_callers_thread(
     tools.register(where, read_only=True)
     tools.execute("where", {"key": "a"})
     assert seen == [threading.current_thread().name]
+
+
+def test_a_call_that_outlasts_the_timeout_runs_on_a_daemon_thread(
+    workspace: FilesystemWorkspace,
+) -> None:
+    daemons: list[bool] = []
+
+    def where(key: str) -> str:
+        """Records whether its thread is a daemon."""
+        daemons.append(threading.current_thread().daemon)
+        return key
+
+    tools = ToolRegistry(workspace, timeout=5)
+    tools.register(where, read_only=True)
+    tools.execute("where", {"key": "a"})
+    assert daemons == [True]  # so a call that never returns cannot hold the exit
+
+
+def test_a_caller_that_changes_a_cached_result_does_not_change_later_hits(
+    workspace: FilesystemWorkspace,
+) -> None:
+    def rows(key: str) -> list[str]:
+        """Returns a list."""
+        return [key]
+
+    tools = ToolRegistry(workspace)
+    tools.register(rows, read_only=True, cacheable=True)
+    first = tools.execute("rows", {"key": "a"})
+    assert isinstance(first.content, list)
+    first.content.append("changed")
+    second = tools.execute("rows", {"key": "a"})
+    assert isinstance(second.content, list)
+    second.content.append("changed too")
+    assert tools.execute("rows", {"key": "a"}).content == ["a"]
+
+
+def test_a_late_notice_from_an_abandoned_call_is_warned_about_not_given_to_another(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "w").mkdir()
+    notices = Notices()
+    workspace = FilesystemWorkspace(
+        tmp_path / "w", on_refusal=notices.refused, on_note=notices.noted
+    )
+    release = threading.Event()
+
+    def slow_note(text: str) -> str:
+        """Writes a note, eventually."""
+        release.wait()
+        workspace.write("notes.md", text)
+        return "saved"
+
+    tools = ToolRegistry(workspace, timeout=0.05)
+    tools.register(slow_note)
+    try:
+        with notices.collecting() as first:
+            assert not tools.execute("slow_note", {"text": "x"}).ok
+        with notices.collecting() as second, caplog.at_level("WARNING"):
+            release.set()
+            wait_for_generation(workspace, 3)  # its write, the abandon, the return
+    finally:
+        release.set()
+    assert (list(first), list(second)) == ([], [])
+    assert "arrived after its tool call ended" in caplog.text
+
+
+def test_a_cache_hit_reaches_the_log_as_cached(
+    tmp_path: Path, workspace: FilesystemWorkspace
+) -> None:
+    runs: list[str] = []
+
+    def look(q: str) -> str:
+        """Looks a key up."""
+        runs.append(q)
+        return f"value of {q}"
+
+    tools = ToolRegistry(workspace)
+    tools.register(look, read_only=True, cacheable=True)
+    world = World(script=[use(("t1", "look"), ("t2", "look"), q="same"), reply()])
+    ports = replace(world.ports(), tool=tools.execute, read_only=tools.read_only)
+    driver = Driver(CONFIG, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    driver.run(Task("find it", CAPS))
+    log = read_events(tmp_path / "s1.jsonl").events
+    done = [e for e in log if isinstance(e, ToolCompleted)]
+    assert [(e.tool_use_id, e.cached) for e in done] == [("t1", False), ("t2", True)]
+    assert runs == ["same"]

@@ -35,22 +35,31 @@ class Notice:
     fields: JsonObject
 
 
+class Bucket(list[Notice]):
+    """What one tool call caused. It is closed when the call's block ends, so a
+    notice that arrives after that (from a call abandoned on timeout) is known to
+    be late."""
+
+    closed = False
+
+
 class Notices:
     def __init__(self) -> None:
         # Per instance, so two drivers' calls keep separate buckets.
-        self._bucket: ContextVar[list[Notice] | None] = ContextVar(
+        self._bucket: ContextVar[Bucket | None] = ContextVar(
             "loomcore_notices", default=None
         )
 
     @contextmanager
-    def collecting(self) -> Iterator[list[Notice]]:
+    def collecting(self) -> Iterator[Bucket]:
         """Notices raised inside the block (and in threads run under a copy of its
         context) are appended to the yielded list."""
-        bucket: list[Notice] = []
+        bucket = Bucket()
         token = self._bucket.set(bucket)
         try:
             yield bucket
         finally:
+            bucket.closed = True
             self._bucket.reset(token)
 
     def refused(self, refusal: Refusal) -> None:
@@ -64,6 +73,13 @@ class Notices:
         if bucket is None:  # outside a tool call there is no call to blame
             _LOG.warning(
                 "%s reported outside a tool call and not logged: %s",
+                notice.kind,
+                notice.fields,
+            )
+            return
+        if bucket.closed:  # its call ended, or was abandoned, and was already logged
+            _LOG.warning(
+                "%s arrived after its tool call ended and is not logged: %s",
                 notice.kind,
                 notice.fields,
             )

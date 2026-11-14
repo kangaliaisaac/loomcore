@@ -8,11 +8,12 @@ the timeout is abandoned. The registry emits no events; what the call caused
 (refusals, notes) is collected by the driver's `Notices` and written by the driver.
 """
 
+import copy
 import inspect
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, wait
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from typing import Any, get_type_hints
@@ -90,6 +91,7 @@ class ToolRegistry:
         # Abandoned calls that may still write; the cache is bypassed while any run.
         self._abandoned = 0
         self._counting = threading.Lock()
+        self._caching = threading.Lock()  # calls of one turn may run together
         self._tools: dict[str, _Tool] = {}
 
     def register(
@@ -130,17 +132,30 @@ class ToolRegistry:
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
         key = (call_hash(name, input), self._workspace.generation)
         use_cache = tool.cacheable and self._abandoned == 0
-        if use_cache and (hit := self._cache.get(key)) is not None:
-            self._cache.move_to_end(key)
-            return replace(hit, cached=True)
+        if use_cache and (hit := self._hit(key)) is not None:
+            return hit
         result = self._timed(name, tool, input)
         if not tool.read_only:
             self._workspace.bump()  # a read after this write is never served stale
         if use_cache and result.ok and self._abandoned == 0:
-            self._cache[key] = result
+            self._store(key, result)
+        return result
+
+    def _hit(self, key: tuple[str, int]) -> ToolResult | None:
+        with self._caching:
+            hit = self._cache.get(key)
+            if hit is None:
+                return None
+            self._cache.move_to_end(key)
+        # A copy, so a caller that changes the content cannot change later hits.
+        return replace(hit, content=copy.deepcopy(hit.content), cached=True)
+
+    def _store(self, key: tuple[str, int], result: ToolResult) -> None:
+        kept = replace(result, content=copy.deepcopy(result.content))
+        with self._caching:
+            self._cache[key] = kept
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
-        return result
 
     def _timed(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         """Run the call, abandoning it if it outlasts the timeout. Python cannot kill
@@ -148,12 +163,21 @@ class ToolRegistry:
         read-only, bumps the generation again when it finally returns."""
         if self._timeout is None:
             return self._run(name, tool, input)
-        pool = ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(copy_context().run, self._run, name, tool, input)
-        try:
-            _, late = wait([future], timeout=self._timeout)
-        finally:
-            pool.shutdown(wait=False)
+        future: Future[ToolResult] = Future()
+        context = copy_context()
+
+        def work() -> None:
+            try:
+                future.set_result(context.run(self._run, name, tool, input))
+            except Exception as bug:
+                # Not handled: carried to the caller, who raises it again. Only a
+                # bug in the tool gets here; fixable failures are results.
+                future.set_exception(bug)
+
+        # A daemon, so an abandoned call that never returns cannot keep the process
+        # from exiting.
+        threading.Thread(target=work, name=f"tool-{name}", daemon=True).start()
+        _, late = wait([future], timeout=self._timeout)
         if not late:
             return future.result()  # a bug in the tool is raised here, not hidden
         if not tool.read_only:  # `execute` bumps now; `_returned` bumps for its return

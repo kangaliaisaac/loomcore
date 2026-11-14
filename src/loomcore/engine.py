@@ -302,7 +302,9 @@ class Run:
                 # a refusal precedes the call's completion.
                 caused = self._emit_notices(tool_use_id, bucket)
         content = _annotated(result.content, note)
-        done = self._complete(tool_use_id, ok=result.ok, content=content, ms=ms)
+        done = self._complete(
+            tool_use_id, ok=result.ok, content=content, ms=ms, cached=result.cached
+        )
         return [*caused, done]
 
     def _emit_notices(self, tool_use_id: str, notices: list[Notice]) -> list[Event]:
@@ -312,7 +314,13 @@ class Run:
         ]
 
     def _complete(
-        self, tool_use_id: str, *, ok: bool, content: JsonValue, ms: int = 0
+        self,
+        tool_use_id: str,
+        *,
+        ok: bool,
+        content: JsonValue,
+        ms: int = 0,
+        cached: bool = False,
     ) -> Event:
         return self.emit(
             "tool_completed",
@@ -320,7 +328,7 @@ class Run:
             ok=ok,
             content=content,
             duration_ms=ms,
-            cached=False,
+            cached=cached,
         )
 
     def _ask(self, tool_use_id: str, question: str) -> RunResult:

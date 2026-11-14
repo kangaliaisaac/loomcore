@@ -7,6 +7,7 @@ symlink in between, so the sandbox (a container that mounts only the workspace),
 not this class, is what contains hostile code.
 """
 
+import threading
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
@@ -79,13 +80,15 @@ class FilesystemWorkspace:
         self._on_refusal = on_refusal
         self._on_note = on_note
         self._generation = 0
+        self._bumping = threading.Lock()  # an abandoned call may bump from a thread
 
     @property
     def generation(self) -> int:
         return self._generation
 
     def bump(self) -> None:
-        self._generation += 1
+        with self._bumping:
+            self._generation += 1
 
     def read(self, path: str) -> str:
         return self._resolve("read", path).read_text()

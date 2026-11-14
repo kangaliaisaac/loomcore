@@ -117,7 +117,7 @@
     "title": "Tool scheduling, read_only, cache and timeouts",
     "spec": "3.2, 1 Retries",
     "acceptance": "conflicting calls run in emission order; a resumed run asks before re-running a tool that is not read_only; a timed-out call is abandoned and a late write still invalidates the cache",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f16",

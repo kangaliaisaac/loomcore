@@ -3,22 +3,28 @@
 The type hints are the only source of the JSON Schema, and the docstring is the
 description. A bad call comes back as `ok=False` with a message that says how to
 fix it: invalid input, an unknown tool, a `ToolError`, a refusal, an `OSError`.
-Nothing else is caught. The registry emits no events; what the call caused
+Nothing else is caught. Read-only tools may opt into a cache; a call that runs past
+the timeout is abandoned. The registry emits no events; what the call caused
 (refusals, notes) is collected by the driver's `Notices` and written by the driver.
 """
 
 import inspect
+from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextvars import copy_context
+from dataclasses import dataclass, replace
 from typing import Any, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from pydantic import create_model as pydantic_model
 
 from loomcore import finish
+from loomcore.conversation import call_hash
 from loomcore.events import JsonObject
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
+from loomcore.schedule import Access
 from loomcore.workspace import PathRefusedError, Workspace
 
 # Not finite is refused: the log would write null where the model saw NaN.
@@ -26,6 +32,10 @@ _JSON: TypeAdapter[JsonValue] = TypeAdapter(
     JsonValue, config=ConfigDict(allow_inf_nan=False)
 )
 _VALUES = frozenset({"default", "const", "enum", "examples"})  # data, not schema
+
+
+DEFAULT_TIMEOUT = 60.0  # seconds per call
+DEFAULT_CACHE_SIZE = 128  # results kept, least recently used dropped first
 
 
 class ToolError(Exception):
@@ -66,8 +76,17 @@ class _Tool:
 class ToolRegistry:
     """Tools by name, built with the `Workspace` they may use."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        timeout: float | None = DEFAULT_TIMEOUT,
+        cache_size: int = DEFAULT_CACHE_SIZE,
+    ) -> None:
         self._workspace = workspace
+        self._timeout = timeout
+        self._cache_size = cache_size
+        self._cache: OrderedDict[tuple[str, int], ToolResult] = OrderedDict()
         self._tools: dict[str, _Tool] = {}
 
     def register(
@@ -106,7 +125,45 @@ class ToolRegistry:
         if tool is None:
             known = ", ".join(sorted(self._tools)) or "none"
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
-        return self._run(name, tool, input)
+        key = (call_hash(name, input), self._workspace.generation)
+        if tool.cacheable and (hit := self._cache.get(key)) is not None:
+            self._cache.move_to_end(key)
+            return replace(hit, cached=True)
+        result = self._timed(name, tool, input)
+        if not tool.read_only:
+            self._workspace.bump()  # a read after this write is never served stale
+        if tool.cacheable and result.ok:
+            self._cache[key] = result
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return result
+
+    def access(self, name: str) -> Access:
+        """What the tool declared, for `schedule`: an unknown tool touches nothing."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return Access(read_only=True)
+        return Access(tool.read_only, frozenset(tool.reads), frozenset(tool.writes))
+
+    def _timed(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
+        """Run the call, abandoning it if it outlasts the timeout. Python cannot kill
+        a thread, so an abandoned call may keep running: its write, if it is not
+        read-only, bumps the generation again when it finally returns."""
+        if self._timeout is None:
+            return self._run(name, tool, input)
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(copy_context().run, self._run, name, tool, input)
+        _, late = wait([future], timeout=self._timeout)
+        pool.shutdown(wait=False)
+        if not late:
+            return future.result()  # a bug in the tool is raised here, not hidden
+        if not tool.read_only:  # `execute` bumps now; this is the bump for its return
+            future.add_done_callback(lambda _: self._workspace.bump())
+        return ToolResult(
+            False,
+            f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
+            "still be running. Try a smaller input or another approach.",
+        )
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         try:

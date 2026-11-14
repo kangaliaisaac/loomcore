@@ -42,7 +42,7 @@ from loomcore.loop import (
     RunIdTakenError,
     SpendLogMissingError,
 )
-from loomcore.ports import Config, Decision, RunResult, Task
+from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
 from loomcore.rewind import ForkRefusedError
 from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
@@ -706,3 +706,14 @@ def test_a_run_stopped_by_a_tool_bug_resumes_past_its_unmatched_notices(
     world.bug_in.clear()  # the tool is fixed; the log holds a note with no completion
     result = driver.resume(run_ref())
     assert (result.status, world.tool_calls) == ("finished", ["t1"])
+
+
+def test_a_cached_result_is_logged_as_cached(tmp_path: Path) -> None:
+    world = World(
+        script=[use(("t1", "search")), reply()],
+        tool_results={"t1": ToolResult(True, "ok", cached=True)},
+    )
+    start(world, tmp_path)
+    log = read_events(tmp_path / "s1.jsonl").events
+    done = next(e for e in log if isinstance(e, ToolCompleted))
+    assert done.cached is True

@@ -307,3 +307,21 @@ def test_two_notices_objects_keep_their_buckets_apart(tmp_path: Path) -> None:
         outer.workspace.write("notes.md", "n")
     assert [n.kind for n in inner_notices] == ["note_written"]
     assert [n.kind for n in outer_bucket] == ["note_written"]
+
+
+def test_a_notice_with_no_bucket_open_is_warned_about_not_dropped_quietly(
+    tools: Registry, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING"), pytest.raises(PathRefusedError):
+        tools.workspace.read("../x")
+    assert "sandbox_denied reported outside a tool call" in caplog.text
+
+
+def test_an_oserror_with_no_errno_names_its_class(tools: Registry) -> None:
+    def quota() -> str:
+        """Fails with a plain message."""
+        raise OSError("quota exceeded at /home/someone/data")
+
+    tools.registry.register(quota)
+    content = str(tools.registry.execute("quota", {}).content)
+    assert content == "quota failed: OSError"

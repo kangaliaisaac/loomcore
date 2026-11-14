@@ -689,3 +689,20 @@ def test_a_tool_that_breaks_still_has_its_notices_logged_and_its_bug_raised(
     noted = next(e for e in log if isinstance(e, NoteWritten))
     assert noted.tool_use_id == "t1"
     assert not any(isinstance(e, ToolCompleted) for e in log)
+
+
+def test_a_run_stopped_by_a_tool_bug_resumes_past_its_unmatched_notices(
+    tmp_path: Path,
+) -> None:
+    world = World(
+        script=[use(("t1", "search")), reply("done")],
+        noted_in={"t1": "notes.md"},
+        bug_in={"t1"},
+    )
+    world.read_only.add("search")
+    driver = world.driver(tmp_path)
+    with pytest.raises(ToolBugError):
+        driver.run(TASK)
+    world.bug_in.clear()  # the tool is fixed; the log holds a note with no completion
+    result = driver.resume(run_ref())
+    assert (result.status, world.tool_calls) == ("finished", ["t1"])

@@ -148,7 +148,9 @@ def _fixable(error: Exception) -> str:
     if isinstance(error, UnicodeError):  # a binary file, or text that cannot be written
         return "the content is not valid UTF-8 text"
     if isinstance(error, OSError):
-        return error.strerror or "I/O error"
+        return (
+            error.strerror or type(error).__name__
+        )  # no errno: the class is all we know
     return str(error)  # written for the model: what was asked and why not
 
 

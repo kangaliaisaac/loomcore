@@ -66,6 +66,7 @@ class ModelCallError(Exception):
 class ToolResult:
     ok: bool
     content: JsonValue
+    cached: bool = False  # served from the registry's cache; the tool did not run
 
 
 class Pricing(Protocol):

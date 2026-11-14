@@ -3,29 +3,44 @@
 The type hints are the only source of the JSON Schema, and the docstring is the
 description. A bad call comes back as `ok=False` with a message that says how to
 fix it: invalid input, an unknown tool, a `ToolError`, a refusal, an `OSError`.
-Nothing else is caught. The registry emits no events; what the call caused
+Nothing else is caught. Read-only tools may opt into a cache; a call that runs past
+the timeout is abandoned. The registry emits no events; what the call caused
 (refusals, notes) is collected by the driver's `Notices` and written by the driver.
 """
 
+import copy
+import functools
 import inspect
+import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import Future, wait
+from contextvars import copy_context
+from dataclasses import dataclass, replace
 from typing import Any, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from pydantic import create_model as pydantic_model
 
 from loomcore import finish
+from loomcore.conversation import call_hash
 from loomcore.events import JsonObject
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
 from loomcore.workspace import PathRefusedError, Workspace
+
+_LOG = logging.getLogger(__name__)
 
 # Not finite is refused: the log would write null where the model saw NaN.
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(
     JsonValue, config=ConfigDict(allow_inf_nan=False)
 )
 _VALUES = frozenset({"default", "const", "enum", "examples"})  # data, not schema
+
+
+DEFAULT_TIMEOUT = 60.0  # seconds per call
+DEFAULT_CACHE_SIZE = 128  # results kept, least recently used dropped first
 
 
 class ToolError(Exception):
@@ -66,8 +81,21 @@ class _Tool:
 class ToolRegistry:
     """Tools by name, built with the `Workspace` they may use."""
 
-    def __init__(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        timeout: float | None = DEFAULT_TIMEOUT,
+        cache_size: int = DEFAULT_CACHE_SIZE,
+    ) -> None:
         self._workspace = workspace
+        self._timeout = timeout
+        self._cache_size = cache_size
+        self._cache: OrderedDict[tuple[str, int], ToolResult] = OrderedDict()
+        # Abandoned calls that may still write; the cache is bypassed while any run.
+        self._abandoned = 0
+        self._counting = threading.Lock()
+        self._caching = threading.Lock()  # calls of one turn may run together
         self._tools: dict[str, _Tool] = {}
 
     def register(
@@ -106,7 +134,92 @@ class ToolRegistry:
         if tool is None:
             known = ", ".join(sorted(self._tools)) or "none"
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
-        return self._run(name, tool, input)
+        key = (call_hash(name, input), self._workspace.generation)
+        use_cache = tool.cacheable and self._abandoned == 0
+        if use_cache and (hit := self._hit(key)) is not None:
+            return hit
+        try:
+            result = self._timed(name, tool, input)
+        finally:
+            if not tool.read_only:  # a read after this write is never served stale,
+                self._workspace.bump()  # even when the call ended in a bug
+        if use_cache and result.ok and self._abandoned == 0:
+            self._store(key, result)
+        return result
+
+    def _hit(self, key: tuple[str, int]) -> ToolResult | None:
+        with self._caching:
+            hit = self._cache.get(key)
+            if hit is None:
+                return None
+            self._cache.move_to_end(key)
+        # A copy, so a caller that changes the content cannot change later hits.
+        return replace(hit, content=copy.deepcopy(hit.content), cached=True)
+
+    def _store(self, key: tuple[str, int], result: ToolResult) -> None:
+        kept = replace(result, content=copy.deepcopy(result.content))
+        with self._caching:
+            self._cache[key] = kept
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+
+    def _timed(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
+        """Run the call, abandoning it if it outlasts the timeout. Python cannot kill
+        a thread, so an abandoned call may keep running: its write, if it is not
+        read-only, bumps the generation again when it finally returns."""
+        if self._timeout is None:
+            return self._run(name, tool, input)
+        future: Future[ToolResult] = Future()
+        context = copy_context()
+
+        def work() -> None:
+            try:
+                future.set_result(context.run(self._run, name, tool, input))
+            except BaseException as bug:
+                # Not handled: carried to the caller, who raises it again, so the
+                # future is always resolved (a `SystemExit` included). Only a bug in
+                # the tool gets here; fixable failures are results.
+                future.set_exception(bug)
+
+        # A daemon, so an abandoned call that never returns cannot keep the process
+        # from exiting.
+        threading.Thread(target=work, name=f"tool-{name}", daemon=True).start()
+        settled = False
+        try:
+            _, late = wait([future], timeout=self._timeout)
+            settled = not late
+        finally:
+            # A timeout, or a signal that reached the caller's wait. A call that has
+            # just finished is not abandoned: its result (or bug) is returned below.
+            if not settled and not future.done():
+                self._abandon(name, tool, future)
+        if future.done():  # it may have finished as the timeout was decided
+            return future.result()
+        return ToolResult(
+            False,
+            f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
+            "still be running. Try a smaller input or another approach.",
+        )
+
+    def _abandon(self, name: str, tool: _Tool, future: Future[ToolResult]) -> None:
+        writes = (
+            not tool.read_only
+        )  # `execute` bumps now; `_ended` bumps for its return
+        if writes:
+            with self._counting:
+                self._abandoned += 1
+        future.add_done_callback(functools.partial(self._ended, name, writes))
+
+    def _ended(self, name: str, writes: bool, done: Future[ToolResult]) -> None:
+        """An abandoned call has finally ended. A bug it raised now has nobody to
+        raise it to, so it is reported. A call that may write has made its write
+        visible by now, so the cache may be used again."""
+        if (bug := done.exception()) is not None:
+            _LOG.warning("%s, abandoned on timeout, then failed: %r", name, bug)
+        if writes:
+            with self._counting:
+                self._abandoned -= 1
+            self._workspace.bump()
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         try:

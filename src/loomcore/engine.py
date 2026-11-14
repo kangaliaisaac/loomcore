@@ -7,6 +7,7 @@ pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -293,26 +294,36 @@ class Run:
     def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
-        with self.ports.notices.collecting() as bucket:
-            try:
+        try:
+            with self.ports.notices.collecting() as bucket:
                 result = self.ports.tool(name, args)
                 ms = self._since(started)  # before the log writes below
-            finally:
-                # Whether the tool returned or broke, what it caused is logged, and
-                # a refusal precedes the call's completion.
-                caused = self._emit_notices(tool_use_id, bucket)
+        finally:
+            # Whether the tool returned or broke, what it caused is logged, and a
+            # refusal precedes the call's completion. The bucket was closed when the
+            # block exited, so a notice that arrives later is not logged, only
+            # warned about (spec 3.2).
+            caused = self._emit_notices(tool_use_id, bucket.snapshot())
         content = _annotated(result.content, note)
-        done = self._complete(tool_use_id, ok=result.ok, content=content, ms=ms)
+        done = self._complete(
+            tool_use_id, ok=result.ok, content=content, ms=ms, cached=result.cached
+        )
         return [*caused, done]
 
-    def _emit_notices(self, tool_use_id: str, notices: list[Notice]) -> list[Event]:
+    def _emit_notices(self, tool_use_id: str, notices: Sequence[Notice]) -> list[Event]:
         return [
             self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
             for notice in notices
         ]
 
     def _complete(
-        self, tool_use_id: str, *, ok: bool, content: JsonValue, ms: int = 0
+        self,
+        tool_use_id: str,
+        *,
+        ok: bool,
+        content: JsonValue,
+        ms: int = 0,
+        cached: bool = False,
     ) -> Event:
         return self.emit(
             "tool_completed",
@@ -320,7 +331,7 @@ class Run:
             ok=ok,
             content=content,
             duration_ms=ms,
-            cached=False,
+            cached=cached,
         )
 
     def _ask(self, tool_use_id: str, question: str) -> RunResult:

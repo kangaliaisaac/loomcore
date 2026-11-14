@@ -38,7 +38,8 @@ class Registry:
         input: dict[str, object],  # noqa: A002
     ) -> tuple[ToolResult, list[Notice]]:
         with self.notices.collecting() as bucket:
-            return self.registry.execute(name, input), bucket  # type: ignore[arg-type]
+            result = self.registry.execute(name, input)  # type: ignore[arg-type]
+        return result, list(bucket.snapshot())
 
 
 @pytest.fixture
@@ -210,10 +211,10 @@ def test_a_refusal_outside_a_call_is_not_collected_and_a_bucket_ends_with_its_ca
 ) -> None:
     with tools.notices.collecting() as bucket, pytest.raises(PathRefusedError):
         tools.workspace.read("../x")
-    assert [n.kind for n in bucket] == ["sandbox_denied"]
+    assert [n.kind for n in bucket.snapshot()] == ["sandbox_denied"]
     with pytest.raises(PathRefusedError):
         tools.workspace.read("../y")  # no call is open: nobody to blame
-    assert [n.kind for n in bucket] == ["sandbox_denied"]
+    assert [n.kind for n in bucket.snapshot()] == ["sandbox_denied"]
 
 
 def test_a_bucket_keeps_its_notices_when_the_call_breaks(tools: Registry) -> None:
@@ -225,7 +226,7 @@ def test_a_bucket_keeps_its_notices_when_the_call_breaks(tools: Registry) -> Non
     tools.registry.register(half_then_bug)
     with tools.notices.collecting() as bucket, pytest.raises(RuntimeError):
         tools.registry.execute("half_then_bug", {})
-    assert [n.kind for n in bucket] == ["note_written"]
+    assert [n.kind for n in bucket.snapshot()] == ["note_written"]
 
 
 def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
@@ -238,7 +239,7 @@ def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
         )
         worker.start()
         worker.join()
-    assert bucket == [Notice("note_written", {"path": "notes.md"})]
+    assert bucket.snapshot() == (Notice("note_written", {"path": "notes.md"}),)
 
 
 def test_a_tool_named_finish_is_refused(tools: Registry) -> None:
@@ -306,7 +307,7 @@ def test_two_notices_objects_keep_their_buckets_apart(tmp_path: Path) -> None:
         _, inner_notices = inner.run("write_note", {"text": "x"})
         outer.workspace.write("notes.md", "n")
     assert [n.kind for n in inner_notices] == ["note_written"]
-    assert [n.kind for n in outer_bucket] == ["note_written"]
+    assert [n.kind for n in outer_bucket.snapshot()] == ["note_written"]
 
 
 def test_a_notice_with_no_bucket_open_is_warned_about_not_dropped_quietly(
@@ -325,3 +326,14 @@ def test_an_oserror_with_no_errno_names_its_class(tools: Registry) -> None:
     tools.registry.register(quota)
     content = str(tools.registry.execute("quota", {}).content)
     assert content == "quota failed: OSError"
+
+
+def test_a_notice_is_either_in_the_closed_buckets_snapshot_or_refused_as_late(
+    tools: Registry,
+) -> None:
+    with tools.notices.collecting() as bucket:
+        tools.notices.noted("a.md")
+    assert bucket.closed
+    assert bucket.snapshot() == (Notice("note_written", {"path": "a.md"}),)
+    assert not bucket.add(Notice("note_written", {"path": "late.md"}))
+    assert len(bucket.snapshot()) == 1

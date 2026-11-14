@@ -1,7 +1,7 @@
 """f18: the model keeps a plan, and its latest plan is always in the window."""
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -9,7 +9,7 @@ from factories import calling, make
 from fakes import CAPS, World, fake_count, reply
 
 from loomcore import plan
-from loomcore.context import PLAN_TOOL
+from loomcore.context import PLAN_TOOL, Cleared, Item
 from loomcore.conversation import exchanges
 from loomcore.eventlog import read_events
 from loomcore.events import ContextPacked, Event, JsonObject
@@ -39,6 +39,24 @@ def registry(workspace: FilesystemWorkspace) -> ToolRegistry:
     tools = ToolRegistry(workspace)
     plan.register(tools)
     return tools
+
+
+@dataclass(frozen=True)
+class Scene:
+    tmp_path: Path
+    workspace: FilesystemWorkspace
+    registry: ToolRegistry
+    notices: Notices
+
+
+@pytest.fixture
+def scene(
+    tmp_path: Path,
+    workspace: FilesystemWorkspace,
+    registry: ToolRegistry,
+    notices: Notices,
+) -> Scene:
+    return Scene(tmp_path, workspace, registry, notices)
 
 
 def test_the_tool_is_named_for_the_constant_the_store_pins_by(
@@ -148,14 +166,7 @@ def long_tool_call(tool_use_id: str) -> JsonObject:
     }
 
 
-def run_with_plan(
-    tmp_path: Path,
-    workspace: FilesystemWorkspace,
-    registry: ToolRegistry,
-    notices: Notices,
-    *,
-    sibling: bool = False,
-) -> tuple[World, list[str]]:
+def run_with_plan(scene: Scene, *, sibling: bool = False) -> tuple[World, list[str]]:
     """Twelve long tool turns around two plans, under a small context budget. With
     `sibling`, the first plan is written in the same turn as a very long result."""
     ids = [f"t{k}" for k in range(12)]
@@ -171,11 +182,11 @@ def run_with_plan(
     ]
     results = {i: ToolResult(True, f"{i} " + "data " * 80) for i in [*ids, "big"]}
     results["big"] = ToolResult(True, "BIGRESULT " * 400)
-    world = World(script=script, tool_results=results, notices=notices)
+    world = World(script=script, tool_results=results, notices=scene.notices)
 
     def route(name: str, args: JsonObject) -> ToolResult:
         if name == PLAN_TOOL:
-            return registry.execute(name, args)
+            return scene.registry.execute(name, args)
         return world.tool(name, args)
 
     ports = replace(
@@ -183,55 +194,68 @@ def run_with_plan(
         tool=route,
         read_only=lambda name: name == "search",
         access=lambda name: (
-            registry.access(name) if name == PLAN_TOOL else world.access(name)
+            scene.registry.access(name) if name == PLAN_TOOL else world.access(name)
         ),
     )
-    tools = tuple(schema.to_json() for schema in registry.schemas())
+    tools = tuple(schema.to_json() for schema in scene.registry.schemas())
     config = Config(model="m", system="be brief", tools=tools)
     limits = CAPS.model_copy(update={"context_budget": BUDGET, "max_turns": 100})
-    driver = Driver(config, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
-    assert driver.run(Task("go", limits)).status == "finished"
-    assert workspace.read(PLAN_FILE) == "NEW PLAN: finish\n"
+    session, spend = scene.tmp_path / "s1.jsonl", scene.tmp_path / "spend.jsonl"
+    assert (
+        Driver(config, ports, session, spend).run(Task("go", limits)).status
+        == "finished"
+    )
+    assert scene.workspace.read(PLAN_FILE) == "NEW PLAN: finish\n"
     return world, [json.dumps(request.messages) for request in world.requests]
 
 
 def test_the_plan_stays_in_every_request_while_the_history_around_it_is_dropped(
-    tmp_path: Path,
-    workspace: FilesystemWorkspace,
-    registry: ToolRegistry,
-    notices: Notices,
+    scene: Scene,
 ) -> None:
-    _, texts = run_with_plan(tmp_path, workspace, registry, notices)
+    _, texts = run_with_plan(scene)
     assert all(
         "STEP ONE" in text for text in texts[1:8]
     )  # the plan while it is current
     assert all("NEW PLAN" in text for text in texts[8:])  # then the second replaces it
     assert "t0 data" not in texts[-1]  # the history around it really was thinned
-    log = list(read_events(tmp_path / "s1.jsonl").events)
+    log = list(read_events(scene.tmp_path / "s1.jsonl").events)
     assert any(isinstance(e, ContextPacked) for e in log)
 
 
 def test_without_the_pin_the_same_run_loses_the_plan(
-    tmp_path: Path,
-    workspace: FilesystemWorkspace,
-    registry: ToolRegistry,
-    notices: Notices,
-    monkeypatch: pytest.MonkeyPatch,
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The check that the test above can fail: take the pin away and the first plan
     is dropped with the rest of the old history."""
     monkeypatch.setattr("loomcore.conversation.PLAN_TOOL", "not_the_plan_tool")
-    _, texts = run_with_plan(tmp_path, workspace, registry, notices)
+    _, texts = run_with_plan(scene)
     assert not all("STEP ONE" in text for text in texts[1:8])
 
 
-def test_a_long_result_beside_the_plan_is_cleared_but_the_plan_stays(
-    tmp_path: Path,
-    workspace: FilesystemWorkspace,
-    registry: ToolRegistry,
-    notices: Notices,
+def test_a_long_result_beside_the_plan_is_cleared_at_once_and_the_plan_stays(
+    scene: Scene, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _, texts = run_with_plan(tmp_path, workspace, registry, notices, sibling=True)
+    with caplog.at_level("WARNING"):
+        _, texts = run_with_plan(scene, sibling=True)
     assert "BIGRESULT" in texts[1]  # shown in full while it is the latest exchange
-    assert "BIGRESULT" not in texts[8]  # cleared since, the plan's exchange pinned
+    assert all("BIGRESULT" not in text for text in texts[2:])  # cleared from then on
     assert all("STEP ONE" in text for text in texts[1:8])  # the plan never left
+    # only the request that carries that latest exchange whole is over its budget
+    assert caplog.text.count("over its budget") == 1
+
+
+def test_without_clearing_the_pinned_plan_exchange_the_long_result_stays_and_overruns(
+    scene: Scene, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check that the test above can fail: forbid clearing a pinned item."""
+
+    def never_pinned(item: Item) -> Cleared | None:
+        form = item.cleared
+        usable = not item.pinned and form is not None and form.tokens < item.tokens
+        return form if usable else None
+
+    monkeypatch.setattr("loomcore.context._smaller_form", never_pinned)
+    with caplog.at_level("WARNING"):
+        _, texts = run_with_plan(scene, sibling=True)
+    assert any("BIGRESULT" in text for text in texts[2:8])
+    assert caplog.text.count("over its budget") > 1

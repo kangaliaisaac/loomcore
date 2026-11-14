@@ -55,52 +55,52 @@ class Packed:
 
 
 def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Packed:
-    """Pinned items are always in. If everything together is over the budget, the
-    oldest unpinned tool results are cleared first, so nothing is dropped that a
-    cleared form would have kept. The rest are taken by value per token, a later
-    item being worth more, and an item that no longer fits is skipped. Ties are
-    broken by order, then id, so the result never depends on the input order.
+    """Pinned items are always in. If everything together is over the budget, tool
+    results are cleared first, oldest first, in unpinned items and in pinned ones
+    that may be cleared (the plan's), so nothing is dropped that a cleared form would
+    have kept. The rest are taken by value per token, a later item being worth more,
+    and an item that no longer fits is skipped. Ties are broken by order, then id, so
+    the result never depends on the input order.
 
     Raises `ValueError` if a pinned item is among the candidates, a candidate is
     flagged pinned, or two items share an id: the caller has split them wrongly.
     """
     _check_split(candidates, pinned)
-    base = sum(item.tokens for item in pinned)
-    kept_pinned = _in_order(pinned)
-    cleared_pinned: tuple[str, ...] = ()
-    if base > budget:  # a pinned item may still have results to clear (the plan's)
-        kept_pinned, cleared_pinned = _clear_oldest(kept_pinned, base, budget)
-        base = sum(item.tokens for item in kept_pinned)
-    if base > budget:
-        return Packed(_in_order(pinned), _in_order(candidates), base, budget, over=True)
-    pinned = kept_pinned
-    total = base + sum(item.tokens for item in candidates)
-    items, cleared = _clear_oldest(_in_order(candidates), total, budget)
+    everything = _in_order([*pinned, *candidates])
+    total = sum(item.tokens for item in everything)
+    cleared_items, cleared = _clear_oldest(everything, total, budget)
+    after = {item.id: item for item in cleared_items}
+    kept_pinned = [after[item.id] for item in pinned]
+    base = sum(item.tokens for item in kept_pinned)
+    if base > budget:  # even with every result cleared the pinned items do not fit
+        return Packed(
+            _in_order(pinned),
+            _in_order(candidates),
+            sum(item.tokens for item in pinned),
+            budget,
+            over=True,
+        )
+    items = [after[item.id] for item in candidates]
     left = budget - base
     chosen: list[Item] = []
     for item in _by_value(items):
         if item.tokens <= left:
             chosen.append(item)
             left -= item.tokens
-    kept = {item.id for item in chosen}
+    kept = {item.id for item in chosen} | {item.id for item in pinned}
     dropped = [item for item in items if item.id not in kept]
-    selected = _in_order([*pinned, *chosen])
+    selected = _in_order([*kept_pinned, *chosen])
     shown = tuple(
         item_id for item_id in cleared if item_id in kept
     )  # not a dropped one
-    return Packed(
-        selected,
-        _in_order(dropped),
-        budget - left,
-        budget,
-        cleared=(*cleared_pinned, *shown),
-    )
+    return Packed(selected, _in_order(dropped), budget - left, budget, cleared=shown)
 
 
 def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
     """At `compact_at` of the budget, clear the tool results of the oldest items
-    until the window is down to `compact_to` of it. Pinned items are left alone, and
-    so is a window that is already within its threshold."""
+    until the window is down to `compact_to` of it. Pinned items that may not be
+    cleared are left alone, and so is a window that is already within its
+    threshold."""
     if packed.over or packed.tokens < compact_at * packed.budget:
         return packed
     items, cleared = _clear_oldest(

@@ -28,15 +28,23 @@ RESULT: JsonObject = {
 }
 
 
+Spec = tuple[int, bool, int | None, bool]  # tokens, pinned, cleared tokens, may_clear
+
+
 def item(
-    k: int, tokens: int, *, pinned: bool = False, cleared_tokens: int | None = None
+    k: int,
+    tokens: int,
+    *,
+    pinned: bool = False,
+    cleared_tokens: int | None = None,
+    may_clear: bool = False,
 ) -> Item:
     message: JsonObject = {"role": "user", "content": f"item {k}"}
     cleared = None
     if cleared_tokens is not None:
         blank: JsonObject = {"role": "user", "content": CLEARED}
         cleared = Cleared((blank,), cleared_tokens)
-    return Item(f"i{k}", "exchange", k, tokens, (message,), pinned, cleared)
+    return Item(f"i{k}", "exchange", k, tokens, (message,), pinned, cleared, may_clear)
 
 
 ITEM_SPECS = st.lists(
@@ -44,15 +52,17 @@ ITEM_SPECS = st.lists(
         st.integers(0, 40),
         st.booleans(),
         st.one_of(st.none(), st.integers(0, 10)),
+        st.booleans(),  # may_clear, meaningful only for a pinned item
     ),
     max_size=12,
 )
 
 
-def build(specs: list[tuple[int, bool, int | None]]) -> tuple[list[Item], list[Item]]:
-    """(candidates, pinned) from specs of (tokens, pinned, cleared tokens)."""
+def build(specs: list[Spec]) -> tuple[list[Item], list[Item]]:
+    """(candidates, pinned) from specs: (tokens, pinned, cleared tokens, may_clear)."""
     items = [
-        item(k, t, pinned=p, cleared_tokens=c) for k, (t, p, c) in enumerate(specs)
+        item(k, t, pinned=p, cleared_tokens=c, may_clear=p and m)
+        for k, (t, p, c, m) in enumerate(specs)
     ]
     return [i for i in items if not i.pinned], [i for i in items if i.pinned]
 
@@ -63,7 +73,7 @@ def ids(items: tuple[Item, ...] | list[Item]) -> list[str]:
 
 @given(ITEM_SPECS, st.integers(0, 120))
 def test_packing_respects_the_budget_and_always_includes_the_pinned_items(
-    specs: list[tuple[int, bool, int | None]], budget: int
+    specs: list[Spec], budget: int
 ) -> None:
     candidates, pinned = build(specs)
     packed = pack(candidates, budget, pinned)
@@ -80,7 +90,7 @@ def test_packing_respects_the_budget_and_always_includes_the_pinned_items(
 
 @given(ITEM_SPECS, st.integers(0, 120), st.randoms())
 def test_the_result_does_not_depend_on_the_order_the_candidates_come_in(
-    specs: list[tuple[int, bool, int | None]], budget: int, shuffler: random.Random
+    specs: list[Spec], budget: int, shuffler: random.Random
 ) -> None:
     candidates, pinned = build(specs)
     shuffled = list(candidates)
@@ -170,7 +180,7 @@ def test_compaction_does_nothing_to_a_window_that_is_over() -> None:
 
 @given(ITEM_SPECS, st.integers(1, 200))
 def test_compaction_keeps_the_books_straight_and_is_idempotent(
-    specs: list[tuple[int, bool, int | None]], budget: int
+    specs: list[Spec], budget: int
 ) -> None:
     candidates, pinned = build(specs)
     once = compact(pack(candidates, budget, pinned), 0.8, 0.6)
@@ -178,8 +188,9 @@ def test_compaction_keeps_the_books_straight_and_is_idempotent(
     assert compact(once, 0.8, 0.6) == once
     if not once.over:
         assert once.tokens <= budget  # clearing never makes a window bigger
+    fixed = {i.id for i in pinned if not i.may_clear}
     for cleared_id in once.cleared:
-        assert cleared_id not in ids(pinned)
+        assert cleared_id not in fixed  # only a pinned item that may clear is cleared
 
 
 def test_a_window_still_high_after_everything_is_cleared_is_left_alone_again() -> None:
@@ -293,3 +304,36 @@ def test_a_pinned_item_that_may_clear_is_cleared_when_the_pinned_items_do_not_fi
 def test_a_pinned_item_that_may_not_clear_still_makes_the_window_over() -> None:
     latest = item(2, 500, pinned=True, cleared_tokens=5)
     assert pack([], 400, [latest]).over
+
+
+def test_nothing_is_dropped_that_clearing_a_pinned_plan_exchange_would_have_kept() -> (
+    None
+):
+    task = item(0, 10, pinned=True)
+    plan_turn = replace(item(1, 400, pinned=True, cleared_tokens=20), may_clear=True)
+    sibling = item(2, 150)  # no cleared form: it only fits if the plan's results go
+    latest = item(3, 100, pinned=True, cleared_tokens=5)
+    packed = pack([sibling], 600, [task, plan_turn, latest])
+    assert packed.dropped == ()  # 660 > 600: the plan's result is cleared first
+    assert packed.cleared == ("i1",)
+    assert packed.tokens == 10 + 20 + 150 + 100
+
+
+def test_a_pinned_item_may_be_shown_cleared_only_if_it_may_clear() -> None:
+    results: JsonObject = {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "x" * 90,
+                "is_error": False,
+            }
+        ],
+    }
+    base = replace(item(0, 100), messages=(results,), pinned=True)
+    plain = apply_cleared([base], {"i0"}, messages_size)
+    assert plain == [base]  # pinned and not allowed: left whole
+    allowed = apply_cleared([replace(base, may_clear=True)], {"i0"}, messages_size)
+    assert allowed[0].messages != base.messages
+    assert allowed[0].pinned  # still never dropped

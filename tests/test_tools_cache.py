@@ -104,10 +104,17 @@ def test_a_failed_result_is_not_cached(workspace: FilesystemWorkspace) -> None:
     assert counter.runs == ["x", "x"]
 
 
-def test_a_call_past_the_timeout_is_abandoned_and_its_late_write_still_bumps(
+def wait_for_generation(workspace: FilesystemWorkspace, generation: int) -> None:
+    deadline = time.monotonic() + 5
+    while workspace.generation < generation and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_a_call_past_the_timeout_is_abandoned_and_its_late_write_still_invalidates(
     workspace: FilesystemWorkspace,
 ) -> None:
     release = threading.Event()
+    counter = Counter()
 
     def slow_write(key: str) -> str:
         """Writes, eventually."""
@@ -116,17 +123,23 @@ def test_a_call_past_the_timeout_is_abandoned_and_its_late_write_still_bumps(
 
     tools = ToolRegistry(workspace, timeout=0.05)
     tools.register(slow_write, writes=("k",))
+    tools.register(counter.look, read_only=True, cacheable=True)
     try:
         result = tools.execute("slow_write", {"key": "a"})
         assert not result.ok
         assert "timed out" in str(result.content)
         assert workspace.generation == 1  # bumped when abandoned
+        # While the writer may still write, a read is neither served nor stored.
+        assert not tools.execute("look", {"key": "a"}).cached
+        assert not tools.execute("look", {"key": "a"}).cached
+        assert counter.runs == ["a", "a"]
     finally:
         release.set()  # an abandoned thread must not outlive a failing test
-    deadline = time.monotonic() + 5
-    while workspace.generation < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert workspace.generation == 2  # and again when it finally returned
+    wait_for_generation(workspace, 2)  # bumped again when it finally returned
+    assert workspace.generation == 2
+    assert not tools.execute("look", {"key": "a"}).cached  # a new generation
+    assert tools.execute("look", {"key": "a"}).cached  # and cached again
+    assert counter.runs == ["a", "a", "a"]
 
 
 def test_a_read_only_call_past_the_timeout_does_not_bump(
@@ -176,11 +189,3 @@ def test_no_timeout_runs_the_call_in_the_callers_thread(
     tools.register(where, read_only=True)
     tools.execute("where", {"key": "a"})
     assert seen == [threading.current_thread().name]
-
-
-def test_access_is_what_the_tool_declared(workspace: FilesystemWorkspace) -> None:
-    counter = Counter()
-    tools = registry(workspace, counter)
-    assert tools.access("change").writes == frozenset({"k"})
-    assert tools.access("look").read_only
-    assert tools.access("nope").read_only  # an unknown tool touches nothing

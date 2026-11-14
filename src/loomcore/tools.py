@@ -9,9 +9,10 @@ the timeout is abandoned. The registry emits no events; what the call caused
 """
 
 import inspect
+import threading
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from typing import Any, get_type_hints
@@ -24,7 +25,6 @@ from loomcore.conversation import call_hash
 from loomcore.events import JsonObject
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
-from loomcore.schedule import Access
 from loomcore.workspace import PathRefusedError, Workspace
 
 # Not finite is refused: the log would write null where the model saw NaN.
@@ -87,6 +87,9 @@ class ToolRegistry:
         self._timeout = timeout
         self._cache_size = cache_size
         self._cache: OrderedDict[tuple[str, int], ToolResult] = OrderedDict()
+        # Abandoned calls that may still write; the cache is bypassed while any run.
+        self._abandoned = 0
+        self._counting = threading.Lock()
         self._tools: dict[str, _Tool] = {}
 
     def register(
@@ -126,24 +129,18 @@ class ToolRegistry:
             known = ", ".join(sorted(self._tools)) or "none"
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
         key = (call_hash(name, input), self._workspace.generation)
-        if tool.cacheable and (hit := self._cache.get(key)) is not None:
+        use_cache = tool.cacheable and self._abandoned == 0
+        if use_cache and (hit := self._cache.get(key)) is not None:
             self._cache.move_to_end(key)
             return replace(hit, cached=True)
         result = self._timed(name, tool, input)
         if not tool.read_only:
             self._workspace.bump()  # a read after this write is never served stale
-        if tool.cacheable and result.ok:
+        if use_cache and result.ok and self._abandoned == 0:
             self._cache[key] = result
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
         return result
-
-    def access(self, name: str) -> Access:
-        """What the tool declared, for `schedule`: an unknown tool touches nothing."""
-        tool = self._tools.get(name)
-        if tool is None:
-            return Access(read_only=True)
-        return Access(tool.read_only, frozenset(tool.reads), frozenset(tool.writes))
 
     def _timed(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         """Run the call, abandoning it if it outlasts the timeout. Python cannot kill
@@ -153,17 +150,28 @@ class ToolRegistry:
             return self._run(name, tool, input)
         pool = ThreadPoolExecutor(max_workers=1)
         future = pool.submit(copy_context().run, self._run, name, tool, input)
-        _, late = wait([future], timeout=self._timeout)
-        pool.shutdown(wait=False)
+        try:
+            _, late = wait([future], timeout=self._timeout)
+        finally:
+            pool.shutdown(wait=False)
         if not late:
             return future.result()  # a bug in the tool is raised here, not hidden
-        if not tool.read_only:  # `execute` bumps now; this is the bump for its return
-            future.add_done_callback(lambda _: self._workspace.bump())
+        if not tool.read_only:  # `execute` bumps now; `_returned` bumps for its return
+            with self._counting:
+                self._abandoned += 1
+            future.add_done_callback(self._returned)
         return ToolResult(
             False,
             f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
             "still be running. Try a smaller input or another approach.",
         )
+
+    def _returned(self, _: Future[ToolResult]) -> None:
+        """An abandoned call that may write has finally ended: its write, if the
+        workspace could not see it, is visible now, so the cache may be used again."""
+        with self._counting:
+            self._abandoned -= 1
+        self._workspace.bump()
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         try:

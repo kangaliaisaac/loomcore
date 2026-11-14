@@ -6,7 +6,7 @@ among them. A model never sees a `tool_use` without its `tool_result`, because a
 item is a whole exchange.
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Literal
@@ -50,7 +50,12 @@ class Packed:
 def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Packed:
     """Pinned items are always in. The rest are taken by value per token, a later
     item being worth more, and an item that no longer fits is skipped. Ties are
-    broken by order, then id, so the result never depends on the input order."""
+    broken by order, then id, so the result never depends on the input order.
+
+    Raises `ValueError` if a pinned item is among the candidates, a candidate is
+    flagged pinned, or two items share an id: the caller has split them wrongly.
+    """
+    _check_split(candidates, pinned)
     base = sum(item.tokens for item in pinned)
     if base > budget:
         return Packed(_in_order(pinned), _in_order(candidates), base, budget, over=True)
@@ -88,12 +93,38 @@ def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
             cleared=None,
         )
         cleared.append(item.id)
+    if not cleared:
+        return packed  # nothing left to clear: a second call changes nothing
     return replace(packed, selected=tuple(items), tokens=tokens, cleared=tuple(cleared))
 
 
+def apply_cleared(items: Sequence[Item], cleared: Collection[str]) -> list[Item]:
+    """Show the items whose ids were cleared in an earlier window in their cleared
+    form, so a window starts from where the last one left off."""
+    return [
+        replace(
+            item,
+            messages=item.cleared.messages,
+            tokens=item.cleared.tokens,
+            cleared=None,
+        )
+        if item.id in cleared and item.cleared is not None and not item.pinned
+        else item
+        for item in items
+    ]
+
+
+def _check_split(candidates: Sequence[Item], pinned: Sequence[Item]) -> None:
+    ids = [item.id for item in (*candidates, *pinned)]
+    if len(set(ids)) != len(ids):
+        raise ValueError("two items share an id; each item goes in once")
+    if any(item.pinned for item in candidates):
+        raise ValueError("a pinned item is among the candidates; pass it as pinned")
+
+
 def _by_value(items: Sequence[Item]) -> list[Item]:
-    """Highest value per token first (exact, not floating point); an item of no
-    tokens comes first of all."""
+    """Highest value per token first (exact, not floating point). An item of no
+    tokens is not ranked first, but it always fits, so it is always taken."""
     return sorted(items, key=lambda item: (_rank(item), item.id))
 
 

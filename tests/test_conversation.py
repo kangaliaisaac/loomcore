@@ -1,5 +1,8 @@
 """The messages a call sends are a pure function of the log."""
 
+import json
+from collections.abc import Sequence
+
 from factories import calling, make
 
 from loomcore.context import CLEARED
@@ -13,6 +16,11 @@ from loomcore.conversation import (
     render,
 )
 from loomcore.events import JsonObject
+
+
+def size(messages: Sequence[JsonObject]) -> int:
+    """A stand-in counter for the edge's: the serialised length."""
+    return len(json.dumps(messages))
 
 
 def blocks(message: JsonObject) -> list[JsonObject]:
@@ -103,7 +111,7 @@ def test_the_history_is_cut_into_exchanges_with_the_latest_pinned() -> None:
         make("model_call", 3, message=calling("b")),
         make("tool_completed", 4, tool_use_id="b", content="more", ok=True),
     ]
-    items = exchanges("go", log, len)
+    items = exchanges("go", log, size)
     assert [(i.id, i.kind, i.pinned) for i in items] == [
         ("task", "task", True),
         ("seq:1", "exchange", False),
@@ -119,7 +127,7 @@ def test_an_exchange_can_be_shown_with_its_results_cleared() -> None:
         make("model_call", 1, message=calling("a")),
         make("tool_completed", 2, tool_use_id="a", content="found " * 40, ok=False),
     ]
-    _, exchange = exchanges("go", log, len)
+    _, exchange = exchanges("go", log, size)
     assert exchange.cleared is not None
     [block] = blocks(exchange.cleared.messages[1])
     assert block["content"] == CLEARED
@@ -127,7 +135,7 @@ def test_an_exchange_can_be_shown_with_its_results_cleared() -> None:
     assert block["tool_use_id"] == "a"
     assert exchange.cleared.tokens < exchange.tokens
     assert (
-        exchanges("go", [make("model_call", 1, message=cut_text())], len)[1].cleared
+        exchanges("go", [make("model_call", 1, message=cut_text())], size)[1].cleared
         is None
     )
 
@@ -145,7 +153,7 @@ def test_dropping_a_whole_exchange_keeps_the_roles_alternating() -> None:
         make("model_call", 5, message=calling("c")),
         make("tool_completed", 6, tool_use_id="c"),
     ]
-    task, first, second, third = exchanges("go", log, len)
+    task, first, second, third = exchanges("go", log, size)
     roles = [m["role"] for m in render([task, second, third])]
     assert roles == ["user", "assistant", "user", "assistant", "user"]
     assert first.id == "seq:1"
@@ -159,7 +167,7 @@ def test_a_fork_hint_is_pinned_and_a_fork_from_an_answer_asks_to_carry_on() -> N
         make("run_forked", 2, "r1", **origin),
         make("run_forked", 3, "r2", hint="try b", **origin),
     ]
-    items = exchanges("go", log, len)
+    items = exchanges("go", log, size)
     hints = [i for i in items if i.kind == "hint"]
     assert [i.pinned for i in hints] == [True, True]
     assert [i.messages[0]["content"] for i in hints] == [FORK_CONTINUE, "try b"]

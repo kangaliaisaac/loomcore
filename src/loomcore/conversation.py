@@ -11,6 +11,7 @@ from loomcore.context import CLEARED, Cleared, Item, ItemKind
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
 from loomcore.replay import content_blocks, tool_use_ids
 
+Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 FORK_CONTINUE = "Carry on with the task."
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
 
@@ -52,13 +53,11 @@ def render(items: Sequence[Item]) -> list[JsonObject]:
     return [message for item in items for message in item.messages]
 
 
-def exchanges(
-    task: JsonValue, events: Sequence[Event], count: Callable[[str], int]
-) -> list[Item]:
+def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[Item]:
     """The history as items: the task, each response with its tool results as one
-    exchange, and a fork's hint. `count` measures a text at the edge; an item is
-    counted as its messages serialised. The task, any hint and the latest exchange
-    are pinned."""
+    exchange, and a fork's hint. `count` measures an item's messages at the edge, so
+    the edge can count the shape the provider receives. The task, any hint and the
+    latest exchange are pinned."""
     done = {e.tool_use_id: e for e in events if isinstance(e, ToolCompleted)}
     items = [_item("task", "task", 0, [{"role": "user", "content": task}], count)]
     last = "user"
@@ -85,27 +84,26 @@ def _item(
     kind: ItemKind,
     order: int,
     messages: list[JsonObject],
-    count: Callable[[str], int],
+    count: Counter,
 ) -> Item:
     """The task and a hint are pinned; the latest exchange is pinned afterwards."""
+    tokens = count(messages)
     return Item(
         key,
         kind,
         order,
-        count(_text(messages)),
+        tokens,
         tuple(messages),
         pinned=kind != "exchange",
-        cleared=_cleared(messages, count(_text(messages)), count),
+        cleared=_cleared(messages, tokens, count),
     )
 
 
-def _cleared(
-    messages: list[JsonObject], tokens: int, count: Callable[[str], int]
-) -> Cleared | None:
+def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared | None:
     """The exchange with its results cleared, or None when that would not make it
     smaller (no result, or one shorter than the placeholder)."""
     blank = [_blank_results(message) for message in messages]
-    cleared = count(_text(blank))
+    cleared = count(blank)
     return (
         None
         if blank == messages or cleared >= tokens
@@ -124,10 +122,6 @@ def _blank_results(message: JsonObject) -> JsonObject:
         for block in content
     ]
     return {**message, "content": kept}
-
-
-def _text(messages: Sequence[JsonObject]) -> str:
-    return json.dumps(messages, sort_keys=True, separators=(",", ":"))
 
 
 def _pin_latest(items: list[Item]) -> list[Item]:

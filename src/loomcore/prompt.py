@@ -67,10 +67,13 @@ class SystemPrompt:
 def build(parts: PromptParts) -> SystemPrompt:
     """Assemble the parts in their fixed order. An empty part leaves out its block.
 
-    Raises `ValueError` for two tools with one name: their order would decide the
-    bytes, and a model cannot tell them apart either.
+    Raises `ValueError` for a tool with no name or no description, and for two tools
+    with one name: their order would decide the bytes, and a model cannot tell them
+    apart either.
     """
     names = [_line(tool.name) for tool in parts.tools]
+    if "" in names or any(not _line(tool.description) for tool in parts.tools):
+        raise ValueError("a tool needs a name and a description")
     if len(set(names)) != len(names):
         raise ValueError("two tools share a name; a prompt lists each tool once")
     candidates = (

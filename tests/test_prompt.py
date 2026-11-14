@@ -154,3 +154,9 @@ def test_two_tool_names_that_collapse_to_one_are_refused() -> None:
     )
     with pytest.raises(ValueError, match="share a name"):
         build(clash)
+
+
+def test_a_tool_with_no_name_or_no_description_is_refused() -> None:
+    for tool in (ToolSchema(" ", "x", {}), ToolSchema("name", "  ", {})):
+        with pytest.raises(ValueError, match="needs a name and a description"):
+            build(PromptParts(role="Role.", tools=(tool,)))

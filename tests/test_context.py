@@ -1,11 +1,21 @@
 """f16, part 1: packing and compaction are pure choices among counted items."""
 
 import random
+from dataclasses import replace
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from loomcore.context import CLEARED, Cleared, Item, Packed, compact, pack
+from loomcore.context import (
+    CLEARED,
+    Cleared,
+    Item,
+    Packed,
+    apply_cleared,
+    compact,
+    pack,
+)
 from loomcore.events import JsonObject
 
 
@@ -114,15 +124,20 @@ def test_a_window_below_the_threshold_is_left_alone() -> None:
 
 
 def test_at_the_threshold_the_oldest_results_are_cleared_down_to_the_target() -> None:
-    packed = window(300, 300, 300, 300)  # 1200 would not fit; budget keeps 1000
-    packed = pack(list(packed.selected), 1000, [])
     packed = window(250, 250, 250, 100)  # 850 of 1000, over 0.8
     compacted = compact(packed, 0.8, 0.6)
-    assert compacted.cleared == ("i0", "i1")  # 850 -> 602 -> 354: stops at <= 600
+    assert compacted.cleared == ("i0", "i1")  # 850 -> 601 -> 352: stops at <= 600
     assert compacted.tokens == sum(i.tokens for i in compacted.selected)
     assert compacted.tokens <= 0.6 * 1000
     assert [i.messages[0]["content"] for i in compacted.selected][:2] == [CLEARED] * 2
     assert ids(compacted.selected) == ids(packed.selected)  # nothing dropped
+
+
+def test_the_threshold_itself_compacts_and_one_token_below_it_does_not() -> None:
+    at = window(300, 300, 100, 100)  # 800 of 1000
+    below = window(300, 300, 100, 99)  # 799
+    assert compact(at, 0.8, 0.6).cleared != ()
+    assert compact(below, 0.8, 0.6) is below
 
 
 def test_a_pinned_item_is_never_cleared() -> None:
@@ -151,6 +166,34 @@ def test_compaction_keeps_the_books_straight_and_is_idempotent(
     candidates, pinned = build(specs)
     once = compact(pack(candidates, budget, pinned), 0.8, 0.6)
     assert once.tokens == sum(i.tokens for i in once.selected)
-    assert compact(once, 0.8, 0.6) == once or once.tokens > 0.6 * budget
+    assert compact(once, 0.8, 0.6) == once
     for cleared_id in once.cleared:
         assert cleared_id not in ids(pinned)
+
+
+def test_a_window_still_high_after_everything_is_cleared_is_left_alone_again() -> None:
+    items = [item(0, 500, cleared_tokens=400), item(1, 400, pinned=True)]
+    once = compact(pack(items[:1], 1000, items[1:]), 0.8, 0.1)
+    assert once.cleared == ("i0",)
+    assert once.tokens == 800  # still at the threshold, with nothing left to clear
+    assert compact(once, 0.8, 0.1) is once
+
+
+def test_items_cleared_in_an_earlier_window_start_this_one_cleared() -> None:
+    items = [item(0, 100, cleared_tokens=5), item(1, 100, cleared_tokens=5)]
+    shown = apply_cleared(items, {"i0"})
+    assert [i.tokens for i in shown] == [5, 100]
+    assert shown[0].messages[0]["content"] == CLEARED
+    assert shown[0].cleared is None  # it cannot be cleared twice
+    pinned = [replace(items[0], pinned=True)]
+    assert apply_cleared(pinned, {"i0"}) == pinned  # a pinned item is never cleared
+
+
+def test_pack_refuses_items_the_caller_split_wrongly() -> None:
+    a, b = item(0, 5), item(1, 5)
+    with pytest.raises(ValueError, match="share an id"):
+        pack([a, a], 10, [])
+    with pytest.raises(ValueError, match="share an id"):
+        pack([a], 10, [a])
+    with pytest.raises(ValueError, match="pinned item is among the candidates"):
+        pack([replace(b, pinned=True)], 10, [])

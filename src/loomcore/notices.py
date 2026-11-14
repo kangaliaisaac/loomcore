@@ -14,6 +14,7 @@ reports with no bucket open logs a warning instead of dropping the notice quietl
 
 import dataclasses
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -38,9 +39,29 @@ class Notice:
 class Bucket(list[Notice]):
     """What one tool call caused. It is closed when the call's block ends, so a
     notice that arrives after that (from a call abandoned on timeout) is known to
-    be late."""
+    be late. Adding and closing share a lock: a notice is either in the snapshot
+    taken at close or refused as late, never neither."""
 
-    closed = False
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.closed = False
+
+    def add(self, notice: Notice) -> bool:
+        with self._lock:
+            if self.closed:
+                return False
+            self.append(notice)
+            return True
+
+    def close(self) -> None:
+        """Refuse any later notice."""
+        with self._lock:
+            self.closed = True
+
+    def snapshot(self) -> tuple[Notice, ...]:
+        with self._lock:
+            return tuple(self)
 
 
 class Notices:
@@ -59,7 +80,7 @@ class Notices:
         try:
             yield bucket
         finally:
-            bucket.closed = True
+            bucket.close()
             self._bucket.reset(token)
 
     def refused(self, refusal: Refusal) -> None:
@@ -77,11 +98,9 @@ class Notices:
                 notice.fields,
             )
             return
-        if bucket.closed:  # its call ended, or was abandoned, and was already logged
+        if not bucket.add(notice):  # its call ended, or was abandoned, and was logged
             _LOG.warning(
                 "%s arrived after its tool call ended and is not logged: %s",
                 notice.kind,
                 notice.fields,
             )
-            return
-        bucket.append(notice)

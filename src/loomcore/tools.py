@@ -9,7 +9,9 @@ the timeout is abandoned. The registry emits no events; what the call caused
 """
 
 import copy
+import functools
 import inspect
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -27,6 +29,8 @@ from loomcore.events import JsonObject
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
 from loomcore.workspace import PathRefusedError, Workspace
+
+_LOG = logging.getLogger(__name__)
 
 # Not finite is refused: the log would write null where the model saw NaN.
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(
@@ -134,9 +138,11 @@ class ToolRegistry:
         use_cache = tool.cacheable and self._abandoned == 0
         if use_cache and (hit := self._hit(key)) is not None:
             return hit
-        result = self._timed(name, tool, input)
-        if not tool.read_only:
-            self._workspace.bump()  # a read after this write is never served stale
+        try:
+            result = self._timed(name, tool, input)
+        finally:
+            if not tool.read_only:  # a read after this write is never served stale,
+                self._workspace.bump()  # even when the call ended in a bug
         if use_cache and result.ok and self._abandoned == 0:
             self._store(key, result)
         return result
@@ -169,9 +175,10 @@ class ToolRegistry:
         def work() -> None:
             try:
                 future.set_result(context.run(self._run, name, tool, input))
-            except Exception as bug:
-                # Not handled: carried to the caller, who raises it again. Only a
-                # bug in the tool gets here; fixable failures are results.
+            except BaseException as bug:
+                # Not handled: carried to the caller, who raises it again, so the
+                # future is always resolved (a `SystemExit` included). Only a bug in
+                # the tool gets here; fixable failures are results.
                 future.set_exception(bug)
 
         # A daemon, so an abandoned call that never returns cannot keep the process
@@ -180,22 +187,29 @@ class ToolRegistry:
         _, late = wait([future], timeout=self._timeout)
         if not late:
             return future.result()  # a bug in the tool is raised here, not hidden
-        if not tool.read_only:  # `execute` bumps now; `_returned` bumps for its return
+        writes = (
+            not tool.read_only
+        )  # `execute` bumps now; `_ended` bumps for its return
+        if writes:
             with self._counting:
                 self._abandoned += 1
-            future.add_done_callback(self._returned)
+        future.add_done_callback(functools.partial(self._ended, name, writes))
         return ToolResult(
             False,
             f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
             "still be running. Try a smaller input or another approach.",
         )
 
-    def _returned(self, _: Future[ToolResult]) -> None:
-        """An abandoned call that may write has finally ended: its write, if the
-        workspace could not see it, is visible now, so the cache may be used again."""
-        with self._counting:
-            self._abandoned -= 1
-        self._workspace.bump()
+    def _ended(self, name: str, writes: bool, done: Future[ToolResult]) -> None:
+        """An abandoned call has finally ended. A bug it raised now has nobody to
+        raise it to, so it is reported. A call that may write has made its write
+        visible by now, so the cache may be used again."""
+        if (bug := done.exception()) is not None:
+            _LOG.warning("%s, abandoned on timeout, then failed: %r", name, bug)
+        if writes:
+            with self._counting:
+                self._abandoned -= 1
+            self._workspace.bump()
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         try:

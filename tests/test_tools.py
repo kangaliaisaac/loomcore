@@ -325,3 +325,14 @@ def test_an_oserror_with_no_errno_names_its_class(tools: Registry) -> None:
     tools.registry.register(quota)
     content = str(tools.registry.execute("quota", {}).content)
     assert content == "quota failed: OSError"
+
+
+def test_a_notice_is_either_in_the_closed_buckets_snapshot_or_refused_as_late(
+    tools: Registry,
+) -> None:
+    with tools.notices.collecting() as bucket:
+        tools.notices.noted("a.md")
+    assert bucket.closed
+    assert bucket.snapshot() == (Notice("note_written", {"path": "a.md"}),)
+    assert not bucket.add(Notice("note_written", {"path": "late.md"}))
+    assert len(bucket.snapshot()) == 1

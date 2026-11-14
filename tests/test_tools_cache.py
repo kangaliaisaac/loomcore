@@ -282,3 +282,64 @@ def test_a_cache_hit_reaches_the_log_as_cached(
     done = [e for e in log if isinstance(e, ToolCompleted)]
     assert [(e.tool_use_id, e.cached) for e in done] == [("t1", False), ("t2", True)]
     assert runs == ["same"]
+
+
+def test_a_tool_that_exits_is_raised_to_the_caller_not_taken_for_a_timeout(
+    workspace: FilesystemWorkspace,
+) -> None:
+    def leave(key: str) -> str:
+        """Calls sys.exit, as a helper library might."""
+        raise SystemExit(key)
+
+    tools = ToolRegistry(workspace, timeout=5)
+    tools.register(leave, writes=("k",))
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        tools.execute("leave", {"key": "a"})
+    assert time.monotonic() - started < 4  # not the 5 s timeout
+    assert workspace.generation == 1  # the write it may have made still counts
+
+
+def test_a_bug_in_a_tool_that_writes_still_bumps_the_generation(
+    workspace: FilesystemWorkspace,
+) -> None:
+    def half_done(key: str) -> str:
+        """Writes outside the workspace API, then breaks."""
+        raise RuntimeError(key)
+
+    tools = ToolRegistry(workspace, timeout=None)
+    tools.register(half_done, writes=("k",))
+    with pytest.raises(RuntimeError):
+        tools.execute("half_done", {"key": "a"})
+    assert workspace.generation == 1
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_bug_raised_after_the_call_was_abandoned_is_reported(
+    workspace: FilesystemWorkspace, caplog: pytest.LogCaptureFixture, read_only: bool
+) -> None:
+    release = threading.Event()
+    ended = threading.Event()
+
+    def slow_then_broken(key: str) -> str:
+        """Outlasts the timeout, then fails."""
+        try:
+            release.wait()
+            raise RuntimeError(key)
+        finally:
+            ended.set()
+
+    tools = ToolRegistry(workspace, timeout=0.05)
+    tools.register(slow_then_broken, read_only=read_only)
+    try:
+        with caplog.at_level("WARNING"):
+            assert not tools.execute("slow_then_broken", {"key": "a"}).ok
+            release.set()
+            assert ended.wait(5)
+            deadline = time.monotonic() + 5
+            while "abandoned on timeout, then failed" not in caplog.text:
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+    finally:
+        release.set()
+    assert "RuntimeError('a')" in caplog.text

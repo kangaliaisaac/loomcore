@@ -7,6 +7,7 @@ pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -293,21 +294,22 @@ class Run:
     def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
-        with self.ports.notices.collecting() as bucket:
-            try:
+        try:
+            with self.ports.notices.collecting() as bucket:
                 result = self.ports.tool(name, args)
                 ms = self._since(started)  # before the log writes below
-            finally:
-                # Whether the tool returned or broke, what it caused is logged, and
-                # a refusal precedes the call's completion.
-                caused = self._emit_notices(tool_use_id, bucket)
+        finally:
+            # Whether the tool returned or broke, what it caused is logged, and a
+            # refusal precedes the call's completion. The bucket is closed here, so
+            # a notice that arrives later is warned about, not lost.
+            caused = self._emit_notices(tool_use_id, bucket.snapshot())
         content = _annotated(result.content, note)
         done = self._complete(
             tool_use_id, ok=result.ok, content=content, ms=ms, cached=result.cached
         )
         return [*caused, done]
 
-    def _emit_notices(self, tool_use_id: str, notices: list[Notice]) -> list[Event]:
+    def _emit_notices(self, tool_use_id: str, notices: Sequence[Notice]) -> list[Event]:
         return [
             self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
             for notice in notices

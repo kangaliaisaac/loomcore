@@ -59,8 +59,9 @@ def build_window(
     """The messages for the next request. With no budget nothing is packed or counted,
     but what earlier windows dropped and cleared stays dropped and cleared: turning
     the budget off does not bring the history back. An `over` window (the pinned
-    items alone exceed the budget) is sent unpacked, as earlier windows left it, and records nothing: the
-    log still describes what was sent, and the provider's error is the backstop."""
+    items alone exceed the budget) is sent unpacked, as earlier windows left it, and
+    records nothing: the log still describes what was sent, and the provider's error
+    is the backstop."""
     # Items are built without counting so the dropped ones are never counted.
     items = exchanges(task, events, _no_count)
     kept = [item for item in items if item.id not in carried.dropped]

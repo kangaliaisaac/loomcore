@@ -144,6 +144,14 @@
     "passes": false
   },
   {
+    "id": "f25",
+    "card": "08",
+    "title": "Summariser: compaction's second step",
+    "spec": "3.5",
+    "acceptance": "a window still over the target after clearing is summarised through Ports.summarise; the summary is logged as context_summarised and counted in the caps; replay rebuilds the window without a model call; a failing or capped summariser falls back to the cleared window",
+    "passes": false
+  },
+  {
     "id": "f19",
     "card": "09",
     "title": "Guard pipeline: pre and post guards, Redact, Ask",

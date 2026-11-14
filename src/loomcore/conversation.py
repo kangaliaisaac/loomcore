@@ -3,9 +3,11 @@
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 
 from pydantic import JsonValue
 
+from loomcore.context import Cleared, Counter, Item, ItemKind, clear_results
 from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
 from loomcore.replay import content_blocks, tool_use_ids
 
@@ -42,26 +44,87 @@ def final_text(message: JsonObject) -> str:
 
 def build_messages(task: JsonValue, events: Sequence[Event]) -> list[JsonObject]:
     """The conversation so far: the task, then each response and its tool results."""
+    return render(exchanges(task, events, lambda _: 0))
+
+
+def render(items: Sequence[Item]) -> list[JsonObject]:
+    """The messages of the items, in order."""
+    return [message for item in items for message in item.messages]
+
+
+def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[Item]:
+    """The history as items: the task, each response with its tool results as one
+    exchange, and a fork's hint. `count` measures an item's messages at the edge, so
+    the edge can count the shape the provider receives. The task, any hint and the
+    latest exchange are pinned."""
     done = {e.tool_use_id: e for e in events if isinstance(e, ToolCompleted)}
-    messages: list[JsonObject] = [{"role": "user", "content": task}]
+    items = [_item("task", "task", 0, [{"role": "user", "content": task}], count)]
+    last = "user"
     for event in events:
+        messages: list[JsonObject] = []
+        kind: ItemKind
         if isinstance(event, ModelCall):
             if sent := _sent(event.message):  # an empty turn would be rejected
                 messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
                 messages.append(reply)
+            kind, key = "exchange", f"seq:{event.run_id}:{event.seq}"
         elif isinstance(event, RunForked):
-            _after_fork(messages, event)
-    return messages
+            messages = _after_fork(last, event)
+            kind, key = "hint", f"hint:{event.run_id}"
+        if messages:
+            last = str(messages[-1]["role"])
+            items.append(_item(key, kind, len(items), messages, count))
+    return _pin_latest(items)
 
 
-def _after_fork(messages: list[JsonObject], event: RunForked) -> None:
+def _item(
+    key: str,
+    kind: ItemKind,
+    order: int,
+    messages: list[JsonObject],
+    count: Counter,
+) -> Item:
+    """The task and a hint are pinned; the latest exchange is pinned afterwards."""
+    tokens = count(messages)
+    return Item(
+        key,
+        kind,
+        order,
+        tokens,
+        tuple(messages),
+        pinned=kind != "exchange",
+        cleared=_cleared(messages, tokens, count),
+    )
+
+
+def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared | None:
+    """The exchange with its results cleared, or None when that would not make it
+    smaller (no result, or one shorter than the placeholder)."""
+    blank = clear_results(messages)
+    if blank == tuple(messages):
+        return None  # no tool result to clear, so nothing to count
+    cleared = count(blank)
+    return None if cleared >= tokens else Cleared(blank, cleared)
+
+
+def _pin_latest(items: list[Item]) -> list[Item]:
+    latest = max(
+        (k for k, item in enumerate(items) if item.kind == "exchange"), default=None
+    )
+    if latest is not None:
+        items[latest] = replace(items[latest], pinned=True)
+    return items
+
+
+def _after_fork(last: str, event: RunForked) -> list[JsonObject]:
     """A hint is the next user message; with none, a fork from a final answer would
     end the request on the assistant's turn, so ask it to carry on."""
     if event.hint:
-        messages.append({"role": "user", "content": event.hint})
-    elif messages[-1]["role"] == "assistant":
-        messages.append({"role": "user", "content": FORK_CONTINUE})
+        return [{"role": "user", "content": event.hint}]
+    if last == "assistant":
+        return [{"role": "user", "content": FORK_CONTINUE}]
+    return []
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

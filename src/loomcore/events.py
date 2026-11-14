@@ -165,6 +165,7 @@ class ContextCompacted(_Envelope):
     strategy: str
     tokens_before: int
     tokens_after: int
+    cleared: list[str] = Field(default_factory=list)  # ids of the items cleared now
 
 
 class _Verification(_Envelope):

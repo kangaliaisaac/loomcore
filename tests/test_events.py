@@ -9,7 +9,14 @@ import pytest
 from factories import PAYLOADS, make
 from pydantic import ValidationError
 
-from loomcore.events import Event, ModelCall, ToolRequested, dump_event, parse_event
+from loomcore.events import (
+    ContextCompacted,
+    Event,
+    ModelCall,
+    ToolRequested,
+    dump_event,
+    parse_event,
+)
 
 
 def test_every_kind_in_the_spec_has_a_sample() -> None:
@@ -113,3 +120,14 @@ def test_tool_requested_carries_its_wave_and_an_older_log_has_none() -> None:
     older = make("tool_requested", 3)
     assert isinstance(older, ToolRequested)
     assert older.wave is None
+
+
+def test_context_compacted_names_the_items_it_cleared_and_an_older_line_has_none() -> (
+    None
+):
+    named = make("context_compacted", 4, cleared=["seq:r1:1", "seq:r1:3"])
+    assert isinstance(named, ContextCompacted)
+    assert parse_event(dump_event(named)) == named
+    older = make("context_compacted", 4)
+    assert isinstance(older, ContextCompacted)
+    assert older.cleared == []

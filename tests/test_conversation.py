@@ -1,9 +1,27 @@
 """The messages a call sends are a pure function of the log."""
 
+import json
+from collections.abc import Sequence
+
 from factories import calling, make
 
-from loomcore.conversation import CONTINUE, build_messages, call_hash, final_text
+from loomcore.context import CLEARED, pack
+from loomcore.conversation import (
+    CONTINUE,
+    FORK_CONTINUE,
+    build_messages,
+    call_hash,
+    exchanges,
+    final_text,
+    render,
+)
 from loomcore.events import JsonObject
+from loomcore.replay import run_events
+
+
+def size(messages: Sequence[JsonObject]) -> int:
+    """A stand-in counter for the edge's: the serialised length."""
+    return len(json.dumps(messages))
 
 
 def blocks(message: JsonObject) -> list[JsonObject]:
@@ -85,3 +103,99 @@ def test_a_response_cut_off_in_its_only_tool_use_is_not_sent_empty() -> None:
     messages = build_messages("go", [make("model_call", 1, message=message)])
     assert [m["role"] for m in messages] == ["user", "user"]
     assert blocks(messages[-1]) == [{"type": "text", "text": CONTINUE}]
+
+
+def test_the_history_is_cut_into_exchanges_with_the_latest_pinned() -> None:
+    log = [
+        make("model_call", 1, message=calling("a")),
+        make("tool_completed", 2, tool_use_id="a", content="found", ok=True),
+        make("model_call", 3, message=calling("b")),
+        make("tool_completed", 4, tool_use_id="b", content="more", ok=True),
+    ]
+    items = exchanges("go", log, size)
+    assert [(i.id, i.kind, i.pinned) for i in items] == [
+        ("task", "task", True),
+        ("seq:r1:1", "exchange", False),
+        ("seq:r1:3", "exchange", True),
+    ]
+    assert [i.order for i in items] == [0, 1, 2]
+    assert render(items) == build_messages("go", log)
+    assert all(i.tokens > 0 for i in items)
+
+
+def test_an_exchange_can_be_shown_with_its_results_cleared() -> None:
+    log = [
+        make("model_call", 1, message=calling("a")),
+        make("tool_completed", 2, tool_use_id="a", content="found " * 40, ok=False),
+    ]
+    _, exchange = exchanges("go", log, size)
+    assert exchange.cleared is not None
+    [block] = blocks(exchange.cleared.messages[1])
+    assert block["content"] == CLEARED
+    assert block["is_error"] is True  # what happened stays, what was returned goes
+    assert block["tool_use_id"] == "a"
+    assert exchange.cleared.tokens < exchange.tokens
+    assert (
+        exchanges("go", [make("model_call", 1, message=cut_text())], size)[1].cleared
+        is None
+    )
+
+
+def cut_text() -> JsonObject:
+    return {"content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"}
+
+
+def test_dropping_a_whole_exchange_keeps_the_roles_alternating() -> None:
+    log = [
+        make("model_call", 1, message=calling("a")),
+        make("tool_completed", 2, tool_use_id="a"),
+        make("model_call", 3, message=calling("b")),
+        make("tool_completed", 4, tool_use_id="b"),
+        make("model_call", 5, message=calling("c")),
+        make("tool_completed", 6, tool_use_id="c"),
+    ]
+    task, first, second, third = exchanges("go", log, size)
+    roles = [m["role"] for m in render([task, second, third])]
+    assert roles == ["user", "assistant", "user", "assistant", "user"]
+    assert first.id == "seq:r1:1"
+
+
+def test_a_fork_hint_is_pinned_and_a_fork_from_an_answer_asks_to_carry_on() -> None:
+    answer = {"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn"}
+    origin: dict[str, object] = {"from": {"runId": "r0", "seq": 1}}
+    log = [
+        make("model_call", 1, message=answer),
+        make("run_forked", 2, "r1", **origin),
+        make("run_forked", 3, "r2", hint="try b", **origin),
+    ]
+    items = exchanges("go", log, size)
+    hints = [i for i in items if i.kind == "hint"]
+    assert [i.pinned for i in hints] == [True, True]
+    assert [i.messages[0]["content"] for i in hints] == [FORK_CONTINUE, "try b"]
+
+
+def test_item_ids_stay_unique_in_a_fork_of_a_fork_because_seq_restarts_per_run() -> (
+    None
+):
+    answer = {"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn"}
+    log = [
+        make("run_started", 0, "r1"),
+        make("model_call", 1, "r1", message=answer),
+        make("run_forked", 0, "r2", hint="b", **{"from": {"runId": "r1", "seq": 1}}),
+        make("model_call", 1, "r2", message=answer),
+        make("run_forked", 0, "r3", hint="c", **{"from": {"runId": "r2", "seq": 1}}),
+        make("model_call", 1, "r3", message=answer),
+    ]
+    items = exchanges("go", run_events(log, "r3"), size)
+    names = [i.id for i in items]
+    assert len(set(names)) == len(names)
+    assert names == [
+        "task",
+        "seq:r1:1",
+        "hint:r2",
+        "seq:r2:1",
+        "hint:r3",
+        "seq:r3:1",
+    ]
+    pinned = [i for i in items if i.pinned]
+    pack([i for i in items if not i.pinned], 10_000, pinned)  # the first window works

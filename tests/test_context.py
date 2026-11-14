@@ -1,0 +1,272 @@
+"""f16, part 1: packing and compaction are pure choices among counted items."""
+
+import json
+import random
+from collections.abc import Sequence
+from dataclasses import replace
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from loomcore.context import (
+    CLEARED,
+    Cleared,
+    Item,
+    Packed,
+    apply_cleared,
+    compact,
+    pack,
+)
+from loomcore.events import JsonObject
+
+RESULT: JsonObject = {
+    "role": "user",
+    "content": [
+        {"type": "tool_result", "tool_use_id": "a", "content": "ok", "is_error": False}
+    ],
+}
+
+
+def item(
+    k: int, tokens: int, *, pinned: bool = False, cleared_tokens: int | None = None
+) -> Item:
+    message: JsonObject = {"role": "user", "content": f"item {k}"}
+    cleared = None
+    if cleared_tokens is not None:
+        blank: JsonObject = {"role": "user", "content": CLEARED}
+        cleared = Cleared((blank,), cleared_tokens)
+    return Item(f"i{k}", "exchange", k, tokens, (message,), pinned, cleared)
+
+
+ITEM_SPECS = st.lists(
+    st.tuples(
+        st.integers(0, 40),
+        st.booleans(),
+        st.one_of(st.none(), st.integers(0, 10)),
+    ),
+    max_size=12,
+)
+
+
+def build(specs: list[tuple[int, bool, int | None]]) -> tuple[list[Item], list[Item]]:
+    """(candidates, pinned) from specs of (tokens, pinned, cleared tokens)."""
+    items = [
+        item(k, t, pinned=p, cleared_tokens=c) for k, (t, p, c) in enumerate(specs)
+    ]
+    return [i for i in items if not i.pinned], [i for i in items if i.pinned]
+
+
+def ids(items: tuple[Item, ...] | list[Item]) -> list[str]:
+    return [i.id for i in items]
+
+
+@given(ITEM_SPECS, st.integers(0, 120))
+def test_packing_respects_the_budget_and_always_includes_the_pinned_items(
+    specs: list[tuple[int, bool, int | None]], budget: int
+) -> None:
+    candidates, pinned = build(specs)
+    packed = pack(candidates, budget, pinned)
+    assert packed.tokens == sum(i.tokens for i in packed.selected)
+    assert set(ids(pinned)) <= set(ids(packed.selected))
+    if not packed.over:
+        assert packed.tokens <= budget
+    assert sorted(ids(packed.selected) + ids(packed.dropped)) == sorted(
+        ids(candidates) + ids(pinned)
+    )
+    orders = [i.order for i in packed.selected]
+    assert orders == sorted(orders)  # history order, whatever the choice order
+
+
+@given(ITEM_SPECS, st.integers(0, 120), st.randoms())
+def test_the_result_does_not_depend_on_the_order_the_candidates_come_in(
+    specs: list[tuple[int, bool, int | None]], budget: int, shuffler: random.Random
+) -> None:
+    candidates, pinned = build(specs)
+    shuffled = list(candidates)
+    shuffler.shuffle(shuffled)
+    assert pack(candidates, budget, pinned) == pack(shuffled, budget, pinned)
+
+
+def test_pinned_items_that_do_not_fit_are_kept_and_flagged() -> None:
+    pinned = [item(0, 30, pinned=True), item(1, 30, pinned=True)]
+    packed = pack([item(2, 5), item(3, 5)], 40, pinned)
+    assert packed.over
+    assert ids(packed.selected) == ["i0", "i1"]
+    assert ids(packed.dropped) == ["i2", "i3"]
+
+
+def test_a_later_item_beats_an_earlier_one_of_the_same_size() -> None:
+    packed = pack([item(1, 10), item(2, 10)], 10, [])
+    assert ids(packed.selected) == ["i2"]
+    assert ids(packed.dropped) == ["i1"]
+
+
+def test_a_small_old_item_can_beat_a_large_recent_one_per_token() -> None:
+    packed = pack([item(1, 2), item(2, 50)], 10, [])
+    assert ids(packed.selected) == ["i1"]  # (1+1)/2 > (2+1)/50
+
+
+def test_an_item_that_does_not_fit_is_skipped_and_smaller_ones_still_chosen() -> None:
+    packed = pack([item(1, 8), item(2, 9), item(3, 3)], 11, [])
+    assert ids(packed.selected) == ["i1", "i3"]  # i2 (9) leaves 2 < 3; i3 then i1
+
+
+def test_items_of_no_tokens_are_always_in() -> None:
+    packed = pack([item(1, 0), item(2, 0)], 0, [])
+    assert ids(packed.selected) == ["i1", "i2"]
+
+
+def window(*tokens: int, pinned_last: bool = True) -> Packed:
+    items = [
+        item(k, t, pinned=pinned_last and k == len(tokens) - 1, cleared_tokens=1)
+        for k, t in enumerate(tokens)
+    ]
+    return pack(
+        [i for i in items if not i.pinned], 1000, [i for i in items if i.pinned]
+    )
+
+
+def test_a_window_below_the_threshold_is_left_alone() -> None:
+    packed = window(100, 100, 100)  # 300 of 1000
+    assert compact(packed, 0.8, 0.6) is packed
+
+
+def test_at_the_threshold_the_oldest_results_are_cleared_down_to_the_target() -> None:
+    packed = window(250, 250, 250, 100)  # 850 of 1000, over 0.8
+    compacted = compact(packed, 0.8, 0.6)
+    assert compacted.cleared == ("i0", "i1")  # 850 -> 601 -> 352: stops at <= 600
+    assert compacted.tokens == sum(i.tokens for i in compacted.selected)
+    assert compacted.tokens <= 0.6 * 1000
+    assert [i.messages[0]["content"] for i in compacted.selected][:2] == [CLEARED] * 2
+    assert ids(compacted.selected) == ids(packed.selected)  # nothing dropped
+
+
+def test_the_threshold_itself_compacts_and_one_token_below_it_does_not() -> None:
+    at = window(300, 300, 100, 100)  # 800 of 1000
+    below = window(300, 300, 100, 99)  # 799
+    assert compact(at, 0.8, 0.6).cleared != ()
+    assert compact(below, 0.8, 0.6) is below
+
+
+def test_a_pinned_item_is_never_cleared() -> None:
+    packed = window(500, 400, pinned_last=True)  # the second is pinned
+    compacted = compact(packed, 0.5, 0.1)
+    assert compacted.cleared == ("i0",)
+    assert compacted.selected[1].tokens == 400
+    assert compacted.selected[1].messages[0]["content"] == "item 1"
+
+
+def test_a_window_with_nothing_to_clear_comes_back_as_it_is() -> None:
+    bare = pack([item(0, 700), item(1, 200)], 1000, [])
+    assert compact(bare, 0.8, 0.6) == bare
+
+
+def test_compaction_does_nothing_to_a_window_that_is_over() -> None:
+    over = pack([], 10, [item(0, 50, pinned=True)])
+    assert over.over
+    assert compact(over, 0.0, 0.0) is over
+
+
+@given(ITEM_SPECS, st.integers(1, 200))
+def test_compaction_keeps_the_books_straight_and_is_idempotent(
+    specs: list[tuple[int, bool, int | None]], budget: int
+) -> None:
+    candidates, pinned = build(specs)
+    once = compact(pack(candidates, budget, pinned), 0.8, 0.6)
+    assert once.tokens == sum(i.tokens for i in once.selected)
+    assert compact(once, 0.8, 0.6) == once
+    if not once.over:
+        assert once.tokens <= budget  # clearing never makes a window bigger
+    for cleared_id in once.cleared:
+        assert cleared_id not in ids(pinned)
+
+
+def test_a_window_still_high_after_everything_is_cleared_is_left_alone_again() -> None:
+    items = [item(0, 500, cleared_tokens=400), item(1, 400, pinned=True)]
+    once = compact(pack(items[:1], 1000, items[1:]), 0.8, 0.1)
+    assert once.cleared == ("i0",)
+    assert once.tokens == 800  # still at the threshold, with nothing left to clear
+    assert compact(once, 0.8, 0.1) is once
+
+
+def messages_size(messages: Sequence[JsonObject]) -> int:
+    return len(json.dumps(messages))
+
+
+def test_items_cleared_in_an_earlier_window_start_this_one_cleared() -> None:
+    results: JsonObject = {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "a",
+                "content": "x" * 90,
+                "is_error": True,
+            }
+        ],
+    }
+    big = replace(item(0, 100), messages=(results,))
+    other = item(1, 100)
+    shown = apply_cleared([big, other], {"i0", "i1"}, messages_size)
+    content = shown[0].messages[0]["content"]
+    assert isinstance(content, list)
+    [block] = content
+    assert isinstance(block, dict)
+    assert block["content"] == CLEARED
+    assert block["is_error"] is True
+    assert shown[0].tokens == messages_size(shown[0].messages)  # recounted
+    assert shown[0].cleared is None  # it cannot be cleared twice
+    assert shown[1].messages == other.messages  # no tool result in it: as it was
+    pinned = [replace(big, pinned=True)]
+    assert apply_cleared(pinned, {"i0"}, messages_size) == pinned  # never a pinned one
+
+
+def test_what_is_shown_cleared_does_not_depend_on_what_the_counter_said_before() -> (
+    None
+):
+    log_item = replace(
+        item(0, 100), messages=(RESULT,), cleared=None
+    )  # counter: no gain
+    shown = apply_cleared([log_item], {"i0"}, messages_size)
+    assert shown[0].messages != log_item.messages  # the log decided, not the counter
+
+
+def test_clearing_comes_before_dropping_when_the_whole_window_is_over_budget() -> None:
+    items = [item(0, 300, cleared_tokens=10), item(1, 300, cleared_tokens=10)]
+    pinned = [item(2, 300, pinned=True)]
+    packed = pack(items, 700, pinned)
+    assert packed.dropped == ()  # 900 > 700: but clearing the oldest saves enough
+    assert packed.cleared == ("i0",)
+    assert packed.tokens == 610
+    tight = pack(items, 315, pinned)  # both cleared still leave 320: a drop follows
+    assert tight.cleared == ("i1",)  # i0 was cleared too, but it was then dropped
+    assert ids(tight.dropped) == ["i0"]
+    assert tight.tokens <= 315
+
+
+def test_a_window_that_is_over_clears_and_drops_nothing_of_its_own() -> None:
+    over = pack([item(0, 50, cleared_tokens=1)], 10, [item(1, 50, pinned=True)])
+    assert over.over
+    assert over.cleared == ()
+    assert ids(over.dropped) == [
+        "i0"
+    ]  # left out of this window; the driver records none
+
+
+def test_pack_refuses_items_the_caller_split_wrongly() -> None:
+    a, b = item(0, 5), item(1, 5)
+    with pytest.raises(ValueError, match="share an id"):
+        pack([a, a], 10, [])
+    with pytest.raises(ValueError, match="share an id"):
+        pack([a], 10, [a])
+    with pytest.raises(ValueError, match="pinned item is among the candidates"):
+        pack([replace(b, pinned=True)], 10, [])
+
+
+def test_a_cleared_form_that_is_not_smaller_is_never_used() -> None:
+    bigger = item(0, 0, cleared_tokens=10)  # a formatter that got it wrong
+    packed = pack([bigger], 5, [])
+    assert packed.cleared == ()
+    assert packed.tokens == 0
+    assert compact(packed, 0.0, 0.0) is packed

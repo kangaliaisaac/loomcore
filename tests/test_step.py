@@ -702,3 +702,39 @@ def test_a_denied_question_about_an_interrupted_wave_fails_every_call_it_named()
         RunTool("c"),
         RunTool("d"),
     ]
+
+
+def denied_wave(*completed: str) -> list[Event]:
+    """Wave [a, b] interrupted by a crash, asked about, denied; then a second crash."""
+    log = waved_turn()
+    log.append(make("run_resumed", 6, reason="crash", resume_from=5))
+    log += [asked(7, "a")]
+    log += [make("run_paused", 8, reason="awaiting_approval", resume_from=7)]
+    log += [make("run_resumed", 9, reason="approval", resume_from=7)]
+    log += [make("approval_denied", 10, tool_use_id="a", by="me", note="no")]
+    for n, i in enumerate(completed):
+        log.append(make("tool_completed", 11 + n, tool_use_id=i))
+    return log
+
+
+def test_a_second_crash_before_the_fails_still_fails_the_whole_denied_wave() -> None:
+    why = "denied by me: no"
+    assert crash(*denied_wave()) == [
+        Fail("a", why),
+        Fail("b", why),
+        RunTool("c"),
+        RunTool("d"),
+    ]
+
+
+def test_a_crash_between_the_fails_does_not_ask_again_about_the_other_denied_call() -> (
+    None
+):
+    why = "denied by me: no"
+    assert crash(*denied_wave("a")) == [Fail("b", why), RunTool("c"), RunTool("d")]
+
+
+def test_a_denial_does_not_fail_a_read_only_call_of_the_wave() -> None:
+    effects = crash(*denied_wave(), read_only=frozenset({"read"}))
+    # nothing risky was in the question, so no one was denied; both just re-run
+    assert Fail("b", "denied by me: no") not in effects

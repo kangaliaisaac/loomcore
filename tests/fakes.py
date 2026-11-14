@@ -108,6 +108,7 @@ class World:
     refused_in: dict[str, Refusal] = field(default_factory=dict)  # id -> refusal
     notices: Notices = field(default_factory=Notices)
     together: set[str] = field(default_factory=set)  # tools that may run together
+    declared: dict[str, Access] = field(default_factory=dict)  # reads and writes
     read_only: set[str] = field(default_factory=set)  # tool names
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
@@ -143,7 +144,10 @@ class World:
         return self.tool_results.get(use_id, ToolResult(True, f"result {use_id}"))
 
     def access(self, name: str) -> Access:
-        """Every tool conflicts with every other unless the test names it `together`."""
+        """Every tool conflicts with every other unless the test names it `together`
+        (touching nothing) or gives its `declared` reads and writes."""
+        if name in self.declared:
+            return self.declared[name]
         return Access(read_only=name in self.together)
 
     def new_run_id(self) -> str:

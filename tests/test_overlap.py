@@ -4,8 +4,10 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import TracebackType
 
 import pytest
 from factories import make
@@ -20,7 +22,7 @@ from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
 from loomcore.loop import Driver
 from loomcore.ports import RunResult, Task, ToolResult
-from loomcore.schedule import conflict
+from loomcore.schedule import Access, conflict
 
 TASK = Task("find it", CAPS)
 Tool = Callable[[str, JsonObject], ToolResult]
@@ -163,23 +165,36 @@ def test_a_bug_in_one_call_of_a_wave_logs_the_others_and_resumes(
     ]
 
 
+DECLARED = {
+    "read_x": Access(True, reads=frozenset({"x"})),
+    "write_x": Access(False, writes=frozenset({"x"})),
+    "read_y": Access(True, reads=frozenset({"y"})),
+    "write_y": Access(False, writes=frozenset({"y"})),
+    "anything": Access(False),  # may write anything
+}
+
+
 @settings(deadline=None, max_examples=40)
-@given(st.lists(st.sampled_from(["scan", "write", "other"]), min_size=1, max_size=5))
-def test_any_mix_of_tools_keeps_conflicting_calls_in_order_and_the_log_in_order(
+@given(st.lists(st.sampled_from(sorted(DECLARED)), min_size=1, max_size=6))
+def test_any_mix_of_tools_runs_in_waves_and_logs_in_wave_then_emission_order(
     names: list[str],
 ) -> None:
     ids = [f"t{k}" for k in range(len(names))]
     world = World(script=[use(*zip(ids, names, strict=True)), reply()])
-    world.together.add("scan")
+    world.declared.update(DECLARED)
     lanes = Lanes(together=1)  # a lone barrier party: nothing waits
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         driver(world, tmp, lanes.tool).run(TASK)
-        done = [e.tool_use_id for e in log(tmp) if isinstance(e, ToolCompleted)]
-    assert done == ids  # completions are in the order the model emitted the calls
+        events = log(tmp)
+    wave_of = {e.tool_use_id: e.wave for e in events if isinstance(e, ToolRequested)}
+    done = [e.tool_use_id for e in events if isinstance(e, ToolCompleted)]
+    # waves ascending, and inside a wave the order the model emitted the calls
+    assert done == sorted(ids, key=lambda i: (wave_of[i] or 0, ids.index(i)))
     for i, first in enumerate(ids):
         for j in range(i + 1, len(ids)):
-            if conflict(world.access(names[i]), world.access(names[j])):
+            if conflict(DECLARED[names[i]], DECLARED[names[j]]):
+                assert (wave_of[first] or 0) < (wave_of[ids[j]] or 0)
                 ended = lanes.marks.index(f"end {first}")
                 started = lanes.marks.index(f"start {ids[j]}")
                 assert ended < started  # a conflicting pair never overlaps
@@ -263,3 +278,34 @@ def test_no_more_than_the_cap_of_a_wave_runs_at_once(tmp_path: Path) -> None:
     done = [e.tool_use_id for e in log(tmp_path) if isinstance(e, ToolCompleted)]
     assert done == ids
     assert 1 < running["most"] <= MAX_TOGETHER
+
+
+def test_a_signal_while_the_driver_waits_for_a_wave_still_logs_what_the_calls_caused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Interrupted(ThreadPoolExecutor):
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> bool | None:
+            super().__exit__(exc_type, exc, traceback)  # the calls finish...
+            raise KeyboardInterrupt  # ...then the signal arrives
+
+    world = World(
+        script=[use(("t1", "scan"), ("t2", "scan")), reply()], together={"scan"}
+    )
+    meet = threading.Barrier(2, timeout=5)
+
+    def tool(name: str, args: JsonObject) -> ToolResult:
+        world.notices.noted(f"{args['q']}.md")
+        meet.wait()
+        return ToolResult(True, str(args["q"]))
+
+    monkeypatch.setattr("loomcore.engine.ThreadPoolExecutor", Interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        driver(world, tmp_path, tool).run(TASK)
+    events = log(tmp_path)
+    assert [e.tool_use_id for e in events if isinstance(e, NoteWritten)] == ["t1", "t2"]
+    assert not any(isinstance(e, ToolCompleted) for e in events)

@@ -59,6 +59,9 @@ class RunState:
     ladder_asks: tuple[tuple[str, str], ...] = ()
     escalated: tuple[int, tuple[str, ...], str] | None = None
     decided: tuple[tuple[str, bool, str], ...] = ()
+    # (id, reason) of the other calls a denial of the question about an interrupted
+    # wave denied with it (the risky ones: the question named them all).
+    also_denied: tuple[tuple[str, str], ...] = ()
     # The finish call of the latest model_call, (id, result): a crash after it must
     # end the run, not run the call.
     finishing: tuple[str, JsonValue] | None = None
@@ -149,6 +152,7 @@ def _tools(state: RunState, event: Event) -> RunState:
                 ended_with=ended,
                 escalated=None,
                 decided=(),  # a decision covers its turn, which this call ends
+                also_denied=(),
                 finishing=finish_call(event.message),
             )
         case ToolRequested():
@@ -194,6 +198,7 @@ def _could_have_started(state: RunState) -> tuple[str, ...]:
     # An ask rung holds the turn; so does stuck, which only completes its calls.
     held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
     denied = {i for i, granted, _ in state.decided if not granted}
+    denied |= {i for i, _ in state.also_denied}
     if not state.pending_tools or (held and not state.decided):
         return ()
     if any(i not in requested for i in state.pending_tools):
@@ -231,11 +236,17 @@ def _decide(state: RunState, event: ApprovalGranted | ApprovalDenied) -> RunStat
     granted = isinstance(event, ApprovalGranted)
     reason = "" if granted else f"denied by {event.by}: {event.note}"
     decided = (*state.decided, (event.tool_use_id, granted, reason))
+    also = state.also_denied
+    if not granted and event.tool_use_id in state.interrupted:
+        # The question named every risky call of the interrupted wave: so does the
+        # denial, and it must still hold after a second crash recomputes the wave.
+        others = (i for i in state.interrupted if i != event.tool_use_id)
+        also = (*also, *((i, reason) for i in others))
     hashes = state.call_hashes
     asked = dict(state.ladder_asks).get(event.tool_use_id)
     if granted and asked is not None:
         hashes = tuple("" if h == asked else h for h in hashes)  # keep the window
-    return replace(state, decided=decided, call_hashes=hashes)
+    return replace(state, decided=decided, also_denied=also, call_hashes=hashes)
 
 
 def _lifecycle(state: RunState, event: Event) -> RunState:
@@ -254,6 +265,7 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
                 ladder_asks=(),
                 escalated=None,
                 decided=(),
+                also_denied=(),
                 finishing=None,
             )
         case RunPaused():

@@ -339,19 +339,31 @@ class Run:
         return self._run_together(wave)
 
     def _run_tool(self, run: RunTool) -> list[Event]:
-        name, args = tool_call(self.chain, run.tool_use_id)
+        caused: dict[str, tuple[Notice, ...]] = {}
+        try:
+            result, ms = self._call(run.tool_use_id, caused)
+        finally:
+            # Whether the tool returned or broke, what it caused is logged, and a
+            # refusal precedes the call's completion. The bucket was closed when the
+            # call ended, so a notice that arrives later is not logged, only warned
+            # about (spec 3.2).
+            written = self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+        return [*written, self._completed(run, result, ms)]
+
+    def _call(
+        self, tool_use_id: str, caused: dict[str, tuple[Notice, ...]]
+    ) -> tuple[ToolResult, int]:
+        """Run one tool in a bucket of its own; what it caused goes into `caused`
+        whether it returns or breaks. Writes nothing: it may run on a thread."""
+        name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
         try:
             with self.ports.notices.collecting() as bucket:
                 result = self.ports.tool(name, args)
-                ms = self._since(started)  # before the log writes below
+                ms = self._since(started)  # before any log write
         finally:
-            # Whether the tool returned or broke, what it caused is logged, and a
-            # refusal precedes the call's completion. The bucket was closed when the
-            # block exited, so a notice that arrives later is not logged, only
-            # warned about (spec 3.2).
-            caused = self._emit_notices(run.tool_use_id, bucket.snapshot())
-        return [*caused, self._completed(run, result, ms)]
+            caused[tool_use_id] = bucket.snapshot()
+        return result, ms
 
     def _run_together(self, wave: list[RunTool]) -> list[Event]:
         """Run independent calls on threads. A thread only runs its tool and keeps
@@ -359,20 +371,18 @@ class Run:
         event afterwards, each call's notices and then its completion, in the order
         the model emitted the calls."""
         caused: dict[str, tuple[Notice, ...]] = {}
-
-        def work(tool_use_id: str) -> tuple[ToolResult, int]:
-            name, args = tool_call(self.chain, tool_use_id)
-            started = self.ports.monotonic()
-            try:
-                with self.ports.notices.collecting() as bucket:
-                    result = self.ports.tool(name, args)
-                    ms = self._since(started)
-            finally:
-                caused[tool_use_id] = bucket.snapshot()
-            return result, ms
-
-        with ThreadPoolExecutor(max_workers=min(len(wave), MAX_TOGETHER)) as pool:
-            futures = [pool.submit(work, run.tool_use_id) for run in wave]
+        ran = False
+        try:
+            workers = min(len(wave), MAX_TOGETHER)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(self._call, run.tool_use_id, caused) for run in wave
+                ]
+            ran = True
+        finally:
+            if not ran:  # a signal reached the join: still log what finished caused
+                for run in wave:
+                    self._emit_notices(run.tool_use_id, caused.get(run.tool_use_id, ()))
         events: list[Event] = []
         bug: BaseException | None = None
         for run, future in zip(wave, futures, strict=True):

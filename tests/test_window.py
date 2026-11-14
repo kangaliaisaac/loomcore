@@ -95,13 +95,36 @@ def test_a_resume_starts_from_the_carried_sets_and_finds_the_same_window() -> No
     assert (again.newly_dropped, again.newly_cleared) == ((), ())
 
 
-def test_an_over_window_is_sent_unpacked_and_records_nothing() -> None:
-    log = history(4)
-    out = window(log, Carried(), tokens=5)
-    assert out.packed is not None
-    assert out.packed.over
-    assert (out.newly_dropped, out.newly_cleared) == ((), ())
-    assert out.messages == build_messages("go", log)  # sent whole, not cut down
+def carried_after(turns: int) -> tuple[Carried, list[Event]]:
+    played = play(turns, 600)
+    dropped = tuple(i for w, _ in played for i in w.newly_dropped)
+    cleared = tuple(i for w, _ in played for i in w.newly_cleared)
+    assert dropped
+    assert cleared
+    return Carried(dropped, cleared), played[-1][1]
+
+
+def test_an_over_window_is_sent_as_earlier_windows_left_it_and_records_nothing() -> (
+    None
+):
+    carried, log = carried_after(14)
+    over = window(log, carried, tokens=5)
+    roomy = window(log, carried, tokens=100_000)  # the same history, nothing over
+    assert over.packed is not None
+    assert over.packed.over
+    assert over.messages == roomy.messages  # the carried drops and clears, no more
+    assert over.messages != build_messages("go", log)  # and not the whole history
+    assert (over.newly_dropped, over.newly_cleared) == ((), ())
+
+
+def test_turning_the_budget_off_does_not_bring_back_what_was_dropped_or_cleared() -> (
+    None
+):
+    carried, log = carried_after(14)
+    off = window(log, carried, tokens=None)
+    assert off.messages == window(log, carried, tokens=100_000).messages
+    assert off.messages != build_messages("go", log)
+    assert (off.packed, off.newly_dropped, off.newly_cleared) == (None, (), ())
 
 
 def test_a_fork_starts_without_what_its_parent_had_dropped() -> None:

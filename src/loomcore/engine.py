@@ -244,6 +244,13 @@ class Run:
             self._count,
         )
         self._record(window)
+        if window.packed is not None and window.packed.over:
+            _LOG.warning(
+                "context window over its budget: the pinned items alone are %d tokens "
+                "of %d; sending the history unpacked",
+                window.packed.tokens,
+                window.packed.budget,
+            )
         return ModelRequest(
             model=self.config.model,
             system=self.config.system,

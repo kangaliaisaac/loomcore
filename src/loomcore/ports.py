@@ -37,6 +37,14 @@ class Config:
     # digest: the log holds this configuration and its digest once it is in force.
     switch_to: Config | None = None
 
+    def __post_init__(self) -> None:
+        if self.cache_prefix is not None and not 0 < self.cache_prefix <= len(
+            self.system
+        ):
+            raise ValueError(
+                "cache_prefix must be within the system prompt (1 to its length)"
+            )
+
     def to_json(self) -> JsonObject:
         config: JsonObject = {
             "model": self.model,

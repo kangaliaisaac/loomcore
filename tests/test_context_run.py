@@ -26,6 +26,13 @@ TURNS = 14
 BUDGET = 700
 
 
+def fixed_tokens() -> int:
+    """What the driver counts for the system prompt and the tool schemas."""
+    return fake_count([{"role": "user", "content": CONFIG.system}]) + fake_count(
+        [{"role": "user", "content": json.dumps(list(CONFIG.tools), sort_keys=True)}]
+    )
+
+
 def long_run(**limits: object) -> tuple[World, Task]:
     """Fourteen turns, each a tool call with a long result, then an answer."""
     ids = [f"t{k}" for k in range(TURNS)]
@@ -134,10 +141,9 @@ def test_the_window_that_was_sent_can_be_rebuilt_from_the_log(
     else:
         finish(world, task, tmp_path)
     log = list(read_events(tmp_path / "s1.jsonl").events)
-    fixed = fake_count([{"role": "user", "content": CONFIG.system}]) + fake_count(
-        [{"role": "user", "content": json.dumps(list(CONFIG.tools), sort_keys=True)}]
+    budget = Budget(
+        BUDGET - fixed_tokens(), task.limits.compact_at, task.limits.compact_to
     )
-    budget = Budget(BUDGET - fixed, task.limits.compact_at, task.limits.compact_to)
     starts = turn_starts(log)
     assert len(world.requests) == len(starts)
     for request, start in zip(world.requests, starts, strict=True):
@@ -161,13 +167,6 @@ def test_the_cache_prefix_of_the_configuration_reaches_the_request(
     (tmp_path / "plain").mkdir()
     finish(plain, plain_task, tmp_path / "plain")
     assert {r.cache_prefix for r in plain.requests} == {None}
-
-
-def fixed_tokens() -> int:
-    """What the driver counts for the system prompt and the tool schemas."""
-    return fake_count([{"role": "user", "content": CONFIG.system}]) + fake_count(
-        [{"role": "user", "content": json.dumps(list(CONFIG.tools), sort_keys=True)}]
-    )
 
 
 def test_a_window_that_cannot_fit_its_pinned_items_is_sent_whole_and_records_nothing(
@@ -210,7 +209,8 @@ def test_a_crash_before_the_model_call_leaves_each_id_in_exactly_one_context_eve
     with pytest.raises(Crash):
         driver.run(task)
     crashed = list(read_events(tmp_path / "s1.jsonl").events)
-    assert context_events(crashed)  # the window had already been recorded
+    # the window being built when the process died had already been recorded
+    assert isinstance(crashed[-1], (ContextPacked, ContextCompacted))
     assert driver.resume(run_ref()).status == "finished"
     log = list(read_events(tmp_path / "s1.jsonl").events)
     assert_recorded_once(log)
@@ -223,8 +223,19 @@ def test_a_limit_pause_after_context_events_resumes_without_recording_them_again
     driver = world.driver(tmp_path)
     paused = driver.run(task)
     assert (paused.status, paused.reason) == ("paused", "limit")
-    assert context_events(list(read_events(tmp_path / "s1.jsonl").events))
+    held = list(read_events(tmp_path / "s1.jsonl").events)
+    # the limit stopped the call after its window had been recorded
+    assert isinstance(held[-2], (ContextPacked, ContextCompacted))
     more = task.limits.model_copy(update={"max_turns": 100})
     assert driver.resume(paused.ref, limits=more).status == "finished"
     log = list(read_events(tmp_path / "s1.jsonl").events)
     assert_recorded_once(log)
+
+
+def test_a_window_that_is_over_its_budget_says_so_in_the_process_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    world, task = long_run(context_budget=fixed_tokens() + 5)
+    with caplog.at_level("WARNING"):
+        finish(world, task, tmp_path)
+    assert "context window over its budget" in caplog.text

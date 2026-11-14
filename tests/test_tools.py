@@ -202,3 +202,35 @@ def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
         bare.start()
         bare.join()
     assert bucket == [Notice("note_written", {"path": "notes.md"})]
+
+
+def test_a_tool_named_finish_is_refused(tools: Registry) -> None:
+    def finish() -> str:
+        """Ends the run."""
+        return "done"
+
+    with pytest.raises(ValueError, match="reserved"):
+        tools.registry.register(finish)
+
+
+def test_a_missing_file_does_not_put_the_host_path_in_the_result(
+    tools: Registry, tmp_path: Path
+) -> None:
+    tools.registry.register(read_file, read_only=True)
+    result = tools.registry.execute("read_file", {"path": "gone.txt"})
+    assert not result.ok
+    assert "No such file" in str(result.content)
+    assert str(tmp_path) not in str(result.content)
+
+
+def test_a_validation_error_inside_a_tool_keeps_its_own_message(
+    tools: Registry,
+) -> None:
+    def parse(text: str) -> int:
+        """Parses a point."""
+        return Point.model_validate_json(text).x
+
+    tools.registry.register(parse)
+    content = str(tools.registry.execute("parse", {"text": "{}"}).content)
+    assert "ValidationError" in content
+    assert "not JSON" not in content

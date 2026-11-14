@@ -14,6 +14,7 @@ from typing import Any, get_type_hints
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from pydantic import create_model as pydantic_model
 
+from loomcore import finish
 from loomcore.events import JsonObject
 from loomcore.notices import Notices
 from loomcore.ports import ToolResult
@@ -74,6 +75,10 @@ class ToolRegistry:
                 "writes must run every time"
             )
         tool = _build(fn, read_only, cacheable, reads, writes)
+        if tool.schema.name == finish.NAME:
+            raise ValueError(
+                f"{finish.NAME!r} is reserved for the finish call; rename the tool"
+            )
         if tool.schema.name in self._tools:
             raise ValueError(f"a tool named {tool.schema.name!r} is already registered")
         self._tools[tool.schema.name] = tool
@@ -109,13 +114,22 @@ class ToolRegistry:
         }
         if tool.workspace_param is not None:
             kwargs[tool.workspace_param] = self._workspace
-        try:
-            value = tool.fn(**kwargs)
-            return ToolResult(True, _JSON.validate_python(value))
-        except ValidationError:
-            return ToolResult(False, f"{name} returned something that is not JSON.")
-        except Exception as error:
-            return ToolResult(False, f"{name} failed: {type(error).__name__}: {error}")
+        return _invoke(name, tool, kwargs)
+
+
+def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
+    try:
+        value = tool.fn(**kwargs)
+    except OSError as error:
+        # Not str(error): it names the absolute host path, which does not belong
+        # in the log or in front of the model.
+        return ToolResult(False, f"{name} failed: {error.strerror or 'I/O error'}")
+    except Exception as error:
+        return ToolResult(False, f"{name} failed: {type(error).__name__}: {error}")
+    try:
+        return ToolResult(True, _JSON.validate_python(value))
+    except ValidationError:
+        return ToolResult(False, f"{name} returned something that is not JSON.")
 
 
 def _build(

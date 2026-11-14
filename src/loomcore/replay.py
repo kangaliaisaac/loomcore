@@ -4,7 +4,7 @@
 an approval open, is the run paused or finished). The loop adds the rest.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -16,6 +16,8 @@ from loomcore.events import (
     ApprovalDenied,
     ApprovalGranted,
     ApprovalRequested,
+    ContextCompacted,
+    ContextPacked,
     Escalation,
     Event,
     JsonObject,
@@ -62,6 +64,11 @@ class RunState:
     # (id, reason) of the other calls a denial of the question about an interrupted
     # wave denied with it (the risky ones: the question named them all).
     also_denied: tuple[tuple[str, str], ...] = ()
+    # The ids of the items earlier context windows dropped or cleared (spec 3.5),
+    # folded from `context_packed.dropped` and `context_compacted.cleared`. They only
+    # grow, and a fork keeps its parent's: its chain holds the parent's events.
+    dropped: tuple[str, ...] = ()
+    cleared: tuple[str, ...] = ()
     # The finish call of the latest model_call, (id, result): a crash after it must
     # end the run, not run the call.
     finishing: tuple[str, JsonValue] | None = None
@@ -135,7 +142,22 @@ def apply(state: RunState, event: Event) -> RunState:
     """
     state = replace(state, event_count=state.event_count + 1)
     state = _lifecycle(_approvals(_tools(state, event), event), event)
-    return _clock(_budget(state, event), event)
+    return _clock(_context(_budget(state, event), event), event)
+
+
+def _context(state: RunState, event: Event) -> RunState:
+    match event:
+        case ContextPacked():
+            return replace(state, dropped=_with_ids(state.dropped, event.dropped))
+        case ContextCompacted():
+            return replace(state, cleared=_with_ids(state.cleared, event.cleared))
+    return state
+
+
+def _with_ids(known: tuple[str, ...], new: Sequence[JsonValue]) -> tuple[str, ...]:
+    """`known` and the ids in `new` that are not in it yet, in order."""
+    added = [i for i in new if isinstance(i, str) and i not in known]
+    return (*known, *dict.fromkeys(added))
 
 
 def _tools(state: RunState, event: Event) -> RunState:

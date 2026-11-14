@@ -28,6 +28,7 @@ from loomcore.conversation import call_hash
 from loomcore.events import JsonObject
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
+from loomcore.schedule import Access
 from loomcore.workspace import PathRefusedError, Workspace
 
 _LOG = logging.getLogger(__name__)
@@ -128,6 +129,14 @@ class ToolRegistry:
         """For `Ports.read_only`: an unknown tool is not read-only."""
         tool = self._tools.get(name)
         return tool is not None and tool.read_only
+
+    def access(self, name: str) -> Access:
+        """For `Ports.access`: what the tool declared. An unknown tool counts as one
+        that may write anything, the same safe side as `read_only`."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return Access(read_only=False)
+        return Access(tool.read_only, frozenset(tool.reads), frozenset(tool.writes))
 
     def execute(self, name: str, input: JsonObject) -> ToolResult:  # noqa: A002
         tool = self._tools.get(name)

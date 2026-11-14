@@ -9,7 +9,7 @@ import pytest
 from factories import PAYLOADS, make
 from pydantic import ValidationError
 
-from loomcore.events import Event, ModelCall, dump_event, parse_event
+from loomcore.events import Event, ModelCall, ToolRequested, dump_event, parse_event
 
 
 def test_every_kind_in_the_spec_has_a_sample() -> None:
@@ -103,3 +103,13 @@ def test_an_event_built_with_microseconds_equals_its_read_back() -> None:
 def test_money_stays_a_decimal_in_python_mode() -> None:
     dumped = make("model_call", cost_usd=0.5).model_dump()
     assert dumped["cost_usd"] == Decimal("0.5")
+
+
+def test_tool_requested_carries_its_wave_and_an_older_log_has_none() -> None:
+    with_wave = make("tool_requested", 3, wave=2)
+    assert isinstance(with_wave, ToolRequested)
+    assert with_wave.wave == 2
+    assert parse_event(dump_event(with_wave)) == with_wave
+    older = make("tool_requested", 3)
+    assert isinstance(older, ToolRequested)
+    assert older.wave is None

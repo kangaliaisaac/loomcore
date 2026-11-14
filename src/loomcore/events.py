@@ -93,6 +93,10 @@ class ToolRequested(_Envelope):
     name: str
     input: JsonObject
     call_hash: str
+    # The wave the call runs in (calls with the same wave run together; a wave starts
+    # when the one before it is complete). Absent in a log from before calls could
+    # overlap, where every call is its own wave, in the order the model emitted them.
+    wave: int | None = None
 
 
 class ToolCompleted(_Envelope):

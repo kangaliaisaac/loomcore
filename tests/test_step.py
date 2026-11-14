@@ -219,8 +219,10 @@ def asked(seq: int, tool_use_id: str = "a") -> Event:
     return make("approval_requested", seq, tool_use_id=tool_use_id)
 
 
-def requested(seq: int, tool_use_id: str, name: str) -> Event:
-    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+def requested(seq: int, tool_use_id: str, name: str, wave: int | None = None) -> Event:
+    if wave is None:
+        return make("tool_requested", seq, tool_use_id=tool_use_id, name=name)
+    return make("tool_requested", seq, tool_use_id=tool_use_id, name=name, wave=wave)
 
 
 def crashed(
@@ -638,3 +640,51 @@ def test_a_grant_logged_before_a_crash_in_a_nudge_turn_keeps_the_notes() -> None
     log += [make("tool_completed", 11, tool_use_id="a")]
     effects = crash(*log, read_only=frozenset({"n"}))  # b is the first pending call
     assert effects == [RunTool("b"), RunTool("c", ladder.NUDGE)]
+
+
+# --- f15: calls of one wave run together ---------------------------------------
+
+
+def waved_turn() -> list[Event]:
+    """a and b are wave 0, c is wave 1, d is wave 2."""
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b", "c", "d")]
+    return [
+        *log,
+        requested(2, "a", "read", 0),
+        requested(3, "b", "read", 0),
+        requested(4, "c", "write", 1),
+        requested(5, "d", "write", 2),
+    ]
+
+
+def test_after_a_crash_every_pending_call_of_the_first_wave_counts_as_interrupted() -> (
+    None
+):
+    log = waved_turn()
+    assert after_crash(*log).interrupted == ("a", "b")
+    log.append(make("tool_completed", 6, tool_use_id="a"))
+    assert after_crash(*log).interrupted == ("b",)  # a finished; b may not have
+    log.append(make("tool_completed", 7, tool_use_id="b"))
+    assert after_crash(*log).interrupted == ("c",)  # the next wave
+
+
+def test_a_later_wave_never_counts_while_an_earlier_one_has_a_call_pending() -> None:
+    interrupted = after_crash(*waved_turn()).interrupted
+    assert "c" not in interrupted
+    assert "d" not in interrupted
+
+
+def test_a_log_without_waves_still_means_one_call_at_a_time() -> None:
+    log = [make("run_started"), model_call(1, "tool_use", "a", "b")]
+    log += [requested(2, "a", "write"), requested(3, "b", "write")]
+    assert after_crash(*log).interrupted == ("a",)
+
+
+def test_the_question_names_every_risky_call_of_the_interrupted_wave() -> None:
+    log = waved_turn()
+    effects = crashed(*log, read_only=frozenset({"read"}))[1]
+    assert effects == [RunTool("a"), RunTool("b"), RunTool("c"), RunTool("d")]
+    effects = crashed(*log)[1]  # nothing read-only: a and b may have written
+    assert len(effects) == 1
+    assert isinstance(effects[0], AskHuman)
+    assert "read (a), read (b)" in effects[0].question

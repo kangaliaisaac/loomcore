@@ -22,6 +22,7 @@ from loomcore.ports import (
 )
 from loomcore.retry import CallError
 from loomcore.sandbox import Refusal
+from loomcore.schedule import Access
 
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
@@ -106,6 +107,7 @@ class World:
     noted_in: dict[str, str] = field(default_factory=dict)  # id -> notes path written
     refused_in: dict[str, Refusal] = field(default_factory=dict)  # id -> refusal
     notices: Notices = field(default_factory=Notices)
+    together: set[str] = field(default_factory=set)  # tools that may run together
     read_only: set[str] = field(default_factory=set)  # tool names
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
@@ -140,6 +142,10 @@ class World:
         self.tool_calls.append(use_id)
         return self.tool_results.get(use_id, ToolResult(True, f"result {use_id}"))
 
+    def access(self, name: str) -> Access:
+        """Every tool conflicts with every other unless the test names it `together`."""
+        return Access(read_only=name in self.together)
+
     def new_run_id(self) -> str:
         self.ids += 1
         return f"r{self.ids}"
@@ -149,6 +155,7 @@ class World:
             model=self.model,
             tool=self.tool,
             read_only=lambda name: name in self.read_only,
+            access=self.access,
             notices=self.notices,
             pricing=self.pricing,
             clock=self.clock,

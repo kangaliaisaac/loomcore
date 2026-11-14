@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import JsonValue
 
-from loomcore import ladder
+from loomcore import ladder, schedule
 from loomcore.conversation import build_messages, call_hash, final_text, tool_call
 from loomcore.eventlog import EventWriter
 from loomcore.events import (
@@ -246,7 +246,8 @@ class Run:
             )
             if hits:
                 events.append(self._escalate([turn[k][:3] for k in hits]))
-        for tool_use_id, name, digest, args in turn:
+        wave_of = self._waves(turn)
+        for k, (tool_use_id, name, digest, args) in enumerate(turn):
             if tool_use_id in unrequested:
                 events.append(
                     self.emit(
@@ -255,9 +256,16 @@ class Run:
                         name=name,
                         input=args,
                         call_hash=digest,
+                        wave=wave_of[k],
                     )
                 )
         return events
+
+    def _waves(self, turn: list[tuple[str, str, str, JsonObject]]) -> dict[int, int]:
+        """Which wave each call of the turn runs in, from what its tool declared.
+        Written into the log, so a resume never works it out again."""
+        grouped = schedule.waves([self.ports.access(name) for _, name, _, _ in turn])
+        return {k: wave for wave, calls in enumerate(grouped) for k in calls}
 
     def _turn_calls(self) -> list[tuple[str, str, str, JsonObject]]:
         """The latest model_call's tool calls as (id, name, call_hash, input)."""

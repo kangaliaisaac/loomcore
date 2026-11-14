@@ -2,6 +2,8 @@
 
 import threading
 import time
+from concurrent.futures import Future
+from concurrent.futures import wait as real_wait
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from loomcore.eventlog import read_events
 from loomcore.events import ToolCompleted
 from loomcore.loop import Driver
 from loomcore.notices import Notices
-from loomcore.ports import Task
+from loomcore.ports import Task, ToolResult
 from loomcore.tools import ToolRegistry
 from loomcore.workspace import FilesystemWorkspace
 
@@ -258,7 +260,8 @@ def test_a_late_notice_from_an_abandoned_call_is_warned_about_not_given_to_anoth
             wait_for_generation(workspace, 3)  # its write, the abandon, the return
     finally:
         release.set()
-    assert (first.snapshot(), second.snapshot()) == ((), ())
+    assert first.snapshot() == ()  # the late notice was refused, not added
+    assert second.snapshot() == ()  # and did not go to the later call
     assert "arrived after its tool call ended" in caplog.text
 
 
@@ -371,3 +374,31 @@ def test_a_signal_that_reaches_the_callers_wait_still_abandons_the_call_properly
         assert workspace.generation == 2
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_a_call_that_finishes_as_the_timeout_is_decided_returns_its_real_result(
+    workspace: FilesystemWorkspace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    read_only: bool,
+) -> None:
+    def finished_but_reported_late(
+        futures: list[Future[ToolResult]], timeout: float | None
+    ) -> tuple[set[Future[ToolResult]], set[Future[ToolResult]]]:
+        real_wait(futures)  # it has finished...
+        return set(), set(futures)  # ...as far as the timeout is concerned
+
+    def quick(key: str) -> str:
+        """Finishes at once."""
+        return f"done {key}"
+
+    tools = ToolRegistry(workspace, timeout=5)
+    tools.register(quick, read_only=read_only)
+    monkeypatch.setattr("loomcore.tools.wait", finished_but_reported_late)
+    with caplog.at_level("WARNING"):
+        result = tools.execute("quick", {"key": "a"})
+    assert (result.ok, result.content) == (True, "done a")
+    assert tools._abandoned == 0
+    assert workspace.generation == (0 if read_only else 1)  # only execute's bump
+    assert caplog.text == ""  # nothing was abandoned, so nothing to report

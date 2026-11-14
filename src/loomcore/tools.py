@@ -189,7 +189,9 @@ class ToolRegistry:
             _, late = wait([future], timeout=self._timeout)
             settled = not late
         finally:
-            if not settled:  # a timeout, or a signal that reached the caller's wait
+            # A timeout, or a signal that reached the caller's wait. A call that has
+            # just finished is not abandoned: its result (or bug) is returned below.
+            if not settled and not future.done():
                 self._abandon(name, tool, future)
         if future.done():  # it may have finished as the timeout was decided
             return future.result()

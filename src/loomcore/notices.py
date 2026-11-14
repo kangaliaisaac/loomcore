@@ -78,7 +78,8 @@ class Notices:
     @contextmanager
     def collecting(self) -> Iterator[Bucket]:
         """Notices raised inside the block (and in threads run under a copy of its
-        context) are appended to the yielded list."""
+        context) are added to the yielded `Bucket`, which is closed when the block
+        exits."""
         bucket = Bucket()
         token = self._bucket.set(bucket)
         try:

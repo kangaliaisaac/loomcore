@@ -11,6 +11,7 @@ from pydantic import JsonValue
 from loomcore.events import Event, JsonObject
 from loomcore.limits import Limits
 from loomcore.loop import Driver
+from loomcore.notices import Notices
 from loomcore.ports import (
     Config,
     ModelCallError,
@@ -20,10 +21,15 @@ from loomcore.ports import (
     ToolResult,
 )
 from loomcore.retry import CallError
+from loomcore.sandbox import Refusal
 
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
 COST = Decimal("0.01")
+
+
+class ToolBugError(Exception):
+    """Raised by a fake tool to stand for a bug nobody planned for."""
 
 
 class Crash(BaseException):
@@ -96,6 +102,10 @@ class World:
     tool_calls: list[str] = field(default_factory=list)
     tool_results: dict[str, ToolResult] = field(default_factory=dict)
     crash_in: set[str] = field(default_factory=set)  # tool_use ids that kill the run
+    bug_in: set[str] = field(default_factory=set)  # tool_use ids whose tool breaks
+    noted_in: dict[str, str] = field(default_factory=dict)  # id -> notes path written
+    refused_in: dict[str, Refusal] = field(default_factory=dict)  # id -> refusal
+    notices: Notices = field(default_factory=Notices)
     read_only: set[str] = field(default_factory=set)  # tool names
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
@@ -121,6 +131,12 @@ class World:
         if use_id in self.crash_in:
             self.crash_in.discard(use_id)
             raise Crash
+        if use_id in self.refused_in:
+            self.notices.refused(self.refused_in[use_id])
+        if use_id in self.noted_in:
+            self.notices.noted(self.noted_in[use_id])
+        if use_id in self.bug_in:
+            raise ToolBugError(use_id)
         self.tool_calls.append(use_id)
         return self.tool_results.get(use_id, ToolResult(True, f"result {use_id}"))
 
@@ -133,6 +149,7 @@ class World:
             model=self.model,
             tool=self.tool,
             read_only=lambda name: name in self.read_only,
+            notices=self.notices,
             pricing=self.pricing,
             clock=self.clock,
             monotonic=lambda: 0.0,

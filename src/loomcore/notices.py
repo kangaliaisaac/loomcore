@@ -2,24 +2,37 @@
 
 The workspace and the sandbox report through plain callbacks fixed at construction,
 which know nothing about the call that made them. A `Notices` is created first and
-its two methods are passed as those callbacks; `collecting()` then opens a bucket
-for one call, held in a `ContextVar`, so the notices land with the call that caused
-them. A worker thread does not inherit the context: run it under
-`contextvars.copy_context().run` and it shares the caller's bucket.
+its two methods are passed as those callbacks. The driver owns it (`Ports.notices`)
+and wraps each tool call in `collecting()`, which opens a bucket held in a
+`ContextVar`; the driver writes the bucket in a `finally`, so what a call caused is
+logged whether the tool returns or breaks. A worker thread does not inherit the
+context: run it under `contextvars.copy_context().run` and it shares the caller's
+bucket.
 """
 
 import dataclasses
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Literal
 
-from loomcore.ports import Notice
+from loomcore.events import JsonObject
 from loomcore.sandbox import Refusal
+
+
+@dataclass(frozen=True)
+class Notice:
+    """An event a tool call caused (`sandbox_denied`, `note_written`); the driver
+    adds the call's `tool_use_id` and writes it."""
+
+    kind: Literal["sandbox_denied", "note_written"]
+    fields: JsonObject
 
 
 class Notices:
     def __init__(self) -> None:
-        # Per instance, so two registries' calls keep separate buckets.
+        # Per instance, so two drivers' calls keep separate buckets.
         self._bucket: ContextVar[list[Notice] | None] = ContextVar(
             "loomcore_notices", default=None
         )

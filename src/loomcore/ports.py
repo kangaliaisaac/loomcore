@@ -16,6 +16,7 @@ from pydantic import JsonValue
 
 from loomcore.events import JsonObject
 from loomcore.limits import Limits
+from loomcore.notices import Notices
 from loomcore.retry import CallError, Random
 
 
@@ -62,31 +63,9 @@ class ModelCallError(Exception):
 
 
 @dataclass(frozen=True)
-class Notice:
-    """An event a tool call caused (`sandbox_denied`, `note_written`). The registry
-    only reports it; the driver adds the call's `tool_use_id` and writes it."""
-
-    kind: Literal["sandbox_denied", "note_written"]
-    fields: JsonObject
-
-
-@dataclass(frozen=True)
 class ToolResult:
     ok: bool
     content: JsonValue
-    notices: tuple[Notice, ...] = ()
-
-
-class ToolCrashedError(Exception):
-    """A tool raised something nobody planned for. `notices` are what the call had
-    already caused (a refusal it handled, a note it wrote) and `error` is the bug;
-    the driver writes the notices, then re-raises the bug, so the log holds what
-    happened before the run stops."""
-
-    def __init__(self, error: Exception, notices: tuple[Notice, ...]) -> None:
-        super().__init__(f"{type(error).__name__}: {error}")
-        self.error = error
-        self.notices = notices
 
 
 class Pricing(Protocol):
@@ -108,6 +87,7 @@ class Ports:
         [str, JsonObject], ToolResult
     ]  # ok=false for fixable failures, a bug raises; has its own timeout
     read_only: Callable[[str], bool]  # by tool name
+    notices: Notices  # the callbacks of the workspace and sandbox report here
     pricing: Pricing
     clock: Callable[[], datetime]  # wall-clock UTC
     monotonic: Callable[[], float]  # durations

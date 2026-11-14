@@ -26,16 +26,15 @@ from loomcore.events import (
     make_event,
 )
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
+from loomcore.notices import Notice
 from loomcore.ports import (
     Config,
     Decision,
     ModelCallError,
     ModelRequest,
-    Notice,
     Ports,
     RunRef,
     RunResult,
-    ToolCrashedError,
 )
 from loomcore.replay import RunState, tool_use_ids
 from loomcore.retry import GiveUp, RetryPolicy, decide
@@ -294,21 +293,19 @@ class Run:
     def _run_tool(self, tool_use_id: str, note: str | None) -> list[Event]:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
-        try:
-            result = self.ports.tool(name, args)
-        except ToolCrashedError as crash:
-            self._emit_notices(tool_use_id, crash.notices)
-            raise crash.error from crash
-        ms = self._since(started)  # before the log writes below
-        # What the call caused is written first, so a refusal precedes its completion.
-        caused = self._emit_notices(tool_use_id, result.notices)
+        with self.ports.notices.collecting() as bucket:
+            try:
+                result = self.ports.tool(name, args)
+                ms = self._since(started)  # before the log writes below
+            finally:
+                # Whether the tool returned or broke, what it caused is logged, and
+                # a refusal precedes the call's completion.
+                caused = self._emit_notices(tool_use_id, bucket)
         content = _annotated(result.content, note)
         done = self._complete(tool_use_id, ok=result.ok, content=content, ms=ms)
         return [*caused, done]
 
-    def _emit_notices(
-        self, tool_use_id: str, notices: tuple[Notice, ...]
-    ) -> list[Event]:
+    def _emit_notices(self, tool_use_id: str, notices: list[Notice]) -> list[Event]:
         return [
             self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
             for notice in notices

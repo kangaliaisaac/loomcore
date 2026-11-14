@@ -1,13 +1,24 @@
 """f08 and f09: a scripted model drives runs to finished, paused and resumed."""
 
 import logging
-from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from factories import make
-from fakes import CAPS, CONFIG, COST, Crash, World, failure, finish, kinds, reply, use
+from fakes import (
+    CAPS,
+    CONFIG,
+    COST,
+    Crash,
+    ToolBugError,
+    World,
+    failure,
+    finish,
+    kinds,
+    reply,
+    use,
+)
 from fakes import ref as run_ref
 
 from loomcore import ladder
@@ -31,16 +42,9 @@ from loomcore.loop import (
     RunIdTakenError,
     SpendLogMissingError,
 )
-from loomcore.ports import (
-    Config,
-    Decision,
-    Notice,
-    RunResult,
-    Task,
-    ToolCrashedError,
-    ToolResult,
-)
+from loomcore.ports import Config, Decision, RunResult, Task
 from loomcore.rewind import ForkRefusedError
+from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
 
 TASK = Task("find it", CAPS)
@@ -652,13 +656,10 @@ def test_an_open_approval_question_is_not_repeated_after_a_crash(
 def test_a_refusal_and_a_note_are_logged_before_their_call_completes(
     tmp_path: Path,
 ) -> None:
-    caused = (
-        Notice("sandbox_denied", {"action": "read", "target": "/etc", "reason": "no"}),
-        Notice("note_written", {"path": "notes.md"}),
-    )
     world = World(
         script=[use(("t1", "search")), reply()],
-        tool_results={"t1": ToolResult(True, "ok", caused)},
+        refused_in={"t1": Refusal("read", "/etc", "no")},
+        noted_in={"t1": "notes.md"},
     )
     start(world, tmp_path)
     log = read_events(tmp_path / "s1.jsonl").events
@@ -674,28 +675,16 @@ def test_a_refusal_and_a_note_are_logged_before_their_call_completes(
     assert (noted.tool_use_id, noted.path) == ("t1", "notes.md")
 
 
-def test_a_tool_that_crashes_still_has_its_notices_logged_and_its_bug_raised(
+def test_a_tool_that_breaks_still_has_its_notices_logged_and_its_bug_raised(
     tmp_path: Path,
 ) -> None:
-    caused = (Notice("note_written", {"path": "notes.md"}),)
-
-    class BugError(Exception):
-        pass
-
-    world = World(script=[use(("t1", "search")), reply()])
-    ports = world.ports()
-
-    def tool(name: str, args: JsonObject) -> ToolResult:
-        raise ToolCrashedError(BugError("broken"), caused)
-
-    driver = Driver(
-        CONFIG,
-        replace(ports, tool=tool),
-        tmp_path / "s1.jsonl",
-        tmp_path / "spend.jsonl",
+    world = World(
+        script=[use(("t1", "search")), reply()],
+        noted_in={"t1": "notes.md"},
+        bug_in={"t1"},
     )
-    with pytest.raises(BugError):
-        driver.run(TASK)
+    with pytest.raises(ToolBugError):
+        start(world, tmp_path)
     log = read_events(tmp_path / "s1.jsonl").events
     noted = next(e for e in log if isinstance(e, NoteWritten))
     assert noted.tool_use_id == "t1"

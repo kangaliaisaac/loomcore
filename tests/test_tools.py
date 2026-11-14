@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from loomcore.notices import Notices
-from loomcore.ports import Notice, ToolCrashedError, ToolResult
+from loomcore.notices import Notice, Notices
+from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError, Refusal
 from loomcore.tools import ToolError, ToolRegistry
 from loomcore.workspace import FilesystemWorkspace, PathRefusedError, Workspace
@@ -20,7 +20,8 @@ class Point(BaseModel):
 
 
 class Registry:
-    """A registry on a real workspace, with its notices wired as the callbacks."""
+    """A registry on a real workspace; `Notices` is wired as the callbacks, as the
+    driver's is, and `run` opens a bucket for one call as the driver does."""
 
     def __init__(self, root: Path) -> None:
         root.mkdir()
@@ -29,7 +30,15 @@ class Registry:
         self.workspace = FilesystemWorkspace(
             root, on_refusal=self.notices.refused, on_note=self.notices.noted
         )
-        self.registry = ToolRegistry(self.workspace, self.notices)
+        self.registry = ToolRegistry(self.workspace)
+
+    def run(
+        self,
+        name: str,
+        input: dict[str, object],  # noqa: A002
+    ) -> tuple[ToolResult, list[Notice]]:
+        with self.notices.collecting() as bucket:
+            return self.registry.execute(name, input), bucket  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -135,21 +144,14 @@ def test_a_return_value_that_is_not_json_is_a_failed_result(tools: Registry) -> 
     assert "not JSON" in str(tools.registry.execute("odd", {}).content)
 
 
-def test_a_bug_in_a_tool_is_not_swallowed_and_leaves_no_bucket_behind(
-    tools: Registry,
-) -> None:
+def test_a_bug_in_a_tool_is_not_swallowed(tools: Registry) -> None:
     def boom() -> str:
         """Fails in a way nobody planned for."""
         raise RuntimeError("no luck")
 
     tools.registry.register(boom)
-    tools.registry.register(write_note)
-    with pytest.raises(ToolCrashedError, match="no luck"):
+    with pytest.raises(RuntimeError, match="no luck"):
         tools.registry.execute("boom", {})
-    # the next call collects only its own notices
-    assert [
-        n.kind for n in tools.registry.execute("write_note", {"text": "x"}).notices
-    ] == ["note_written"]
 
 
 def test_registering_checks_the_tool(tools: Registry) -> None:
@@ -180,9 +182,9 @@ def test_read_only_is_what_the_tool_declared(tools: Registry) -> None:
 
 def test_a_refusal_becomes_a_sandbox_denied_notice(tools: Registry) -> None:
     tools.registry.register(read_file, read_only=True)
-    result = tools.registry.execute("read_file", {"path": "../secret"})
+    result, notices = tools.run("read_file", {"path": "../secret"})
     assert not result.ok
-    (notice,) = result.notices
+    (notice,) = notices
     assert notice.kind == "sandbox_denied"
     assert notice.fields["action"] == "read"
     assert notice.fields["target"] == "../secret"
@@ -190,26 +192,40 @@ def test_a_refusal_becomes_a_sandbox_denied_notice(tools: Registry) -> None:
 
 def test_a_note_becomes_a_note_written_notice(tools: Registry) -> None:
     tools.registry.register(write_note)
-    result = tools.registry.execute("write_note", {"text": "x"})
-    assert result.notices == (Notice("note_written", {"path": "notes.md"}),)
+    _, notices = tools.run("write_note", {"text": "x"})
+    assert notices == [Notice("note_written", {"path": "notes.md"})]
 
 
 def test_notices_land_with_the_call_that_caused_them(tools: Registry) -> None:
     tools.registry.register(read_file, read_only=True)
     tools.registry.register(write_note)
-    refused = tools.registry.execute("read_file", {"path": "../x"})
-    noted = tools.registry.execute("write_note", {"text": "x"})
-    assert [n.kind for n in refused.notices] == ["sandbox_denied"]
-    assert [n.kind for n in noted.notices] == ["note_written"]
+    _, refused = tools.run("read_file", {"path": "../x"})
+    _, noted = tools.run("write_note", {"text": "x"})
+    assert [n.kind for n in refused] == ["sandbox_denied"]
+    assert [n.kind for n in noted] == ["note_written"]
 
 
-def test_a_refusal_outside_a_tool_call_is_not_collected(tools: Registry) -> None:
-    with pytest.raises(PathRefusedError):
+def test_a_refusal_outside_a_call_is_not_collected_and_a_bucket_ends_with_its_call(
+    tools: Registry,
+) -> None:
+    with tools.notices.collecting() as bucket, pytest.raises(PathRefusedError):
         tools.workspace.read("../x")
-    tools.registry.register(write_note)
-    assert [
-        n.kind for n in tools.registry.execute("write_note", {"text": "x"}).notices
-    ] == ["note_written"]
+    assert [n.kind for n in bucket] == ["sandbox_denied"]
+    with pytest.raises(PathRefusedError):
+        tools.workspace.read("../y")  # no call is open: nobody to blame
+    assert [n.kind for n in bucket] == ["sandbox_denied"]
+
+
+def test_a_bucket_keeps_its_notices_when_the_call_breaks(tools: Registry) -> None:
+    def half_then_bug() -> str:
+        """Writes a note, then breaks."""
+        tools.workspace.write("notes.md", "n")
+        raise RuntimeError("no luck")
+
+    tools.registry.register(half_then_bug)
+    with tools.notices.collecting() as bucket, pytest.raises(RuntimeError):
+        tools.registry.execute("half_then_bug", {})
+    assert [n.kind for n in bucket] == ["note_written"]
 
 
 def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
@@ -247,44 +263,6 @@ def test_a_missing_file_does_not_put_the_host_path_in_the_result(
     assert str(tmp_path) not in str(result.content)
 
 
-def test_a_sandbox_refusal_reported_by_a_tool_becomes_a_notice(tools: Registry) -> None:
-    def run_it() -> str:
-        """Stands in for a tool whose sandbox refuses the command."""
-        tools.notices.refused(Refusal("exec", "/bin/sh", "not an allowed command"))
-        raise CommandRefusedError(Refusal("exec", "/bin/sh", "not an allowed command"))
-
-    tools.registry.register(run_it)
-    result = tools.registry.execute("run_it", {})
-    assert not result.ok
-    assert result.notices == (
-        Notice(
-            "sandbox_denied",
-            {"action": "exec", "target": "/bin/sh", "reason": "not an allowed command"},
-        ),
-    )
-
-
-def test_a_nested_call_does_not_take_the_outer_calls_notices(tmp_path: Path) -> None:
-    outer, inner = Registry(tmp_path / "a"), Registry(tmp_path / "b")
-    seen: list[ToolResult] = []
-
-    def poke() -> str:
-        """Writes the outer workspace's notes while the inner call runs."""
-        outer.workspace.write("notes.md", "n")
-        return "ok"
-
-    def delegate() -> str:
-        """A tool that runs another registry's tool."""
-        seen.append(inner.registry.execute("poke", {}))
-        return "ok"
-
-    inner.registry.register(poke)
-    outer.registry.register(delegate)
-    result = outer.registry.execute("delegate", {})
-    assert seen[0].notices == ()  # the note belongs to the outer call
-    assert [n.kind for n in result.notices] == ["note_written"]
-
-
 def test_a_binary_file_is_a_failed_result_not_a_crash(tools: Registry) -> None:
     tools.registry.register(read_file, read_only=True)
     (tools.workspace_root / "blob.bin").write_bytes(b"\xff\xfe\x00")
@@ -293,14 +271,40 @@ def test_a_binary_file_is_a_failed_result_not_a_crash(tools: Registry) -> None:
     assert "not valid UTF-8" in str(result.content)
 
 
-def test_a_crashing_tool_still_hands_over_what_it_had_caused(tools: Registry) -> None:
-    def half_then_bug() -> str:
-        """Writes a note, then breaks."""
-        tools.workspace.write("notes.md", "n")
-        raise RuntimeError("no luck")
+def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
+    def ratio() -> float:
+        """Divides by nothing."""
+        return float("nan")
 
-    tools.registry.register(half_then_bug)
-    with pytest.raises(ToolCrashedError) as crashed:
-        tools.registry.execute("half_then_bug", {})
-    assert isinstance(crashed.value.error, RuntimeError)
-    assert [n.kind for n in crashed.value.notices] == ["note_written"]
+    tools.registry.register(ratio)
+    result = tools.registry.execute("ratio", {})
+    assert not result.ok
+    assert "not finite" in str(result.content)
+
+
+def test_a_sandbox_refusal_reported_by_a_tool_becomes_a_notice(tools: Registry) -> None:
+    def run_it() -> str:
+        """Stands in for a tool whose sandbox refuses the command."""
+        refusal = Refusal("exec", "/bin/sh", "not an allowed command")
+        tools.notices.refused(refusal)
+        raise CommandRefusedError(refusal)
+
+    tools.registry.register(run_it)
+    result, notices = tools.run("run_it", {})
+    assert not result.ok
+    assert notices == [
+        Notice(
+            "sandbox_denied",
+            {"action": "exec", "target": "/bin/sh", "reason": "not an allowed command"},
+        )
+    ]
+
+
+def test_two_notices_objects_keep_their_buckets_apart(tmp_path: Path) -> None:
+    outer, inner = Registry(tmp_path / "a"), Registry(tmp_path / "b")
+    inner.registry.register(write_note)
+    with outer.notices.collecting() as outer_bucket:
+        _, inner_notices = inner.run("write_note", {"text": "x"})
+        outer.workspace.write("notes.md", "n")
+    assert [n.kind for n in inner_notices] == ["note_written"]
+    assert [n.kind for n in outer_bucket] == ["note_written"]

@@ -4,12 +4,12 @@ The type hints are the only source of the JSON Schema, and the docstring is the
 description. A bad call comes back as `ok=False` with a message that says how to
 fix it: invalid input, an unknown tool, a `ToolError`, a refusal, an `OSError`.
 Nothing else is caught. The registry emits no events; what the call caused
-(refusals, notes) rides on the `ToolResult` for the driver to write.
+(refusals, notes) is collected by the driver's `Notices` and written by the driver.
 """
 
 import inspect
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
@@ -17,12 +17,14 @@ from pydantic import create_model as pydantic_model
 
 from loomcore import finish
 from loomcore.events import JsonObject
-from loomcore.notices import Notices
-from loomcore.ports import ToolCrashedError, ToolResult
+from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError
 from loomcore.workspace import PathRefusedError, Workspace
 
-_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+# Not finite is refused: the log would write null where the model saw NaN.
+_JSON: TypeAdapter[JsonValue] = TypeAdapter(
+    JsonValue, config=ConfigDict(allow_inf_nan=False)
+)
 _VALUES = frozenset({"default", "const", "enum", "examples"})  # data, not schema
 
 
@@ -62,12 +64,10 @@ class _Tool:
 
 
 class ToolRegistry:
-    """Tools by name, built with the `Workspace` they may use and the `Notices`
-    that were passed to the workspace (and the sandbox) as their callbacks."""
+    """Tools by name, built with the `Workspace` they may use."""
 
-    def __init__(self, workspace: Workspace, notices: Notices) -> None:
+    def __init__(self, workspace: Workspace) -> None:
         self._workspace = workspace
-        self._notices = notices
         self._tools: dict[str, _Tool] = {}
 
     def register(
@@ -106,14 +106,7 @@ class ToolRegistry:
         if tool is None:
             known = ", ".join(sorted(self._tools)) or "none"
             return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
-        with self._notices.collecting() as bucket:
-            try:
-                result = self._run(name, tool, input)
-            except Exception as error:
-                # Not caught: a bug stops the run. The notices are kept, though, so
-                # what the call caused before it broke still reaches the log.
-                raise ToolCrashedError(error, tuple(bucket)) from error
-        return replace(result, notices=tuple(bucket))
+        return self._run(name, tool, input)
 
     def _run(self, name: str, tool: _Tool, input: JsonObject) -> ToolResult:  # noqa: A002
         try:
@@ -143,7 +136,10 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         return ToolResult(True, _JSON.validate_python(value))
     except ValidationError:
-        return ToolResult(False, f"{name} returned something that is not JSON.")
+        return ToolResult(
+            False,
+            f"{name} returned something that is not JSON or not finite.",
+        )
 
 
 def _fixable(error: Exception) -> str:

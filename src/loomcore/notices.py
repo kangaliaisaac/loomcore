@@ -16,23 +16,24 @@ from contextvars import ContextVar
 from loomcore.ports import Notice
 from loomcore.sandbox import Refusal
 
-# One for the module: contexts keep a reference to every variable set in them, so a
-# variable per `Notices` would pile up. A tool call runs inside one registry, so
-# nothing needs the buckets of two `Notices` kept apart.
-_BUCKET: ContextVar[list[Notice] | None] = ContextVar("loomcore_notices", default=None)
-
 
 class Notices:
+    def __init__(self) -> None:
+        # Per instance, so two registries' calls keep separate buckets.
+        self._bucket: ContextVar[list[Notice] | None] = ContextVar(
+            "loomcore_notices", default=None
+        )
+
     @contextmanager
     def collecting(self) -> Iterator[list[Notice]]:
         """Notices raised inside the block (and in threads run under a copy of its
         context) are appended to the yielded list."""
         bucket: list[Notice] = []
-        token = _BUCKET.set(bucket)
+        token = self._bucket.set(bucket)
         try:
             yield bucket
         finally:
-            _BUCKET.reset(token)
+            self._bucket.reset(token)
 
     def refused(self, refusal: Refusal) -> None:
         self._add(Notice("sandbox_denied", dataclasses.asdict(refusal)))
@@ -41,6 +42,6 @@ class Notices:
         self._add(Notice("note_written", {"path": path}))
 
     def _add(self, notice: Notice) -> None:
-        bucket = _BUCKET.get()
+        bucket = self._bucket.get()
         if bucket is not None:  # outside a tool call there is no call to blame
             bucket.append(notice)

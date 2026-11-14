@@ -145,7 +145,7 @@ def _cwd_problem(rules: Rules, request: Request) -> str | None:
     if unusable(str(request.cwd), strict=True):
         return "the working directory has a NUL byte or text that cannot be encoded"
     if not request.cwd.is_absolute() or not request.cwd.is_relative_to(rules.root):
-        return f"the working directory {request.cwd} is outside the workspace"
+        return "the working directory is outside the workspace"  # no host path
     return None
 
 
@@ -305,7 +305,8 @@ class DockerSandbox:
         if isinstance(verdict, Refusal):
             self._refuse(verdict)
         if not directory.is_dir():  # like a missing executable: a result, not a crash
-            reason = f"cannot run: {directory} is not a directory\n"
+            shown = directory.relative_to(self._rules.root)  # not the host path
+            reason = f"cannot run: {shown} is not a directory\n"
             return ProcessResult(_NOT_RUNNABLE, "", reason, timed_out=False)
         env = {n: self._environ[n] for n in sorted(env_allow) if n in self._environ}
         for name, value in env.items():

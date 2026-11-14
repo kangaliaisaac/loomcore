@@ -158,6 +158,7 @@ def test_a_working_directory_outside_the_workspace_is_refused(root: Path) -> Non
         verdict = evaluate(rules_for(root), ask((SH,), cwd))
         assert isinstance(verdict, Refusal), cwd
         assert "outside the workspace" in verdict.reason
+        assert str(cwd) not in verdict.reason  # the model must not learn host paths
 
 
 def test_an_environment_variable_the_rules_do_not_allow_is_refused(root: Path) -> None:

@@ -8,7 +8,8 @@ import pytest
 from pydantic import BaseModel
 
 from loomcore.notices import Notices
-from loomcore.ports import Notice
+from loomcore.ports import Notice, ToolResult
+from loomcore.sandbox import CommandRefusedError, Refusal
 from loomcore.tools import ToolRegistry
 from loomcore.workspace import FilesystemWorkspace, PathRefusedError, Workspace
 
@@ -234,3 +235,41 @@ def test_a_validation_error_inside_a_tool_keeps_its_own_message(
     content = str(tools.registry.execute("parse", {"text": "{}"}).content)
     assert "ValidationError" in content
     assert "not JSON" not in content
+
+
+def test_a_sandbox_refusal_reported_by_a_tool_becomes_a_notice(tools: Registry) -> None:
+    def run_it() -> str:
+        """Stands in for a tool whose sandbox refuses the command."""
+        tools.notices.refused(Refusal("exec", "/bin/sh", "not an allowed command"))
+        raise CommandRefusedError(Refusal("exec", "/bin/sh", "not an allowed command"))
+
+    tools.registry.register(run_it)
+    result = tools.registry.execute("run_it", {})
+    assert not result.ok
+    assert result.notices == (
+        Notice(
+            "sandbox_denied",
+            {"action": "exec", "target": "/bin/sh", "reason": "not an allowed command"},
+        ),
+    )
+
+
+def test_a_nested_call_does_not_take_the_outer_calls_notices(tmp_path: Path) -> None:
+    outer, inner = Registry(tmp_path / "a"), Registry(tmp_path / "b")
+    seen: list[ToolResult] = []
+
+    def poke() -> str:
+        """Writes the outer workspace's notes while the inner call runs."""
+        outer.workspace.write("notes.md", "n")
+        return "ok"
+
+    def delegate() -> str:
+        """A tool that runs another registry's tool."""
+        seen.append(inner.registry.execute("poke", {}))
+        return "ok"
+
+    inner.registry.register(poke)
+    outer.registry.register(delegate)
+    result = outer.registry.execute("delegate", {})
+    assert seen[0].notices == ()  # the note belongs to the outer call
+    assert [n.kind for n in result.notices] == ["note_written"]

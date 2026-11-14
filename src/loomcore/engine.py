@@ -29,6 +29,7 @@ from loomcore.events import (
     RunStarted,
     make_event,
 )
+from loomcore.guards import Allow, Ask, Deny, Guards, ToolRequest, run_pre
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
 from loomcore.notices import Notice
 from loomcore.ports import (
@@ -88,6 +89,7 @@ class Run:
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
     counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
+    guards: Guards = field(default_factory=Guards)
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -342,6 +344,7 @@ class Run:
             )
             if hits:
                 events.append(self._escalate([turn[k][:3] for k in hits]))
+        events.extend(self._judge(turn, unrequested))
         wave_of = self._waves(turn, unrequested)
         for k, (tool_use_id, name, digest, args) in enumerate(turn):
             if tool_use_id in unrequested:
@@ -355,6 +358,37 @@ class Run:
                         wave=wave_of[k],
                     )
                 )
+        return events
+
+    def _judge(
+        self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]
+    ) -> list[Event]:
+        """Run the pre guards on the calls not yet requested and write each verdict
+        that is not an allow. They are written before any `tool_requested` line, so
+        a crash in the batch leaves the verdicts of every judged call in the log; a
+        call with none is judged again, and the guards are pure."""
+        judged = {i for i, _, _ in self.state.guarded}
+        events: list[Event] = []
+        for tool_use_id, name, digest, args in turn:
+            if tool_use_id not in unrequested or tool_use_id in judged:
+                continue
+            request = ToolRequest(tool_use_id, name, args, digest)
+            match run_pre(self.guards, request, self.state):
+                case Allow():
+                    continue
+                case Deny(reason):
+                    verdict, why = "deny", reason
+                case Ask(question):
+                    verdict, why = "ask", question
+            events.append(
+                self.emit(
+                    "guard_decision",
+                    stage="pre",
+                    tool_use_id=tool_use_id,
+                    decision=verdict,
+                    reason=why,
+                )
+            )
         return events
 
     def _waves(

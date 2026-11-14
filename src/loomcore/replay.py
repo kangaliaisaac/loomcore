@@ -20,6 +20,7 @@ from loomcore.events import (
     ContextPacked,
     Escalation,
     Event,
+    GuardDecision,
     JsonObject,
     ModelCall,
     RunFinished,
@@ -64,6 +65,9 @@ class RunState:
     # (id, reason) of the other calls a denial of the question about an interrupted
     # wave denied with it (the risky ones: the question named them all).
     also_denied: tuple[tuple[str, str], ...] = ()
+    # The turn's pre-guard verdicts that are not allow, as (id, "deny" | "ask", reason):
+    # a deny's reason is the observation, an ask's the question (spec 3.7).
+    guarded: tuple[tuple[str, str, str], ...] = ()
     # The ids of the items earlier context windows dropped or cleared (spec 3.5),
     # folded from `context_packed.dropped` and `context_compacted.cleared`. They only
     # grow, and a fork keeps its parent's: its chain holds the parent's events.
@@ -175,6 +179,7 @@ def _tools(state: RunState, event: Event) -> RunState:
                 escalated=None,
                 decided=(),  # a decision covers its turn, which this call ends
                 also_denied=(),
+                guarded=(),
                 finishing=finish_call(event.message),
             )
         case ToolRequested():
@@ -203,7 +208,29 @@ def _tools(state: RunState, event: Event) -> RunState:
             )
         case RunResumed(reason="crash"):
             state = replace(state, interrupted=_could_have_started(state))
-    return state
+    return _guarded(state, event)
+
+
+def _guarded(state: RunState, event: Event) -> RunState:
+    if not isinstance(event, GuardDecision) or event.stage != "pre":
+        return state
+    if event.decision not in ("deny", "ask"):
+        return state
+    if event.tool_use_id in {i for i, _, _ in state.guarded}:
+        return state
+    verdict = (event.tool_use_id, event.decision, event.reason)
+    return replace(state, guarded=(*state.guarded, verdict))
+
+
+def unanswered_asks(state: RunState) -> list[tuple[str, str]]:
+    """The (id, question) of pending calls a pre guard asked about that no logged
+    answer covers yet, in turn order. One answer covers a call whoever asked."""
+    answered = {i for i, _, _ in state.decided}
+    return [
+        (i, reason)
+        for i, verdict, reason in state.guarded
+        if verdict == "ask" and i in state.pending_tools and i not in answered
+    ]
 
 
 def _could_have_started(state: RunState) -> tuple[str, ...]:
@@ -221,7 +248,13 @@ def _could_have_started(state: RunState) -> tuple[str, ...]:
     held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
     denied = {i for i, granted, _ in state.decided if not granted}
     denied |= {i for i, _ in state.also_denied}
-    if not state.pending_tools or (held and not state.decided):
+    denied |= {i for i, verdict, _ in state.guarded if verdict == "deny"}
+    # Nothing runs while a guard's question is open either.
+    if (
+        not state.pending_tools
+        or (held and not state.decided)
+        or unanswered_asks(state)
+    ):
         return ()
     if any(i not in requested for i in state.pending_tools):
         return ()
@@ -288,6 +321,7 @@ def _lifecycle(state: RunState, event: Event) -> RunState:
                 escalated=None,
                 decided=(),
                 also_denied=(),
+                guarded=(),
                 finishing=None,
             )
         case RunPaused():

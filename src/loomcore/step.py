@@ -24,7 +24,7 @@ from loomcore.events import (
     ToolCompleted,
     ToolRequested,
 )
-from loomcore.replay import RunState, apply, finish_call, tool_use_ids
+from loomcore.replay import RunState, apply, finish_call, tool_use_ids, unanswered_asks
 
 ReadOnly = Callable[[str], bool]  # by tool name; an unknown tool is not read-only
 
@@ -94,7 +94,29 @@ def step(
     new = apply(state, event)
     if new.finished is not None or new.paused:
         return new, []
-    return new, _effects(state, new, event, read_only)
+    return new, _guard(new, _effects(state, new, event, read_only))
+
+
+def _guard(state: RunState, effects: list[Effect]) -> list[Effect]:
+    """Hold back what the turn's pre guards forbid (spec 3.7): a denied call fails
+    with the guard's reason and never runs; while any asked call has no answer the
+    human is asked about the first and nothing runs."""
+    if not any(isinstance(e, RunTool) for e in effects):
+        return effects
+    denied = {
+        i: reason
+        for i, verdict, reason in state.guarded
+        if verdict == "deny" and i in state.pending_tools
+    }
+    failing = {e.tool_use_id for e in effects if isinstance(e, Fail)}
+    fails = [Fail(i, reason) for i, reason in denied.items() if i not in failing]
+    kept = [
+        e for e in effects if not (isinstance(e, RunTool) and e.tool_use_id in denied)
+    ]
+    if asks := unanswered_asks(state):
+        held = [e for e in kept if not isinstance(e, RunTool)]
+        return [*fails, *held, AskHuman(*asks[0])]
+    return [*fails, *kept]
 
 
 def _effects(

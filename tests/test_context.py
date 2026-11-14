@@ -270,3 +270,26 @@ def test_a_cleared_form_that_is_not_smaller_is_never_used() -> None:
     assert packed.cleared == ()
     assert packed.tokens == 0
     assert compact(packed, 0.0, 0.0) is packed
+
+
+def test_a_pinned_item_that_may_clear_is_cleared_when_the_pinned_items_do_not_fit() -> (
+    None
+):
+    plan_turn = replace(item(1, 600, pinned=True, cleared_tokens=20), may_clear=True)
+    latest = item(2, 100, pinned=True, cleared_tokens=5)  # shown in full, never cleared
+    packed = pack([item(0, 50)], 400, [plan_turn, latest])
+    assert not packed.over
+    assert packed.cleared == ("i1",)
+    assert [i.tokens for i in packed.selected] == [
+        50,
+        20,
+        100,
+    ]  # in, but its results gone
+    assert (
+        pack([item(0, 50)], 1000, [plan_turn, latest]).cleared == ()
+    )  # room: untouched
+
+
+def test_a_pinned_item_that_may_not_clear_still_makes_the_window_over() -> None:
+    latest = item(2, 500, pinned=True, cleared_tokens=5)
+    assert pack([], 400, [latest]).over

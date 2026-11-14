@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from factories import calling, make
-from fakes import CAPS, World, fake_count, reply, use
+from fakes import CAPS, World, fake_count, reply
 
 from loomcore import plan
 from loomcore.context import PLAN_TOOL
@@ -131,22 +131,46 @@ def test_a_run_that_never_calls_the_tool_pins_only_the_latest_exchange() -> None
     assert pinned_exchanges([*plain_turn(1, "a"), *plain_turn(3, "b")]) == ["seq:r1:3"]
 
 
-def test_the_plan_stays_in_every_request_while_the_history_around_it_is_dropped(
+BUDGET = 600
+
+
+def long_tool_call(tool_use_id: str) -> JsonObject:
+    return {
+        "content": [
+            {
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": "search",
+                "input": {"q": tool_use_id},
+            }
+        ],
+        "stop_reason": "tool_use",
+    }
+
+
+def run_with_plan(
     tmp_path: Path,
     workspace: FilesystemWorkspace,
     registry: ToolRegistry,
     notices: Notices,
-) -> None:
+    *,
+    sibling: bool = False,
+) -> tuple[World, list[str]]:
+    """Twelve long tool turns around two plans, under a small context budget. With
+    `sibling`, the first plan is written in the same turn as a very long result."""
     ids = [f"t{k}" for k in range(12)]
-    calls = [use((i, "search")) for i in ids]
+    first = plan_call("plan1", "STEP ONE then STEP TWO. " + "detail " * 60)
+    if sibling:
+        first["content"] = [*first["content"], *long_tool_call("big")["content"]]  # type: ignore[misc]
     script: list[JsonObject | Exception] = [
-        plan_call("plan1", "STEP ONE then STEP TWO"),
-        *calls[:6],
+        first,
+        *[long_tool_call(i) for i in ids[:6]],
         plan_call("plan2", "NEW PLAN: finish"),
-        *calls[6:],
+        *[long_tool_call(i) for i in ids[6:]],
         reply("done"),
     ]
-    results = {i: ToolResult(True, f"{i} " + "data " * 80) for i in ids}
+    results = {i: ToolResult(True, f"{i} " + "data " * 80) for i in [*ids, "big"]}
+    results["big"] = ToolResult(True, "BIGRESULT " * 400)
     world = World(script=script, tool_results=results, notices=notices)
 
     def route(name: str, args: JsonObject) -> ToolResult:
@@ -164,16 +188,50 @@ def test_the_plan_stays_in_every_request_while_the_history_around_it_is_dropped(
     )
     tools = tuple(schema.to_json() for schema in registry.schemas())
     config = Config(model="m", system="be brief", tools=tools)
-    limits = CAPS.model_copy(update={"context_budget": 900, "max_turns": 100})
+    limits = CAPS.model_copy(update={"context_budget": BUDGET, "max_turns": 100})
     driver = Driver(config, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
     assert driver.run(Task("go", limits)).status == "finished"
-
     assert workspace.read(PLAN_FILE) == "NEW PLAN: finish\n"
-    texts = [json.dumps(request.messages) for request in world.requests]
-    # the latest plan is in every request that follows its call
-    assert all("STEP ONE" in text for text in texts[1:8])
-    assert all("NEW PLAN" in text for text in texts[8:])
-    # and the history around it really was thinned: the first result is long gone
-    assert "t0 data" not in texts[-1]
+    return world, [json.dumps(request.messages) for request in world.requests]
+
+
+def test_the_plan_stays_in_every_request_while_the_history_around_it_is_dropped(
+    tmp_path: Path,
+    workspace: FilesystemWorkspace,
+    registry: ToolRegistry,
+    notices: Notices,
+) -> None:
+    _, texts = run_with_plan(tmp_path, workspace, registry, notices)
+    assert all(
+        "STEP ONE" in text for text in texts[1:8]
+    )  # the plan while it is current
+    assert all("NEW PLAN" in text for text in texts[8:])  # then the second replaces it
+    assert "t0 data" not in texts[-1]  # the history around it really was thinned
     log = list(read_events(tmp_path / "s1.jsonl").events)
-    assert any(isinstance(e, ContextPacked) for e in log)  # history really was dropped
+    assert any(isinstance(e, ContextPacked) for e in log)
+
+
+def test_without_the_pin_the_same_run_loses_the_plan(
+    tmp_path: Path,
+    workspace: FilesystemWorkspace,
+    registry: ToolRegistry,
+    notices: Notices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check that the test above can fail: take the pin away and the first plan
+    is dropped with the rest of the old history."""
+    monkeypatch.setattr("loomcore.conversation.PLAN_TOOL", "not_the_plan_tool")
+    _, texts = run_with_plan(tmp_path, workspace, registry, notices)
+    assert not all("STEP ONE" in text for text in texts[1:8])
+
+
+def test_a_long_result_beside_the_plan_is_cleared_but_the_plan_stays(
+    tmp_path: Path,
+    workspace: FilesystemWorkspace,
+    registry: ToolRegistry,
+    notices: Notices,
+) -> None:
+    _, texts = run_with_plan(tmp_path, workspace, registry, notices, sibling=True)
+    assert "BIGRESULT" in texts[1]  # shown in full while it is the latest exchange
+    assert "BIGRESULT" not in texts[8]  # cleared since, the plan's exchange pinned
+    assert all("STEP ONE" in text for text in texts[1:8])  # the plan never left

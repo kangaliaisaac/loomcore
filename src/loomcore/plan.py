@@ -9,7 +9,7 @@ so the model always sees its latest plan, with nothing read from outside the log
 from loomcore.tools import ToolError, ToolRegistry
 from loomcore.workspace import Workspace
 
-PLAN_FILE = "plan.md"
+PLAN_FILE = ".loomcore/plan.md"  # not plan.md: a repository may have its own
 MAX_PLAN_CHARS = 8000  # a plan is pinned, so it must not be able to fill the window
 
 

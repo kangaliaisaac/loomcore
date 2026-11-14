@@ -39,6 +39,9 @@ class Item:
     messages: tuple[JsonObject, ...]
     pinned: bool = False
     cleared: Cleared | None = None  # None when there is no tool result to clear
+    # A pinned item (never dropped) whose tool results may still be cleared: the
+    # exchange that holds the plan, whose text is in a tool call's input, not a result.
+    may_clear: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,8 +66,14 @@ def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Pac
     """
     _check_split(candidates, pinned)
     base = sum(item.tokens for item in pinned)
+    kept_pinned = _in_order(pinned)
+    cleared_pinned: tuple[str, ...] = ()
+    if base > budget:  # a pinned item may still have results to clear (the plan's)
+        kept_pinned, cleared_pinned = _clear_oldest(kept_pinned, base, budget)
+        base = sum(item.tokens for item in kept_pinned)
     if base > budget:
         return Packed(_in_order(pinned), _in_order(candidates), base, budget, over=True)
+    pinned = kept_pinned
     total = base + sum(item.tokens for item in candidates)
     items, cleared = _clear_oldest(_in_order(candidates), total, budget)
     left = budget - base
@@ -79,7 +88,13 @@ def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Pac
     shown = tuple(
         item_id for item_id in cleared if item_id in kept
     )  # not a dropped one
-    return Packed(selected, _in_order(dropped), budget - left, budget, cleared=shown)
+    return Packed(
+        selected,
+        _in_order(dropped),
+        budget - left,
+        budget,
+        cleared=(*cleared_pinned, *shown),
+    )
 
 
 def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
@@ -125,7 +140,8 @@ def _smaller_form(item: Item) -> Cleared | None:
     """The cleared form, if the item may be cleared and it is smaller. A formatter
     of the caller's own need not promise that, so the check is here too."""
     form = item.cleared
-    usable = not item.pinned and form is not None and form.tokens < item.tokens
+    clearable = not item.pinned or item.may_clear
+    usable = clearable and form is not None and form.tokens < item.tokens
     return form if usable else None
 
 
@@ -147,7 +163,9 @@ def apply_cleared(
     from the log's own text, not read from `Item.cleared`, so what is shown does
     not depend on what a counter said when the item was built."""
     return [
-        _shown_cleared(item, count) if item.id in cleared and not item.pinned else item
+        _shown_cleared(item, count)
+        if item.id in cleared and (not item.pinned or item.may_clear)
+        else item
         for item in items
     ]
 

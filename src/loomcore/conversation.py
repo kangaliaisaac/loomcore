@@ -136,9 +136,10 @@ def _pin_latest(items: list[Item], plan_at: int | None) -> list[Item]:
     latest = max(
         (k for k, item in enumerate(items) if item.kind == "exchange"), default=None
     )
-    for k in (latest, plan_at):
-        if k is not None:
-            items[k] = replace(items[k], pinned=True)
+    if plan_at is not None:  # kept for good, but its results may still be cleared
+        items[plan_at] = replace(items[plan_at], pinned=True, may_clear=True)
+    if latest is not None:  # the latest exchange is shown in full
+        items[latest] = replace(items[latest], pinned=True, may_clear=False)
     return items
 
 

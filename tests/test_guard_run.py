@@ -350,3 +350,24 @@ def test_a_crash_before_the_request_lines_keeps_a_denial_after_them(
     after = order[order.index("guard_decision") + 1 :]
     assert after.index("tool_requested") < after.index("tool_completed")
     assert after.count("guard_decision") == 0  # the verdict was not written twice
+
+
+def test_a_grant_on_the_second_tripped_call_resets_the_repeat_count(
+    tmp_path: Path,
+) -> None:
+    """The ask rung's first tripped call is guard-denied, so the ladder asks about
+    the second; its grant must count as the ladder's answer."""
+    script: list[JsonObject | Exception] = [
+        use(("c1", "search"), q="x"),
+        use(("c2", "search"), q="x"),
+        use(("c3", "search"), q="x"),
+        use(("c4", "search"), ("c5", "search"), q="x"),
+        use(("c6", "search"), q="x"),
+        reply("done"),
+    ]
+    world = World(script=script)
+    drv = driver(world, tmp_path, Rule(("c4",), Deny("barred")))
+    paused = drv.run(REPEATING)
+    assert paused.status == "paused"
+    done = drv.resume(paused.ref, Decision(granted=True, by="me"))
+    assert (done.status, done.reason) == ("finished", "end_turn")

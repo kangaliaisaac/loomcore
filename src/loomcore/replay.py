@@ -251,7 +251,7 @@ def _could_have_started(state: RunState) -> tuple[str, ...]:
     held = (
         state.escalated is not None
         and state.escalated[0] >= ASK_RUNG
-        and not set(state.escalated[1]) <= guard_denied
+        and not (state.escalated[1] and set(state.escalated[1]) <= guard_denied)
     )
     denied = {i for i, granted, _ in state.decided if not granted}
     denied |= {i for i, _ in state.also_denied}

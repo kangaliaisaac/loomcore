@@ -333,6 +333,7 @@ class Run:
         """
         turn = self._turn_calls()
         events: list[Event] = []
+        verdicts = self._verdicts(turn, unrequested)
         if self.state.escalated is None:
             hashes = self.state.call_hashes
             written = len(turn) - len(unrequested)  # their hashes are the last ones
@@ -342,9 +343,13 @@ class Run:
                 self.limits.repeat_window,
                 self.limits.repeat_threshold,
             )
+            # A call a guard denied is never asked about: the escalation names the
+            # first tripped call that is not denied (False sorts first, order kept).
+            denied = {i for i, v, _ in verdicts if v == "deny"}
+            hits.sort(key=lambda k: turn[k][0] in denied)
             if hits:
                 events.append(self._escalate([turn[k][:3] for k in hits]))
-        events.extend(self._judge(turn, unrequested))
+        events.extend(self._judge(verdicts))
         wave_of = self._waves(turn, unrequested)
         for k, (tool_use_id, name, digest, args) in enumerate(turn):
             if tool_use_id in unrequested:
@@ -360,15 +365,14 @@ class Run:
                 )
         return events
 
-    def _judge(
+    def _verdicts(
         self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]
-    ) -> list[Event]:
-        """Run the pre guards on the calls not yet requested and write each verdict
-        that is not an allow. They are written before any `tool_requested` line, so
-        a crash in the batch leaves the verdicts of every judged call in the log; a
-        call with none is judged again, and the guards are pure."""
+    ) -> list[tuple[str, str, str]]:
+        """The pre guards' verdicts that are not an allow, as (id, verdict, reason),
+        for the calls not yet requested and not already judged. Pure: nothing is
+        written, so the escalation can be chosen with the denials known."""
         judged = {i for i, _, _ in self.state.guarded}
-        events: list[Event] = []
+        found: list[tuple[str, str, str]] = []
         for tool_use_id, name, digest, args in turn:
             if tool_use_id not in unrequested or tool_use_id in judged:
                 continue
@@ -377,19 +381,24 @@ class Run:
                 case Allow():
                     continue
                 case Deny(reason):
-                    verdict, why = "deny", reason
+                    found.append((tool_use_id, "deny", reason))
                 case Ask(question):
-                    verdict, why = "ask", question
-            events.append(
-                self.emit(
-                    "guard_decision",
-                    stage="pre",
-                    tool_use_id=tool_use_id,
-                    decision=verdict,
-                    reason=why,
-                )
+                    found.append((tool_use_id, "ask", question))
+        return found
+
+    def _judge(self, verdicts: list[tuple[str, str, str]]) -> list[Event]:
+        """Write the verdicts, before any `tool_requested` line: a crash in the batch
+        then leaves every verdict in the log (a call with none is judged again)."""
+        return [
+            self.emit(
+                "guard_decision",
+                stage="pre",
+                tool_use_id=tool_use_id,
+                decision=verdict,
+                reason=why,
             )
-        return events
+            for tool_use_id, verdict, why in verdicts
+        ]
 
     def _waves(
         self, turn: list[tuple[str, str, str, JsonObject]], unrequested: tuple[str, ...]

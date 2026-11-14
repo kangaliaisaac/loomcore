@@ -196,7 +196,7 @@ def _ask_rung(state: RunState, tripped: tuple[str, ...], why: str) -> list[Effec
     """A call a guard denied is failed, not asked about; a call a guard also asks
     about gets both questions, as one answer covers both."""
     askable = [i for i in tripped if i not in _guard_denied(state)]
-    if not askable:
+    if tripped and not askable:
         return [RunTool(i) for i in state.pending_tools]  # `_guard` fails them
     guard_asked = {i: q for i, v, q in state.guarded if v == "ask"}
     extra = f"; {guard_asked[askable[0]]}" if askable[0] in guard_asked else ""

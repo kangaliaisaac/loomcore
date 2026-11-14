@@ -102,7 +102,10 @@ def _guard(state: RunState, effects: list[Effect]) -> list[Effect]:
     with the guard's reason, before whatever else the effects do, and never runs;
     while any asked call has no answer the human is asked about the first and
     nothing runs."""
-    if not effects:
+    # A stop settles every pending call itself, and a turn not yet fully requested
+    # has no `tool_requested` lines to put a completion after.
+    leaves = any(isinstance(e, Stop | RequestCalls) for e in effects)
+    if not effects or leaves or not _all_requested(state):
         return effects
     denied = _guard_denied(state)
     failing = {e.tool_use_id for e in effects if isinstance(e, Fail)}

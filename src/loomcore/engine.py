@@ -592,6 +592,9 @@ class Run:
     def _settle_call(self, tool_use_id: str, stop: Stop) -> Event:
         ok = tool_use_id == stop.finish_id  # the finish call itself succeeded
         content = "finished" if ok else f"run ended: {stop.reason}"
+        # A call a guard denied keeps the reason the model should have seen.
+        denied = {i: why for i, v, why in self.state.guarded if v == "deny"}
+        content = denied.get(tool_use_id, content) if not ok else content
         return self._complete(tool_use_id, ok=ok, content=content)
 
     def _last_text(self) -> str:

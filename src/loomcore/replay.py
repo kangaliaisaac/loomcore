@@ -245,7 +245,14 @@ def _could_have_started(state: RunState) -> tuple[str, ...]:
     """
     requested = {i for i, _ in state.requested}
     # An ask rung holds the turn; so does stuck, which only completes its calls.
-    held = state.escalated is not None and state.escalated[0] >= ASK_RUNG
+    # A guard-denied call is never asked about, so a rung whose tripped calls are all
+    # denied holds nothing back.
+    guard_denied = {i for i, verdict, _ in state.guarded if verdict == "deny"}
+    held = (
+        state.escalated is not None
+        and state.escalated[0] >= ASK_RUNG
+        and not set(state.escalated[1]) <= guard_denied
+    )
     denied = {i for i, granted, _ in state.decided if not granted}
     denied |= {i for i, _ in state.also_denied}
     denied |= {i for i, verdict, _ in state.guarded if verdict == "deny"}

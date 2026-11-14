@@ -259,3 +259,94 @@ def test_the_human_sees_the_guards_question_with_the_ladders(tmp_path: Path) -> 
         paused.ref, Decision(granted=True, by="me")
     )
     assert again.status == "finished"  # one answer covers the call: not asked twice
+
+
+def test_a_guard_denied_call_at_the_stuck_rung_does_not_call_the_model_again(
+    tmp_path: Path,
+) -> None:
+    world = World(script=repeats(6))
+    rules = (Rule(("c4",), Deny("barred")), Rule(("c5",), Deny("barred again")))
+    result = driver(world, tmp_path, *rules).run(REPEATING)
+    assert (result.status, result.reason) == ("finished", "stuck")
+    assert len(world.requests) == 5  # nothing after the stuck turn
+    last = [
+        e
+        for e in read_events(tmp_path / "s1.jsonl").events
+        if isinstance(e, ToolCompleted) and e.tool_use_id == "c5"
+    ]
+    assert [e.content for e in last] == ["barred again"]
+
+
+def test_a_crash_after_a_denied_tripped_call_asks_about_the_other_write() -> None:
+    """The ask rung's only tripped call was denied by a guard, so nobody was asked and
+    the other call ran unprotected: a crash must still find it interrupted."""
+    rows = [
+        make("model_call", 0, message=use(("t", "search"), ("w", "write"))),
+        make(
+            "guard_decision",
+            1,
+            stage="pre",
+            tool_use_id="t",
+            decision="deny",
+            reason="no",
+        ),
+        make(
+            "escalation",
+            2,
+            rung=3,
+            reason="repeat",
+            tool_use_id="t",
+            call_hash="h",
+            tripped=["t"],
+        ),
+        make(
+            "tool_requested", 3, tool_use_id="t", name="search", input={}, call_hash="h"
+        ),
+        make(
+            "tool_requested", 4, tool_use_id="w", name="write", input={}, call_hash="i"
+        ),
+        make("tool_completed", 5, tool_use_id="t"),
+        make("run_resumed", 6, reason="crash"),
+    ]
+    state = RunState()
+    for row in rows:
+        state, _ = step(state, row)
+    assert state.interrupted == ("w",)
+
+
+def test_a_crash_before_the_request_lines_keeps_a_denial_after_them(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=Limits.model_validate(
+                {"run_cap": None, "month_cap": None}
+            ).to_json(),
+            config_digest=CONFIG.digest(),
+        ),
+        make("turn_started", 1, turn=1),
+        make("model_call", 2, message=use(("a", "write"), ("b", "read"))),
+        make(
+            "guard_decision",
+            3,
+            stage="pre",
+            tool_use_id="a",
+            decision="deny",
+            reason="no",
+        ),
+    ]
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for row in rows:
+            writer.append(row)
+    world = World(script=[reply("ok")])
+    result = driver(world, tmp_path, Rule(("a",), Deny("no"))).resume(run_ref())
+    assert result.status == "finished"
+    assert world.tool_calls == ["b"]
+    order = [e.kind for e in read_events(tmp_path / "s1.jsonl").events]
+    after = order[order.index("guard_decision") + 1 :]
+    assert after.index("tool_requested") < after.index("tool_completed")
+    assert after.count("guard_decision") == 0  # the verdict was not written twice

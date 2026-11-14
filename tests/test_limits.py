@@ -277,3 +277,30 @@ def test_a_paused_runs_idle_time_is_not_active_time() -> None:
     assert elapsed(replay(log), log[-1].timestamp + timedelta(hours=1)) == timedelta(
         seconds=30
     )
+
+
+def test_the_context_limits_are_off_by_default_and_old_limits_still_parse() -> None:
+    parsed = Limits.model_validate(CAPS)  # a log written before they existed
+    assert (parsed.context_budget, parsed.compact_at, parsed.compact_to) == (
+        None,
+        0.8,
+        0.6,
+    )
+    assert Limits.model_validate(parsed.to_json()) == parsed
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"context_budget": 0},
+        {"compact_at": 0},
+        {"compact_at": 1.5},
+        {"compact_to": 1.0},
+        {"compact_to": 0.0},
+        {"compact_at": 0.5, "compact_to": 0.5},  # no room gained by compacting
+        {"compact_at": 0.5, "compact_to": 0.7},
+    ],
+)
+def test_context_limits_that_make_no_sense_are_refused(bad: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        limits(**bad)

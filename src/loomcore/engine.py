@@ -230,6 +230,7 @@ class Run:
             messages=build_messages(root.task, self.chain),
             tools=self.config.tools,
             max_tokens=self.limits.max_output_tokens,
+            cache_prefix=self.config.cache_prefix,
         )
 
     def _month_to_date(self) -> Decimal:

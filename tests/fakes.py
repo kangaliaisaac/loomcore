@@ -1,5 +1,7 @@
 """Scripted ports for driving a run: a fake model, fake tools, a clock, a sleep."""
 
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -27,6 +29,11 @@ from loomcore.schedule import Access
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
 COST = Decimal("0.01")
+
+
+def fake_count(messages: Sequence[JsonObject]) -> int:
+    """A deterministic stand-in for the edge's counter (the serialised length / 4)."""
+    return len(json.dumps(messages, sort_keys=True)) // 4 + 1
 
 
 class ToolBugError(Exception):
@@ -162,6 +169,7 @@ class World:
             access=self.access,
             notices=self.notices,
             pricing=self.pricing,
+            count_tokens=fake_count,
             clock=self.clock,
             monotonic=lambda: 0.0,
             random=lambda: 0.5,

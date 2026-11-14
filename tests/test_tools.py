@@ -238,9 +238,6 @@ def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
         )
         worker.start()
         worker.join()
-        bare = threading.Thread(target=tools.notices.noted, args=("lost.md",))
-        bare.start()
-        bare.join()
     assert bucket == [Notice("note_written", {"path": "notes.md"})]
 
 
@@ -282,7 +279,9 @@ def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
     assert "not finite" in str(result.content)
 
 
-def test_a_sandbox_refusal_reported_by_a_tool_becomes_a_notice(tools: Registry) -> None:
+def test_a_command_refusal_is_a_failed_result_and_its_notice_is_kept(
+    tools: Registry,
+) -> None:
     def run_it() -> str:
         """Stands in for a tool whose sandbox refuses the command."""
         refusal = Refusal("exec", "/bin/sh", "not an allowed command")

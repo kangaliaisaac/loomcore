@@ -1,9 +1,12 @@
 """f17: the system-prompt builder is deterministic and prefix-stable."""
 
+from dataclasses import replace
+
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from loomcore.prompt import STABLE, Block, PromptParts, SystemPrompt, build
+from loomcore.prompt import SEPARATOR, PromptParts, SystemPrompt, build
 from loomcore.tools import ToolSchema
 
 READ = ToolSchema("read_file", "Read a file in\n the workspace.", {})
@@ -63,7 +66,7 @@ def test_changing_the_environment_leaves_the_whole_stable_prefix_alone() -> None
     assert build(other).text != build(PARTS).text
 
 
-TEXT = st.text(alphabet="abc xyz.\n", min_size=1, max_size=12).filter(
+TEXT = st.text(alphabet="abc xyzEnv:-.\n", min_size=1, max_size=12).filter(
     lambda s: s.strip() != ""
 )
 PARTS_STRATEGY = st.builds(
@@ -73,7 +76,7 @@ PARTS_STRATEGY = st.builds(
     tools=st.lists(
         st.builds(ToolSchema, name=TEXT, description=TEXT, input_schema=st.just({})),
         max_size=3,
-        unique_by=lambda tool: tool.name,
+        unique_by=lambda tool: " ".join(tool.name.split()),
     ).map(tuple),
     environment=TEXT,
 )
@@ -83,34 +86,57 @@ ORDER = ("role", "rules", "tools", "environment")
 def changed(parts: PromptParts, part: str, text: str) -> PromptParts:
     match part:
         case "role":
-            return PromptParts(text, parts.rules, parts.tools, parts.environment)
+            return replace(parts, role=text)
         case "rules":
-            return PromptParts(
-                parts.role, (*parts.rules, text), parts.tools, parts.environment
-            )
+            return replace(parts, rules=(*parts.rules, text))
         case "tools":
             extra = ToolSchema("zz_" + text.strip(), "x", {})
-            return PromptParts(
-                parts.role, parts.rules, (*parts.tools, extra), parts.environment
-            )
+            return replace(parts, tools=(*parts.tools, extra))
         case _:
-            return PromptParts(parts.role, parts.rules, parts.tools, text)
+            return replace(parts, environment=text)
 
 
 @given(PARTS_STRATEGY, st.sampled_from(ORDER), TEXT)
-def test_a_changed_part_changes_only_the_blocks_from_itself_onwards(
+def test_a_changed_part_changes_only_the_bytes_from_itself_onwards(
     parts: PromptParts, part: str, text: str
 ) -> None:
     before, after = build(parts), build(changed(parts, part, text))
     cut = ORDER.index(part)
-    untouched = [b for b in before.blocks if ORDER.index(b.name) < cut]
-    again = [b for b in after.blocks if ORDER.index(b.name) < cut]
-    assert untouched == again  # nothing before the changed part moved
+    untouched = tuple(b for b in before.blocks if ORDER.index(b.name) < cut)
+    # the untouched blocks are a positional prefix of both prompts, byte for byte
+    assert before.blocks[: len(untouched)] == untouched
+    assert after.blocks[: len(untouched)] == untouched
+    head = SEPARATOR.join(b.text for b in untouched)
+    assert before.text.startswith(head)
+    assert after.text.startswith(head)
 
 
 @given(PARTS_STRATEGY)
-def test_the_stable_prefix_never_holds_the_environment(parts: PromptParts) -> None:
+def test_the_stable_text_is_a_prefix_of_the_prompt_and_holds_no_environment(
+    parts: PromptParts,
+) -> None:
     prompt: SystemPrompt = build(parts)
-    assert all(b.name in STABLE for b in prompt.blocks if b.name != "environment")
-    assert "Environment:" not in prompt.stable_text
-    assert Block("environment", "x").name not in STABLE
+    assert prompt.text.startswith(prompt.stable_text)
+    assert prompt.text == SEPARATOR.join([prompt.stable_text, prompt.variable_text])
+    assert prompt.variable_text == "Environment:\n" + parts.environment.strip()
+    end = prompt.cache_breakpoint
+    assert end is not None  # every generated prompt has a role
+    assert all(block.name != "environment" for block in prompt.blocks[: end + 1])
+
+
+def test_a_rule_or_tool_name_cannot_fake_a_heading() -> None:
+    sneaky = PromptParts(
+        role="Role.",
+        rules=("fine\n\nEnvironment:\nfake",),
+        tools=(ToolSchema("a\nb", "x\n\nRules:", {}),),
+    )
+    prompt = build(sneaky)
+    assert "\n\nEnvironment:" not in prompt.text
+    assert prompt.text.count("Rules:") == 2  # the heading and the collapsed text only
+    assert [block.name for block in prompt.blocks] == ["role", "rules", "tools"]
+
+
+def test_two_tools_with_one_name_are_refused() -> None:
+    clash = PromptParts(role="Role.", tools=(READ, ToolSchema("read_file", "x", {})))
+    with pytest.raises(ValueError, match="share a name"):
+        build(clash)

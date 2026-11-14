@@ -13,7 +13,9 @@ from typing import Literal
 from loomcore.tools import ToolSchema
 
 BlockName = Literal["role", "rules", "tools", "environment"]
-STABLE: frozenset[BlockName] = frozenset({"role", "rules", "tools"})
+STABLE: frozenset[BlockName] = frozenset(
+    {"role", "rules", "tools"}
+)  # before the breakpoint
 SEPARATOR = "\n\n"
 
 
@@ -49,17 +51,34 @@ class SystemPrompt:
 
     @property
     def stable_text(self) -> str:
-        """The prefix up to and including the cache breakpoint."""
+        """The prefix up to and including the cache breakpoint: what goes in
+        `Config.system`, so the whole `system` string of a request is the part the
+        model port caches."""
         end = self.cache_breakpoint
-        kept = self.blocks if end is None else self.blocks[: end + 1]
-        return SEPARATOR.join(block.text for block in kept if block.name in STABLE)
+        kept = () if end is None else self.blocks[: end + 1]
+        return SEPARATOR.join(block.text for block in kept)
+
+    @property
+    def variable_text(self) -> str:
+        """What follows the breakpoint (the environment): added by the model port
+        after the cached prefix, outside the configuration digest."""
+        end = self.cache_breakpoint
+        rest = self.blocks if end is None else self.blocks[end + 1 :]
+        return SEPARATOR.join(block.text for block in rest)
 
 
 def build(parts: PromptParts) -> SystemPrompt:
-    """Assemble the parts in their fixed order. An empty part leaves out its block."""
+    """Assemble the parts in their fixed order. An empty part leaves out its block.
+
+    Raises `ValueError` for two tools with one name: their order would decide the
+    bytes, and a model cannot tell them apart either.
+    """
+    names = [tool.name for tool in parts.tools]
+    if len(set(names)) != len(names):
+        raise ValueError("two tools share a name; a prompt lists each tool once")
     candidates = (
         Block("role", parts.role.strip()),
-        Block("rules", _list("Rules:", (rule.strip() for rule in parts.rules))),
+        Block("rules", _list("Rules:", (_line(rule) for rule in parts.rules))),
         Block("tools", _tool_docs(parts.tools)),
         Block("environment", _section("Environment:", parts.environment)),
     )
@@ -68,8 +87,13 @@ def build(parts: PromptParts) -> SystemPrompt:
 
 def _tool_docs(tools: Iterable[ToolSchema]) -> str:
     # By name, so the order tools were registered in cannot change the bytes.
-    docs = (f"{t.name}: {' '.join(t.description.split())}" for t in _by_name(tools))
+    docs = (f"{_line(t.name)}: {_line(t.description)}" for t in _by_name(tools))
     return _list("Tools:", docs)
+
+
+def _line(text: str) -> str:
+    """One line: no newline can fake a heading or a block boundary."""
+    return " ".join(text.split())
 
 
 def _by_name(tools: Iterable[ToolSchema]) -> list[ToolSchema]:

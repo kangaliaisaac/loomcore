@@ -132,24 +132,28 @@ class ToolRegistry:
         return _invoke(name, tool, kwargs)
 
 
+_FIXABLE = (ToolError, PathRefusedError, CommandRefusedError, UnicodeError, OSError)
+
+
 def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         value = tool.fn(**kwargs)
-    except (ToolError, PathRefusedError, CommandRefusedError) as error:
-        # Written for the model: what was asked and why it cannot be done.
-        return ToolResult(False, f"{name} failed: {error}")
-    except UnicodeError:
-        # A file that is not UTF-8 text (a binary file) or text that cannot be
-        # written as such: the model can pick another file or other content.
-        return ToolResult(False, f"{name} failed: the content is not valid UTF-8 text")
-    except OSError as error:
-        # Not str(error): it names the absolute host path, which does not belong
-        # in the log or in front of the model.
-        return ToolResult(False, f"{name} failed: {error.strerror or 'I/O error'}")
+    except _FIXABLE as error:
+        return ToolResult(False, f"{name} failed: {_fixable(error)}")
     try:
         return ToolResult(True, _JSON.validate_python(value))
     except ValidationError:
         return ToolResult(False, f"{name} returned something that is not JSON.")
+
+
+def _fixable(error: Exception) -> str:
+    """What the model is told. An `OSError`'s text names the absolute host path, so
+    only its `strerror` is used."""
+    if isinstance(error, UnicodeError):  # a binary file, or text that cannot be written
+        return "the content is not valid UTF-8 text"
+    if isinstance(error, OSError):
+        return error.strerror or "I/O error"
+    return str(error)  # written for the model: what was asked and why not
 
 
 def _build(

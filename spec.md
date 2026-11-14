@@ -414,23 +414,30 @@ Tests: a failing verifier prevents `finished` and feeds back; a passing one ends
 
 ```python
 class Guard(Protocol):                                    # stage "pre": before the tool runs
-    def check(
-        self, 
-        request: ToolRequest, 
-        state: RunState) -> Allow | Deny | Ask: ...
+    def check(self, request: ToolRequest, state: RunState) -> Allow | Deny | Ask: ...
 
 class PostGuard(Protocol):                                # stage "post": on the result, before it is logged
-    def check(
-        self, 
-        request: ToolRequest, 
-        result: ToolResult, 
-        state: RunState) -> Allow | Deny | Redact: ...
+    def check(self, request: ToolRequest, result: ToolResult, state: RunState) -> Allow | Deny | Redact: ...
+
+@dataclass(frozen=True)
+class Guards:                                             # what the driver is given
+    pre: tuple[Guard, ...] = ()
+    post: tuple[PostGuard, ...] = ()
+
+def run_pre(guards: Guards, request: ToolRequest, state: RunState) -> Allow | Deny | Ask: ...
+def run_post(guards: Guards, request: ToolRequest, result: ToolResult, state: RunState) -> Screened: ...
 ```
 
-The decisions are frozen dataclasses with a defined payload:
+The request and the decisions are frozen dataclasses with a defined payload:
 
 ```python
 @dataclass(frozen=True)
+class ToolRequest:               # the call a guard judges
+    tool_use_id: str
+    name: str
+    input: JsonObject
+    call_hash: str
+
 class Allow: ...
 
 @dataclass(frozen=True)
@@ -439,22 +446,30 @@ class Deny:
 
 @dataclass(frozen=True)
 class Ask:
-    question: str                # logged on approval_requested
+    question: str                # pre guards only; logged on approval_requested (and as the reason of the guard_decision)
 
 @dataclass(frozen=True)
-class Decision:                  # what `resume` receives for an approval; logged on approval_granted / approval_denied
-    approved: bool
-    by: str
-    note: str = ""
-
-@dataclass(frozen=True)
-class Redact:
+class Redact:                    # post guards only
     content: str                 # replaces the result's content, in the log and for the model
     reason: str                  # what was removed and why, with no secret in it; logged on guard_decision
+
+@dataclass(frozen=True)
+class Screened:                  # what `run_post` returns
+    result: ToolResult           # what to complete the call with
+    decisions: tuple[Deny | Redact, ...]   # each decision that was not an Allow, in guard order
 ```
 
-The driver runs both pipelines when it performs a `RunTool` effect: the pre guards before the tool, the post guards on its result. A denial's completion is that effect's result, so `step` stays pure and nothing in it needs to know where the guards run. `Redact` is only valid from a post guard, and it continues the pipeline with the replaced content. The driver logs `content`, never the original, and the original is dropped. This is the one deliberate exception to "nothing hidden" in the intent: the log holds the redacted content, not the secret. If several post guards redact in turn, each sees the previous one's output. A post `Deny` replaces the result with an `ok=False` observation that says why. A post guard cannot `Ask`, because the tool has already run. Guards form two pipelines of pure checks run in order, stopping at the first `Deny` or `Ask` (`pre`, before a tool runs) or the first `Deny` (`post`, on its output: for example a secret in a result, which `Redact` removes, or an oversized one). Tool results are untrusted data, wrapped and marked as data in the prompt. `Ask` appends `approval_requested`, the run pauses (`run_paused`, `awaiting_approval`), and `resume(ref, decision)` appends `approval_granted` or `approval_denied` and continues from the log. The pause sits between choosing a tool and running it, so nothing executes before approval. Budget enforcement is not a guard: it is the pure `check_limits` over the state in section 1. Emits `guard_decision` and the approval events.
-Tests: a deny stops the tool and is logged; a post guard redacts a secret and the raw result never reaches the log or the model; an ask pauses the run; kill the process, resume, and the run continues; `check_limits` stops at the cap boundary with exact decimal arithmetic, counts a run's own spend, and prices the worst case.
+`Decision` (in `ports.py`) is what `resume` receives for an approval: `granted: bool`, `by: str`, `note: str = ""`; it is logged on `approval_granted` / `approval_denied`. (The spec called the flag `approved`; the code and its callers say `granted`, so the spec follows.)
+
+**The pipelines are pure and ordered.** `run_pre` runs the pre guards in order and returns the first `Deny` or `Ask`, else `Allow`; later guards are not asked. `run_post` runs the post guards in order, each seeing the result the one before left: a `Redact` replaces the result's `content` with its `content` (the result's `ok` and `cached` stay) and the pipeline goes on, and the first `Deny` replaces the result with an `ok=False` observation holding its reason and stops. `Redact` is only valid from a post guard and `Ask` only from a pre guard: a guard that returns a decision its stage does not allow raises `GuardError`, which is a bug in the guard and stops the run, as a tool bug does (a guard that raises is the same). Neither function writes anything: the caller logs what they return. A guard is a pure check over the request, the result and the state, so a hand-written loop (f24) calls the same two functions.
+
+**What is logged.** One `guard_decision` for each decision that is not `Allow` (an allow changes nothing and would be a line for every guard and call); for an `ask` the `reason` is the question, so a resume can ask it again. The driver logs `content`, never the original, and the original is dropped. This is the one deliberate exception to "nothing hidden" in the intent: the log holds the redacted content, not the secret. The raw result still exists in memory and in the registry's cache (§3.2), which is not the log. Budget enforcement is not a guard: it is the pure `check_limits` over the state in section 1. A `finish` call is never run, so no guard sees it.
+
+**Not built in this version:** "tool results are untrusted data, wrapped and marked as data in the prompt" is a rule for how a result is rendered into the messages (`conversation.py`), not a guard, and is named here so it can be built.
+
+How the driver uses the pipelines in a run (the pre guards judging the whole turn before any call runs, an `Ask` pausing the run with `run_paused` / `awaiting_approval` and `resume(ref, decision)` appending `approval_granted` or `approval_denied`, the post guards on each result before `tool_completed`, and the `Driver(..., guards=)` argument) is the next steps of this section; this step is the pure part.
+Emits `guard_decision` and the approval events.
+Tests: the pre pipeline returns the first `Deny` or `Ask` in guard order and nothing after it is asked; the post pipeline redacts in turn with each guard seeing the one before, a `Deny` replaces the result and stops, an allow-only pipeline returns the result untouched, and a decision of the wrong stage is a `GuardError`; with the driver: a deny stops the tool and is logged; a post guard redacts a secret and the raw result never reaches the log or the model; an ask pauses the run; kill the process, resume, and the run continues; `check_limits` stops at the cap boundary with exact decimal arithmetic, counts a run's own spend, and prices the worst case.
 
 ### 3.8 Observability (`observability/`)
 

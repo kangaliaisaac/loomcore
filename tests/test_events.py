@@ -125,7 +125,7 @@ def test_tool_requested_carries_its_wave_and_an_older_log_has_none() -> None:
 def test_context_compacted_names_the_items_it_cleared_and_an_older_line_has_none() -> (
     None
 ):
-    named = make("context_compacted", 4, cleared=["seq:1", "seq:3"])
+    named = make("context_compacted", 4, cleared=["seq:r1:1", "seq:r1:3"])
     assert isinstance(named, ContextCompacted)
     assert parse_event(dump_event(named)) == named
     older = make("context_compacted", 4)

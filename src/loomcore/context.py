@@ -47,7 +47,7 @@ class Packed:
     tokens: int
     budget: int
     over: bool = False  # the pinned items alone do not fit in the budget
-    cleared: tuple[str, ...] = ()  # ids of the items `compact` cleared
+    cleared: tuple[str, ...] = ()  # ids cleared in this window, by `pack` or `compact`
 
 
 def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Packed:
@@ -75,7 +75,10 @@ def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Pac
     kept = {item.id for item in chosen}
     dropped = [item for item in items if item.id not in kept]
     selected = _in_order([*pinned, *chosen])
-    return Packed(selected, _in_order(dropped), budget - left, budget, cleared=cleared)
+    shown = tuple(
+        item_id for item_id in cleared if item_id in kept
+    )  # not a dropped one
+    return Packed(selected, _in_order(dropped), budget - left, budget, cleared=shown)
 
 
 def compact(packed: Packed, compact_at: float, compact_to: float) -> Packed:
@@ -107,13 +110,22 @@ def _clear_oldest(
     out: list[Item] = []
     cleared: list[str] = []
     for item in items:
-        if total > target and not item.pinned and item.cleared is not None:
-            total -= item.tokens - item.cleared.tokens
+        form = _smaller_form(item)
+        if form is not None and total > target:
+            total -= item.tokens - form.tokens
             cleared.append(item.id)
-            out.append(_as_cleared(item, item.cleared))
+            out.append(_as_cleared(item, form))
         else:
             out.append(item)
     return tuple(out), tuple(cleared)
+
+
+def _smaller_form(item: Item) -> Cleared | None:
+    """The cleared form, if the item may be cleared and it is smaller. A formatter
+    of the caller's own need not promise that, so the check is here too."""
+    form = item.cleared
+    usable = not item.pinned and form is not None and form.tokens < item.tokens
+    return form if usable else None
 
 
 def _as_cleared(item: Item, cleared: Cleared) -> Item:

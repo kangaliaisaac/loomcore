@@ -176,6 +176,8 @@ def test_compaction_keeps_the_books_straight_and_is_idempotent(
     once = compact(pack(candidates, budget, pinned), 0.8, 0.6)
     assert once.tokens == sum(i.tokens for i in once.selected)
     assert compact(once, 0.8, 0.6) == once
+    if not once.over:
+        assert once.tokens <= budget  # clearing never makes a window bigger
     for cleared_id in once.cleared:
         assert cleared_id not in ids(pinned)
 
@@ -237,9 +239,10 @@ def test_clearing_comes_before_dropping_when_the_whole_window_is_over_budget() -
     assert packed.dropped == ()  # 900 > 700: but clearing the oldest saves enough
     assert packed.cleared == ("i0",)
     assert packed.tokens == 610
-    tight = pack(items, 400, pinned)  # clearing both still leaves 320, then a drop
-    assert tight.cleared == ("i0", "i1")
-    assert tight.tokens <= 400
+    tight = pack(items, 315, pinned)  # both cleared still leave 320: a drop follows
+    assert tight.cleared == ("i1",)  # i0 was cleared too, but it was then dropped
+    assert ids(tight.dropped) == ["i0"]
+    assert tight.tokens <= 315
 
 
 def test_a_window_that_is_over_clears_and_drops_nothing_of_its_own() -> None:
@@ -259,3 +262,11 @@ def test_pack_refuses_items_the_caller_split_wrongly() -> None:
         pack([a], 10, [a])
     with pytest.raises(ValueError, match="pinned item is among the candidates"):
         pack([replace(b, pinned=True)], 10, [])
+
+
+def test_a_cleared_form_that_is_not_smaller_is_never_used() -> None:
+    bigger = item(0, 0, cleared_tokens=10)  # a formatter that got it wrong
+    packed = pack([bigger], 5, [])
+    assert packed.cleared == ()
+    assert packed.tokens == 0
+    assert compact(packed, 0.0, 0.0) is packed

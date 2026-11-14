@@ -1,18 +1,14 @@
 """f16, part 2: the window is the store applied to the log, turn after turn."""
 
 import json
-from collections.abc import Sequence
 
 from factories import calling, make
+from fakes import fake_count
 
 from loomcore.conversation import build_messages
-from loomcore.events import Event, JsonObject
+from loomcore.events import Event
 from loomcore.replay import run_events
 from loomcore.window import Budget, Carried, Window, build_window
-
-
-def size(messages: Sequence[JsonObject]) -> int:
-    return len(json.dumps(messages, sort_keys=True)) // 4 + 1
 
 
 def history(
@@ -39,7 +35,7 @@ def history(
 
 def window(events: list[Event], carried: Carried, tokens: int | None = 600) -> Window:
     budget = None if tokens is None else Budget(tokens, 0.8, 0.6)
-    return build_window("go", events, carried, budget, size)
+    return build_window("go", events, carried, budget, fake_count)
 
 
 def test_with_no_budget_the_window_is_the_whole_history() -> None:
@@ -99,13 +95,13 @@ def test_a_resume_starts_from_the_carried_sets_and_finds_the_same_window() -> No
     assert (again.newly_dropped, again.newly_cleared) == ((), ())
 
 
-def test_an_over_window_is_sent_as_it_is_and_records_nothing() -> None:
+def test_an_over_window_is_sent_unpacked_and_records_nothing() -> None:
     log = history(4)
     out = window(log, Carried(), tokens=5)
     assert out.packed is not None
     assert out.packed.over
     assert (out.newly_dropped, out.newly_cleared) == ((), ())
-    assert len(out.messages) == 3  # the task and the latest exchange, nothing else
+    assert out.messages == build_messages("go", log)  # sent whole, not cut down
 
 
 def test_a_fork_starts_without_what_its_parent_had_dropped() -> None:

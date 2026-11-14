@@ -120,6 +120,7 @@ class World:
     sleeps: list[float] = field(default_factory=list)
     tool_seconds: float = 0  # how long each tool call takes on the fake clock
     crash_on_call: int | None = None  # the Nth tool call kills the run
+    crash_on_model: int | None = None  # the Nth model call kills the run
     calls_made: int = 0
     pricing: FakePricing = field(default_factory=FakePricing)
     clock: Clock = field(default_factory=Clock)
@@ -127,6 +128,8 @@ class World:
 
     def model(self, request: ModelRequest) -> JsonObject:
         self.requests.append(request)
+        if len(self.requests) == self.crash_on_model:
+            raise Crash
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step

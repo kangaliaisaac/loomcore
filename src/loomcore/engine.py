@@ -5,6 +5,7 @@ the state, and performs the effects `step` returns until the run finishes or
 pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Sequence
@@ -64,6 +65,11 @@ class ResumeRefusedError(Exception):
     """`resume` was called in a state it cannot continue from; the message says how."""
 
 
+class ContextBudgetError(Exception):
+    """`context_budget` leaves no room for the history: the system prompt and the
+    tool schemas alone fill it."""
+
+
 class LoopStalledError(Exception):
     """Every effect was performed, yet the run is neither finished nor paused."""
 
@@ -81,7 +87,7 @@ class Run:
     switch_to: Config | None = None  # the configuration the switch rung changes to
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
-    counted: dict[str, int] = field(default_factory=dict)  # token counts, by text
+    counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
 
     def emit(self, kind: str, **fields: object) -> Event:
         event = make_event(
@@ -175,7 +181,10 @@ class Run:
         return outcome
 
     def _call_model(self) -> list[Event] | RunResult:
-        request = self._request()
+        try:
+            request = self._request()
+        except ContextBudgetError as error:
+            return self._finish(Stop("error", str(error)))
         reached = check_limits(
             self.state,
             self.limits,
@@ -252,12 +261,19 @@ class Run:
         fixed = self._count([{"role": "user", "content": self.config.system}])
         tools = json.dumps(list(self.config.tools), sort_keys=True)
         fixed += self._count([{"role": "user", "content": tools}])
-        left = max(self.limits.context_budget - fixed, 0)
+        left = self.limits.context_budget - fixed
+        if left <= 0:
+            raise ContextBudgetError(
+                f"context_budget {self.limits.context_budget} leaves no room: the "
+                f"system prompt and the tool schemas are {fixed} tokens; raise the "
+                "budget or shorten them"
+            )
         return Budget(left, self.limits.compact_at, self.limits.compact_to)
 
     def _count(self, messages: Sequence[JsonObject]) -> int:
         """The edge's token count, asked once for each distinct text."""
-        key = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+        text = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(text.encode()).hexdigest()  # not the text: it is large
         if key not in self.counted:
             self.counted[key] = self.ports.count_tokens(messages)
         return self.counted[key]

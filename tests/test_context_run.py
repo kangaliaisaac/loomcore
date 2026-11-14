@@ -163,10 +163,68 @@ def test_the_cache_prefix_of_the_configuration_reaches_the_request(
     assert {r.cache_prefix for r in plain.requests} == {None}
 
 
-def test_pinned_items_that_do_not_fit_are_sent_as_they_are_and_record_nothing(
+def fixed_tokens() -> int:
+    """What the driver counts for the system prompt and the tool schemas."""
+    return fake_count([{"role": "user", "content": CONFIG.system}]) + fake_count(
+        [{"role": "user", "content": json.dumps(list(CONFIG.tools), sort_keys=True)}]
+    )
+
+
+def test_a_window_that_cannot_fit_its_pinned_items_is_sent_whole_and_records_nothing(
     tmp_path: Path,
 ) -> None:
-    world, task = long_run(context_budget=20)
+    world, task = long_run(context_budget=fixed_tokens() + 5)  # 5 left for history
     log = finish(world, task, tmp_path)
     assert context_events(log) == []
-    assert len(world.requests) == TURNS + 1
+    for request, start in zip(world.requests, turn_starts(log), strict=True):
+        assert request.messages == build_messages("go", log[:start])  # nothing cut
+
+
+def test_a_budget_the_system_prompt_and_tools_already_fill_ends_the_run_with_the_reason(
+    tmp_path: Path,
+) -> None:
+    world, task = long_run(context_budget=fixed_tokens())
+    result = world.driver(tmp_path).run(task)
+    assert result.reason == "error"
+    assert "context_budget" in str(result.result)
+    assert "no room" in str(result.result)
+    assert world.requests == []  # nothing was sent
+
+
+def assert_recorded_once(log: list[Event]) -> None:
+    """An id is dropped once and cleared once. (A cleared item may be dropped later,
+    so the two lists are separate.)"""
+    dropped = [i for e in log if isinstance(e, ContextPacked) for i in e.dropped]
+    cleared = [i for e in log if isinstance(e, ContextCompacted) for i in e.cleared]
+    assert dropped
+    assert len(dropped) == len(set(dropped))
+    assert len(cleared) == len(set(cleared))
+
+
+def test_a_crash_before_the_model_call_leaves_each_id_in_exactly_one_context_event(
+    tmp_path: Path,
+) -> None:
+    world, task = long_run(context_budget=BUDGET)
+    world.crash_on_model = 10  # context events are written, then the process dies
+    driver = world.driver(tmp_path)
+    with pytest.raises(Crash):
+        driver.run(task)
+    crashed = list(read_events(tmp_path / "s1.jsonl").events)
+    assert context_events(crashed)  # the window had already been recorded
+    assert driver.resume(run_ref()).status == "finished"
+    log = list(read_events(tmp_path / "s1.jsonl").events)
+    assert_recorded_once(log)
+
+
+def test_a_limit_pause_after_context_events_resumes_without_recording_them_again(
+    tmp_path: Path,
+) -> None:
+    world, task = long_run(context_budget=BUDGET, max_turns=10)
+    driver = world.driver(tmp_path)
+    paused = driver.run(task)
+    assert (paused.status, paused.reason) == ("paused", "limit")
+    assert context_events(list(read_events(tmp_path / "s1.jsonl").events))
+    more = task.limits.model_copy(update={"max_turns": 100})
+    assert driver.resume(paused.ref, limits=more).status == "finished"
+    log = list(read_events(tmp_path / "s1.jsonl").events)
+    assert_recorded_once(log)

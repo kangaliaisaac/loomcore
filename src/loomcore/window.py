@@ -18,7 +18,7 @@ from loomcore.context import (
     compact,
     pack,
 )
-from loomcore.conversation import exchanges, render
+from loomcore.conversation import build_messages, exchanges, recount, render
 from loomcore.events import Event, JsonObject
 
 
@@ -44,13 +44,9 @@ class Budget:
 class Window:
     messages: list[JsonObject]
     packed: Packed | None  # None when there is no budget
-    tokens_before: int  # the window's tokens before any clearing of this turn
+    tokens_before: int  # all it considered, before this turn's dropping and clearing
     newly_dropped: tuple[str, ...]  # to record in `context_packed.dropped`
     newly_cleared: tuple[str, ...]  # to record in `context_compacted.cleared`
-
-
-def _no_count(messages: Sequence[JsonObject]) -> int:
-    return 0
 
 
 def build_window(
@@ -60,21 +56,26 @@ def build_window(
     budget: Budget | None,
     count: Counter,
 ) -> Window:
-    """The messages for the next request. With no budget it is the whole history. An
-    `over` window (the pinned items alone exceed the budget) is sent as it is and
-    records nothing: it is one turn's failure, not a decision about the history."""
-    if budget is None:  # nothing is packed, so nothing is counted either
-        return Window(render(exchanges(task, events, _no_count)), None, 0, (), ())
-    items = exchanges(task, events, count)
+    """The messages for the next request. With no budget it is the whole history,
+    and nothing is counted. An `over` window (the pinned items alone exceed the
+    budget) is sent unpacked, as earlier windows left it, and records nothing: the
+    log still describes what was sent, and the provider's error is the backstop."""
+    if budget is None:
+        return Window(build_messages(task, events), None, 0, (), ())
+    # Items are built without counting so the dropped ones are never counted.
+    items = exchanges(task, events, _no_count)
     kept = [item for item in items if item.id not in carried.dropped]
-    shown = apply_cleared(kept, carried.cleared, count)
+    shown = recount(apply_cleared(kept, carried.cleared, count), count)
     before = sum(item.tokens for item in shown)
     pinned = [item for item in shown if item.pinned]
     candidates = [item for item in shown if not item.pinned]
     packed = pack(candidates, budget.tokens, pinned)
-    packed = compact(packed, budget.compact_at, budget.compact_to)
-    messages = render(packed.selected)
     if packed.over:
-        return Window(messages, packed, before, (), ())
+        return Window(render(shown), packed, before, (), ())
+    packed = compact(packed, budget.compact_at, budget.compact_to)
     dropped = tuple(item.id for item in packed.dropped)
-    return Window(messages, packed, before, dropped, packed.cleared)
+    return Window(render(packed.selected), packed, before, dropped, packed.cleared)
+
+
+def _no_count(messages: Sequence[JsonObject]) -> int:
+    return 0

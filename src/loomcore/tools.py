@@ -184,9 +184,22 @@ class ToolRegistry:
         # A daemon, so an abandoned call that never returns cannot keep the process
         # from exiting.
         threading.Thread(target=work, name=f"tool-{name}", daemon=True).start()
-        _, late = wait([future], timeout=self._timeout)
-        if not late:
-            return future.result()  # a bug in the tool is raised here, not hidden
+        settled = False
+        try:
+            _, late = wait([future], timeout=self._timeout)
+            settled = not late
+        finally:
+            if not settled:  # a timeout, or a signal that reached the caller's wait
+                self._abandon(name, tool, future)
+        if future.done():  # it may have finished as the timeout was decided
+            return future.result()
+        return ToolResult(
+            False,
+            f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
+            "still be running. Try a smaller input or another approach.",
+        )
+
+    def _abandon(self, name: str, tool: _Tool, future: Future[ToolResult]) -> None:
         writes = (
             not tool.read_only
         )  # `execute` bumps now; `_ended` bumps for its return
@@ -194,11 +207,6 @@ class ToolRegistry:
             with self._counting:
                 self._abandoned += 1
         future.add_done_callback(functools.partial(self._ended, name, writes))
-        return ToolResult(
-            False,
-            f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
-            "still be running. Try a smaller input or another approach.",
-        )
 
     def _ended(self, name: str, writes: bool, done: Future[ToolResult]) -> None:
         """An abandoned call has finally ended. A bug it raised now has nobody to

@@ -300,8 +300,9 @@ class Run:
                 ms = self._since(started)  # before the log writes below
         finally:
             # Whether the tool returned or broke, what it caused is logged, and a
-            # refusal precedes the call's completion. The bucket is closed here, so
-            # a notice that arrives later is warned about, not lost.
+            # refusal precedes the call's completion. The bucket was closed when the
+            # block exited, so a notice that arrives later is not logged, only
+            # warned about (spec 3.2).
             caused = self._emit_notices(tool_use_id, bucket.snapshot())
         content = _annotated(result.content, note)
         done = self._complete(

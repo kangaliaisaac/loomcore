@@ -36,32 +36,36 @@ class Notice:
     fields: JsonObject
 
 
-class Bucket(list[Notice]):
+class Bucket:
     """What one tool call caused. It is closed when the call's block ends, so a
     notice that arrives after that (from a call abandoned on timeout) is known to
     be late. Adding and closing share a lock: a notice is either in the snapshot
-    taken at close or refused as late, never neither."""
+    taken after the close or refused as late, never neither."""
 
     def __init__(self) -> None:
-        super().__init__()
+        self._items: list[Notice] = []
         self._lock = threading.Lock()
-        self.closed = False
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def add(self, notice: Notice) -> bool:
         with self._lock:
-            if self.closed:
+            if self._closed:
                 return False
-            self.append(notice)
+            self._items.append(notice)
             return True
 
     def close(self) -> None:
         """Refuse any later notice."""
         with self._lock:
-            self.closed = True
+            self._closed = True
 
     def snapshot(self) -> tuple[Notice, ...]:
         with self._lock:
-            return tuple(self)
+            return tuple(self._items)
 
 
 class Notices:

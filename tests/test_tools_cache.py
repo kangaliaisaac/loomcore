@@ -258,7 +258,7 @@ def test_a_late_notice_from_an_abandoned_call_is_warned_about_not_given_to_anoth
             wait_for_generation(workspace, 3)  # its write, the abandon, the return
     finally:
         release.set()
-    assert (list(first), list(second)) == ([], [])
+    assert (first.snapshot(), second.snapshot()) == ((), ())
     assert "arrived after its tool call ended" in caplog.text
 
 
@@ -343,3 +343,31 @@ def test_a_bug_raised_after_the_call_was_abandoned_is_reported(
     finally:
         release.set()
     assert "RuntimeError('a')" in caplog.text
+
+
+def test_a_signal_that_reaches_the_callers_wait_still_abandons_the_call_properly(
+    workspace: FilesystemWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+
+    def slow_write(key: str) -> str:
+        """Writes, eventually."""
+        release.wait()
+        return key
+
+    def interrupted(*_: object, **__: object) -> tuple[set[object], set[object]]:
+        raise KeyboardInterrupt
+
+    tools = ToolRegistry(workspace, timeout=5)
+    tools.register(slow_write, writes=("k",))
+    monkeypatch.setattr("loomcore.tools.wait", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tools.execute("slow_write", {"key": "a"})
+        monkeypatch.undo()
+        assert workspace.generation == 1  # bumped by execute
+        release.set()
+        wait_for_generation(workspace, 2)  # and again when the worker really ended
+        assert workspace.generation == 2
+    finally:
+        release.set()

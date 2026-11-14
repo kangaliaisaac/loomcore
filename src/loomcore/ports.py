@@ -62,9 +62,19 @@ class ModelCallError(Exception):
 
 
 @dataclass(frozen=True)
+class Notice:
+    """An event a tool call caused (`sandbox_denied`, `note_written`). The registry
+    only reports it; the driver adds the call's `tool_use_id` and writes it."""
+
+    kind: Literal["sandbox_denied", "note_written"]
+    fields: JsonObject
+
+
+@dataclass(frozen=True)
 class ToolResult:
     ok: bool
     content: JsonValue
+    notices: tuple[Notice, ...] = ()
 
 
 class Pricing(Protocol):

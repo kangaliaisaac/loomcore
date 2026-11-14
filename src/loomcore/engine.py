@@ -293,11 +293,16 @@ class Run:
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
         result = self.ports.tool(name, args)
+        # What the call caused is written first, so a refusal precedes its completion.
+        caused = [
+            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
+            for notice in result.notices
+        ]
         content = _annotated(result.content, note)
         done = self._complete(
             tool_use_id, ok=result.ok, content=content, ms=self._since(started)
         )
-        return [done]
+        return [*caused, done]
 
     def _complete(
         self, tool_use_id: str, *, ok: bool, content: JsonValue, ms: int = 0

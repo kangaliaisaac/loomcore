@@ -18,7 +18,9 @@ from loomcore.events import (
     Event,
     ForkOrigin,
     JsonObject,
+    NoteWritten,
     RunFinished,
+    SandboxDenied,
     ToolCompleted,
 )
 from loomcore.limits import Limits
@@ -28,7 +30,7 @@ from loomcore.loop import (
     RunIdTakenError,
     SpendLogMissingError,
 )
-from loomcore.ports import Config, Decision, RunResult, Task
+from loomcore.ports import Config, Decision, Notice, RunResult, Task, ToolResult
 from loomcore.rewind import ForkRefusedError
 from loomcore.spend import SpendLine, append_spend, read_spend
 
@@ -633,3 +635,31 @@ def test_an_open_approval_question_is_not_repeated_after_a_crash(
     paused = World(script=[]).driver(tmp_path).resume(run_ref())
     assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
     assert paused.question == asked  # not "... (may have run before the crash: ...)"
+
+
+# --- f14: what a call caused is logged with the call's id ---------------------
+
+
+def test_a_refusal_and_a_note_are_logged_before_their_call_completes(
+    tmp_path: Path,
+) -> None:
+    caused = (
+        Notice("sandbox_denied", {"action": "read", "target": "/etc", "reason": "no"}),
+        Notice("note_written", {"path": "notes.md"}),
+    )
+    world = World(
+        script=[use(("t1", "search")), reply()],
+        tool_results={"t1": ToolResult(True, "ok", caused)},
+    )
+    start(world, tmp_path)
+    log = read_events(tmp_path / "s1.jsonl").events
+    assert [e.kind for e in log if e.run_id == "r1"][3:7] == [
+        "tool_requested",
+        "sandbox_denied",
+        "note_written",
+        "tool_completed",
+    ]
+    denied = next(e for e in log if isinstance(e, SandboxDenied))
+    noted = next(e for e in log if isinstance(e, NoteWritten))
+    assert (denied.tool_use_id, denied.target) == ("t1", "/etc")
+    assert (noted.tool_use_id, noted.path) == ("t1", "notes.md")

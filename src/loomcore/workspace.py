@@ -58,9 +58,10 @@ def _ignore(_value: object) -> None:
 class FilesystemWorkspace:
     """A `Workspace` on a directory.
 
-    `on_refusal` is called with every refusal before the error is raised (the tool
-    registry turns it into `sandbox_denied`); `on_note` with the path of every write
-    to the notes file (it becomes `note_written`).
+    `on_refusal` is required, as the sandbox's is: a refusal nobody hears about is
+    a hole in the log. It is called with every refusal before the error is raised
+    (`Notices.refused` turns it into `sandbox_denied`); `on_note` with the path of
+    every write to the notes file (`Notices.noted` turns it into `note_written`).
     """
 
     def __init__(
@@ -68,7 +69,7 @@ class FilesystemWorkspace:
         root: Path,
         *,
         notes: str = "notes.md",
-        on_refusal: Callable[[Refusal], None] = _ignore,
+        on_refusal: Callable[[Refusal], None],
         on_note: Callable[[str], None] = _ignore,
     ) -> None:
         # Resolved once, so a symlinked root such as /tmp on macOS does not make

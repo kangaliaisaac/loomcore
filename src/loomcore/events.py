@@ -189,6 +189,7 @@ class Escalation(_Envelope):
 
 class NoteWritten(_Envelope):
     kind: Literal["note_written"] = "note_written"
+    tool_use_id: str | None = None
     path: str
 
 

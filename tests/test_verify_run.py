@@ -9,7 +9,7 @@ from fakes import CAPS, CONFIG, World, finish, kinds, reply
 from fakes import ref as run_ref
 
 from loomcore.eventlog import open_writer, read_events
-from loomcore.events import Event, ToolCompleted
+from loomcore.events import Event, JsonObject, ToolCompleted
 from loomcore.limits import Limits
 from loomcore.ports import Task
 from loomcore.replay import RunState, replay
@@ -233,3 +233,27 @@ def test_a_verifier_sees_the_state_at_the_claim(tmp_path: Path) -> None:
     verifier = Scripted([True])
     world.driver(tmp_path, verifier=verifier).run(TASK)
     assert verifier.seen[0].turns == 1
+
+
+def test_a_crash_after_the_other_calls_of_a_rejected_finish_judges_the_claim_again(
+    tmp_path: Path,
+) -> None:
+    """The other call is completed before the finish call, so a log cut after it still
+    holds the claim and the call never runs."""
+    rows = _started(
+        make("model_call", 2, message=finish("x", ("a", "write"), call_id="f1")),
+        make("tool_completed", 3, tool_use_id="a", ok=False, content="not run"),
+    )
+    _write(tmp_path, rows)
+    world = World(script=[reply("fixed")])
+    verifier = Scripted([False, True])
+    result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
+    assert (result.status, verifier.calls) == ("finished", 2)
+    assert world.tool_calls == []  # "a" never ran
+
+
+def test_an_empty_reply_that_is_rejected_still_tells_the_model(tmp_path: Path) -> None:
+    empty: JsonObject = {"content": [], "stop_reason": "end_turn"}
+    world = World(script=[empty, reply("now with text")])
+    world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
+    assert critique("tests", "2 tests fail") in last_user_text(world)

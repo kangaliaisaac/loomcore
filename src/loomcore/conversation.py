@@ -89,7 +89,7 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
             if _updates_plan(event.message, done):
                 plan_at = len(items)  # the index this exchange is appended at
         elif isinstance(event, RunForked | VerificationFailed):
-            messages = _hint(last, event)
+            messages = _hint(last, items[-1].messages[-1], event)
             kind = "hint"
             key = (
                 f"hint:{event.run_id}"
@@ -180,14 +180,24 @@ def _after_fork(last: str, event: RunForked) -> list[JsonObject]:
     return []
 
 
-def _hint(last: str, event: RunForked | VerificationFailed) -> list[JsonObject]:
+def _hint(
+    last: str, previous: JsonObject, event: RunForked | VerificationFailed
+) -> list[JsonObject]:
     """The user message a fork hint or a rejected claim adds. After a `finish` call
-    the tool result already carries the critique, so only a bare reply needs one."""
+    the tool result already carries the critique; after a bare reply (even an empty
+    one, which is not sent) the model needs a user message to answer."""
     if isinstance(event, RunForked):
         return _after_fork(last, event)
-    if last != "assistant":
+    if _has_result(previous):
         return []
     return [{"role": "user", "content": critique(event.verifier, event.message)}]
+
+
+def _has_result(message: JsonObject) -> bool:
+    content = message.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

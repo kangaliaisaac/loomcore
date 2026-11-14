@@ -642,13 +642,17 @@ class Run:
         completed `ok=false` with the critique as its result (the turn's other calls
         were not run), then the failure is written."""
         text = critique(verdict.verifier, verdict.message)
+        # The finish call goes last: its completion is what makes resume forget the
+        # claim, so a crash before it leaves the other calls "not run" and the claim
+        # to be judged again, never a call that was meant not to run.
+        pending = sorted(self.state.pending_tools, key=lambda i: i == stop.finish_id)
         events = [
             self._complete(
                 i,
                 ok=False,
                 content=text if i == stop.finish_id else "not run: finish was rejected",
             )
-            for i in self.state.pending_tools
+            for i in pending
         ]
         failed = self.emit(
             "verification_failed", verifier=verdict.verifier, message=verdict.message

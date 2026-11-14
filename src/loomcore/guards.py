@@ -33,7 +33,8 @@ class Allow:
 
 @dataclass(frozen=True)
 class Deny:
-    reason: str  # logged, and the observation the model sees (instead of the call or of its result)
+    # logged, and the observation the model sees (instead of the call or its result)
+    reason: str
 
 
 @dataclass(frozen=True)

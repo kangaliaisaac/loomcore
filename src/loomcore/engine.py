@@ -8,7 +8,8 @@ pauses. The decisions are `step`'s and `check_limits`'s; nothing here chooses.
 import hashlib
 import json
 import logging
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -68,6 +69,7 @@ from loomcore.window import Budget, Carried, Window, build_window
 
 _LOG = logging.getLogger(__name__)
 
+MAX_COUNTED = 4096  # token counts kept for the window's memo
 MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
 
 
@@ -97,7 +99,8 @@ class Run:
     switch_to: Config | None = None  # the configuration the switch rung changes to
     state: RunState = field(default_factory=RunState)
     next_seq: int = 0
-    counted: dict[str, int] = field(default_factory=dict)  # token counts, by digest
+    # Token counts by digest of the messages, least recently used dropped first.
+    counted: OrderedDict[str, int] = field(default_factory=OrderedDict)
     guards: Guards = field(default_factory=Guards)
     verifier: Verifier | None = None
 
@@ -293,9 +296,9 @@ class Run:
         """The edge's token count, asked once for each distinct text."""
         text = json.dumps(messages, sort_keys=True, separators=(",", ":"))
         key = hashlib.sha256(text.encode()).hexdigest()  # not the text: it is large
-        if key not in self.counted:
-            self.counted[key] = self.ports.count_tokens(messages)
-        return self.counted[key]
+        return remembered(
+            self.counted, key, lambda: self.ports.count_tokens(messages), MAX_COUNTED
+        )
 
     def _record(self, window: Window) -> None:
         """Write what the window newly dropped and cleared, and fold it so the next
@@ -701,3 +704,18 @@ def _annotated(content: JsonValue, note: str | None) -> JsonValue:
         return content
     text = content if isinstance(content, str) else json.dumps(content)
     return f"{text}\n\n[{note}]"
+
+
+def remembered(
+    memo: OrderedDict[str, int], key: str, compute: Callable[[], int], limit: int
+) -> int:
+    """`memo[key]`, computed once; the least recently used entry goes when the memo
+    holds more than `limit`, so a long run's memory does not grow with its history."""
+    if key in memo:
+        memo.move_to_end(key)
+        return memo[key]
+    value = compute()
+    memo[key] = value
+    if len(memo) > limit:
+        memo.popitem(last=False)
+    return value

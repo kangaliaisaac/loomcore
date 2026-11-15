@@ -62,12 +62,15 @@ def test_a_refusal_inside_a_driven_tool_call_is_logged_with_the_call(
     assert [d.tool_use_id for d in denied] == ["a"]  # not a warning and a lost event
 
 
-def test_the_registry_ports_the_kit_hands_out_agree_about_read_only(
+def test_the_ports_the_kit_hands_out_are_the_kits_own_registry_and_notices(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "work").mkdir()
     kit = tool_kit(tmp_path / "work", timeout=5)
     kit.registry.register(read_file, read_only=True)
     ports = kit.tool_ports()
-    assert ports["read_only"]("read_file") is True
-    assert ports["access"]("read_file").read_only is True
+    assert ports["tool"] == kit.registry.execute  # bound to this registry
+    assert ports["read_only"] == kit.registry.read_only
+    assert ports["access"] == kit.registry.access
+    assert ports["notices"] is kit.notices
+    assert ports["read_only"]("read_file") is ports["access"]("read_file").read_only

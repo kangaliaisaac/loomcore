@@ -76,12 +76,14 @@ def pack(candidates: Sequence[Item], budget: int, pinned: Sequence[Item]) -> Pac
     kept_pinned = [after[item.id] for item in pinned]
     base = sum(item.tokens for item in kept_pinned)
     if base > budget:  # even with every result cleared the pinned items do not fit
+        pinned_ids = {item.id for item in pinned}
         return Packed(
-            _in_order(pinned),
+            _in_order(kept_pinned),  # their cleared forms: what `tokens` counts
             _in_order(candidates),
-            sum(item.tokens for item in pinned),
+            base,
             budget,
             over=True,
+            cleared=tuple(i for i in cleared if i in pinned_ids),
         )
     items = [after[item.id] for item in candidates]
     left = budget - base

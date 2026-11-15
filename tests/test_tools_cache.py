@@ -184,20 +184,18 @@ def test_a_timeout_error_raised_by_the_tool_is_not_the_registrys_timeout(
     assert "abandoned" not in str(result.content)  # it ended; nothing is running on
 
 
-def test_no_timeout_runs_the_call_in_the_callers_thread(
-    workspace: FilesystemWorkspace,
+@pytest.mark.parametrize(
+    "bad", [None, 0, -1, True, "5", float("inf"), float("nan"), 1e30]
+)
+def test_a_registry_refuses_a_missing_or_nonsense_timeout(
+    workspace: FilesystemWorkspace, bad: object
 ) -> None:
-    seen: list[str] = []
+    with pytest.raises(ValueError, match="timeout"):
+        ToolRegistry(workspace, timeout=bad)  # type: ignore[arg-type]
 
-    def where(key: str) -> str:
-        """Records its thread."""
-        seen.append(threading.current_thread().name)
-        return key
 
-    tools = ToolRegistry(workspace, timeout=None)
-    tools.register(where, read_only=True)
-    tools.execute("where", {"key": "a"})
-    assert seen == [threading.current_thread().name]
+def test_an_integer_timeout_is_accepted(workspace: FilesystemWorkspace) -> None:
+    ToolRegistry(workspace, timeout=5)
 
 
 def test_a_call_that_outlasts_the_timeout_runs_on_a_daemon_thread(
@@ -310,7 +308,7 @@ def test_a_bug_in_a_tool_that_writes_still_bumps_the_generation(
         """Writes outside the workspace API, then breaks."""
         raise RuntimeError(key)
 
-    tools = ToolRegistry(workspace, timeout=None)
+    tools = ToolRegistry(workspace)
     tools.register(half_done, writes=("k",))
     with pytest.raises(RuntimeError):
         tools.execute("half_done", {"key": "a"})

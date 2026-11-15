@@ -6,7 +6,7 @@ configuration matches, repairs the spend log, and hands the run to `engine.Run`.
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loomcore.engine import ResumeRefusedError, Run
@@ -44,8 +44,8 @@ class Settings:
 
     session_path: Path
     spend_path: Path
-    retry: RetryPolicy = RetryPolicy()  # noqa: RUF009  (frozen, so shared safely)
-    guards: Guards = Guards()  # noqa: RUF009  (frozen, so shared safely)
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
+    guards: Guards = field(default_factory=Guards)
     verifier: Verifier | None = None
 
 

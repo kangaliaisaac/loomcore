@@ -56,7 +56,15 @@ def step(
 #   RequestCalls: write the turn's tool_requested lines together, then judge them
 #   RunTool may carry a ladder note; Fail completes a call ok=false, unrun
 
-class Driver(Protocol):                 # bound to one session file and one spend log
+@dataclass(frozen=True)
+class Settings:                         # what the driver keeps and the policy outside the digest
+    session_path: Path
+    spend_path: Path
+    retry: RetryPolicy = ...            # RetryPolicy(), guards Guards(), verifier None by default
+    guards: Guards = ...
+    verifier: Verifier | None = None
+
+class Driver(Protocol):                 # built as Driver(config, ports, settings); bound to one session file and one spend log
     def run(self, task: Task) -> RunResult: ...            # Task = (prompt, limits)
     def resume(
         self, 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import TypedDict, Unpack
 
 from factories import START, make
 from pydantic import JsonValue
@@ -24,7 +25,7 @@ from loomcore.ports import (
     RunRef,
     ToolResult,
 )
-from loomcore.retry import CallError
+from loomcore.retry import CallError, RetryPolicy
 from loomcore.sandbox import Refusal
 from loomcore.schedule import Access
 from loomcore.verify import Verifier
@@ -111,6 +112,14 @@ class FakePricing:
         return COST, "test"
 
 
+class Policy(TypedDict, total=False):
+    """The fields of `Settings` a test may set beyond the two paths."""
+
+    retry: RetryPolicy
+    guards: Guards
+    verifier: Verifier | None
+
+
 @dataclass
 class World:
     """Everything a test arranges and inspects."""
@@ -191,15 +200,11 @@ class World:
         )
 
     def driver(
-        self,
-        tmp: Path,
-        config: Config = CONFIG,
-        guards: Guards = Guards(),  # noqa: B008
-        verifier: Verifier | None = None,
+        self, tmp: Path, config: Config = CONFIG, **policy: Unpack[Policy]
     ) -> Driver:
-        settings = Settings(
-            tmp / "s1.jsonl", tmp / "spend.jsonl", guards=guards, verifier=verifier
-        )
+        """A driver on files in `tmp`; `policy` is whatever of `Settings` beyond the
+        two paths the test sets (`retry`, `guards`, `verifier`)."""
+        settings = Settings(tmp / "s1.jsonl", tmp / "spend.jsonl", **policy)
         return Driver(config, self.ports(), settings)
 
 

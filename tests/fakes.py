@@ -165,10 +165,14 @@ class World:
 
     def access(self, name: str) -> Access:
         """Every tool conflicts with every other unless the test names it `together`
-        (touching nothing) or gives its `declared` reads and writes."""
+        (touching nothing) or gives its `declared` reads and writes. A tool the test
+        calls `read_only` is read-only here too, so the two ports agree."""
         if name in self.declared:
             return self.declared[name]
-        return Access(read_only=name in self.together)
+        return Access(read_only=name in self.together or name in self.read_only)
+
+    def is_read_only(self, name: str) -> bool:
+        return self.access(name).read_only
 
     def new_run_id(self) -> str:
         self.ids += 1
@@ -178,7 +182,7 @@ class World:
         return Ports(
             model=self.model,
             tool=self.tool,
-            read_only=lambda name: name in self.read_only,
+            read_only=self.is_read_only,
             access=self.access,
             notices=self.notices,
             pricing=self.pricing,

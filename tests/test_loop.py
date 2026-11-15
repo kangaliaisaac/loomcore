@@ -1,6 +1,7 @@
 """f08 and f09: a scripted model drives runs to finished, paused and resumed."""
 
 import logging
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from loomcore.limits import Limits
 from loomcore.loop import (
     ConfigChangedError,
     Driver,
+    PortsDisagreeError,
     RunIdTakenError,
     SpendLogMissingError,
 )
@@ -317,6 +319,21 @@ def test_the_spend_log_path_is_logged_and_a_missing_directory_refused(
         Driver(
             CONFIG, World().ports(), tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"
         )
+
+
+def test_a_driver_refuses_ports_that_disagree_about_a_listed_tool(
+    tmp_path: Path,
+) -> None:
+    world = World()
+    ports = replace(world.ports(), read_only=lambda name: name == "search")
+    session, spend = tmp_path / "s1.jsonl", tmp_path / "spend.jsonl"
+    with pytest.raises(PortsDisagreeError, match="search"):
+        Driver(CONFIG, ports, session, spend)  # access: search writes; read_only: no
+    other = replace(CONFIG, tools=({"name": "unlisted"},))
+    Driver(other, ports, session, spend)  # a tool the configuration does not list
+    switching = replace(other, switch_to=CONFIG)
+    with pytest.raises(PortsDisagreeError, match="search"):
+        Driver(switching, ports, session, spend)  # nor the one a switch would bring
 
 
 # --- f08: forks ---------------------------------------------------------------

@@ -70,6 +70,8 @@ class Driver(Protocol):                 # bound to one session file and one spen
         limits: Limits | None = None) -> RunResult: ...   # checks the point, then writes run_forked
 ```
 
+The driver refuses to start (`PortsDisagreeError`) when `Ports.read_only(name)` and `Ports.access(name).read_only` differ for a tool the configuration lists (or the one its switch rung changes to): a tool is read-only in one place, and `ToolRegistry.read_only` and `.access` give both from one declaration.
+
 Every component below works without the driver: a user may call the registry, the sandbox, the guards and the context store from their own loop.
 
 **Ports** (the only places that touch the world, injected into the driver):

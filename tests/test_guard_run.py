@@ -1,6 +1,6 @@
 """f19, the pre stage: a deny stops a call, an ask pauses the run (spec 3.7)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -10,10 +10,18 @@ from fakes import ref as run_ref
 
 from loomcore.eventlog import read_events
 from loomcore.events import ApprovalRequested, GuardDecision, JsonObject, ToolCompleted
-from loomcore.guards import Allow, Ask, Deny, Guards, PreDecision, ToolRequest
+from loomcore.guards import (
+    Allow,
+    Ask,
+    Deny,
+    Guards,
+    PostDecision,
+    PreDecision,
+    ToolRequest,
+)
 from loomcore.limits import Limits
 from loomcore.loop import Driver
-from loomcore.ports import Decision, Task
+from loomcore.ports import Decision, Task, ToolResult
 from loomcore.replay import RunState, unanswered_asks
 from loomcore.step import RunTool, step
 
@@ -347,3 +355,55 @@ def test_a_grant_on_the_second_tripped_call_resets_the_repeat_count(
     assert paused.status == "paused"
     done = drv.resume(paused.ref, Decision(granted=True, by="me"))
     assert (done.status, done.reason) == ("finished", "end_turn")
+
+
+@dataclass
+class Spy:
+    """Allows everything and keeps the state it was given for each call."""
+
+    pre_seen: dict[str, RunState] = field(default_factory=dict)
+    post_seen: dict[str, RunState] = field(default_factory=dict)
+
+    def check(self, request: ToolRequest, state: RunState) -> PreDecision:
+        self.pre_seen[request.tool_use_id] = state
+        return Allow()
+
+
+@dataclass
+class PostSpy:
+    spy: Spy
+
+    def check(
+        self, request: ToolRequest, result: ToolResult, state: RunState
+    ) -> PostDecision:
+        self.spy.post_seen[request.tool_use_id] = state
+        return Allow()
+
+
+def test_the_state_a_guard_sees_is_the_one_the_spec_names(tmp_path: Path) -> None:
+    """Pre guards judge before the turn's escalation and `tool_requested` lines; post
+    guards run after both but before any call of the turn has completed (spec 3.7)."""
+    world = World(
+        script=[
+            use(("a", "search"), q="x"),
+            use(
+                ("b", "search"), ("c", "search"), q="x"
+            ),  # b repeats a: the ladder trips
+            reply("ok"),
+        ],
+        read_only={"search"},
+    )
+    spy = Spy()
+    guards = Guards(pre=(spy,), post=(PostSpy(spy),))
+    world.driver(tmp_path, guards=guards).run(REPEATING)
+    before = spy.pre_seen["b"]
+    assert before.rung == 0  # the escalation is written after the verdicts
+    assert (
+        dict(before.requested) == {}
+    )  # a has completed; b and c are not requested yet
+    assert before.pending_tools == ("b", "c")
+    after = spy.post_seen["b"]
+    assert after.rung == 1  # by the time the calls run, the ladder has spoken
+    assert dict(after.requested) == {"b": "search", "c": "search"}
+    assert after.pending_tools == ("b", "c")  # nothing of this turn has completed
+    assert spy.post_seen["c"].pending_tools == ("b", "c")  # not even b, for c

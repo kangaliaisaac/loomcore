@@ -7,7 +7,8 @@ Ids come from the log (session, run, seq or tool_use_id), so the same log always
 gives the same spans.
 """
 
-from collections.abc import Iterable
+import logging
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
@@ -23,8 +24,11 @@ from loomcore.events import (
     ToolRequested,
     TurnStarted,
 )
+from loomcore.finish import NAME as FINISH_NAME
 from loomcore.observability.cost import Tokens, find_usage
+from loomcore.replay import content_blocks
 
+_LOG = logging.getLogger(__name__)
 Kind = Literal["run", "turn", "model_call", "tool_call"]
 _RANK: dict[Kind, int] = {"run": 0, "turn": 1, "model_call": 2, "tool_call": 2}
 
@@ -70,22 +74,70 @@ def _run_spans(log: list[Event]) -> list[Span]:
         last.timestamp,
         {"loomcore.run.id": first.run_id, "loomcore.run.reason": finished},
     )
-    found = [run, *_turns(base, run.id, log)]
-    turn = run.id
-    requested: dict[str, ToolRequested] = {}
-    for event in log:
-        match event:
-            case TurnStarted():
-                turn = _id(base, "turn", event.seq)
-            case ModelCall():
-                found.append(_model_span(base, turn, event))
-            case ToolRequested():
-                requested[event.tool_use_id] = event
-            case ToolCompleted() if event.tool_use_id in requested:
-                found.append(
-                    _tool_span(base, turn, requested[event.tool_use_id], event)
-                )
+    found = [
+        run,
+        *_turns(base, run.id, log),
+        *(
+            _model_span(base, turn, event)
+            for turn, event in _in_turns(base, run.id, log)
+            if isinstance(event, ModelCall)
+        ),
+        *_tool_spans(base, run.id, log),
+    ]
     return sorted(found, key=lambda s: (s.start, _RANK[s.kind]))
+
+
+def _in_turns(base: str, run_id: str, log: list[Event]) -> Iterator[tuple[str, Event]]:
+    """Each event with the id of the turn it belongs to (the run, before the first)."""
+    turn = run_id
+    for event in log:
+        if isinstance(event, TurnStarted):
+            turn = _id(base, "turn", event.seq)
+        yield turn, event
+
+
+def _tool_spans(base: str, run_id: str, log: list[Event]) -> list[Span]:
+    """A span for each call that was requested: it ends at its completion, or, for a
+    call with none (a crash mid-tool), at the run's last event, marked open. A
+    completion with no request has no span (spec 3.8); one that looks like a call
+    that ran is reported."""
+    asked: dict[str, tuple[str, ToolRequested]] = {}
+    found: list[Span] = []
+    orphans: list[ToolCompleted] = []
+    for turn, event in _in_turns(base, run_id, log):
+        if isinstance(event, ToolRequested):
+            asked[event.tool_use_id] = (turn, event)
+        elif isinstance(event, ToolCompleted):
+            hit = asked.pop(event.tool_use_id, None)
+            if hit is None:
+                orphans.append(event)
+            else:
+                found.append(_tool_span(base, hit[0], hit[1], event))
+    found += [_open_tool_span(base, t, e, log[-1].timestamp) for t, e in asked.values()]
+    _report_orphans(orphans, log)
+    return found
+
+
+def _report_orphans(orphans: list[ToolCompleted], log: list[Event]) -> None:
+    """A completion with no request is by design for the `finish` call and for a call
+    that did not run (`ok=false`, no time spent); any other is a damaged log."""
+    names = {
+        str(block["id"]): block.get("name")
+        for event in log
+        if isinstance(event, ModelCall)
+        for block in content_blocks(event.message)
+        if block.get("type") == "tool_use" and "id" in block
+    }
+    odd = [
+        done.tool_use_id
+        for done in orphans
+        if names.get(done.tool_use_id) != FINISH_NAME
+        and (done.ok or done.duration_ms > 0)
+    ]
+    if odd:
+        _LOG.warning(
+            "tool_completed with no tool_requested, so no span: %s", ", ".join(odd)
+        )
 
 
 def _turns(base: str, parent: str, log: list[Event]) -> list[Span]:
@@ -190,5 +242,25 @@ def _tool_span(
             "gen_ai.tool.call.id": done.tool_use_id,
             "loomcore.tool.ok": done.ok,
             "loomcore.tool.cached": done.cached,
+        },
+    )
+
+
+def _open_tool_span(
+    base: str, parent: str, asked: ToolRequested, end: datetime
+) -> Span:
+    """A call that was requested and never completed: it ran until the log ended."""
+    return Span(
+        _id(base, "tool_call", asked.tool_use_id),
+        parent,
+        "tool_call",
+        f"execute_tool {asked.name}",
+        asked.timestamp,
+        end,
+        {
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": asked.name,
+            "gen_ai.tool.call.id": asked.tool_use_id,
+            "loomcore.tool.open": True,
         },
     )

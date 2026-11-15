@@ -414,6 +414,54 @@ def test_a_denied_call_has_a_span_that_says_it_did_not_succeed() -> None:
     assert tool.attributes["loomcore.tool.ok"] is False
 
 
+def test_a_call_requested_and_never_completed_is_an_open_span_to_the_log_end() -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("tool_requested", 2, tool_use_id="t1", name="search"),
+        make("run_paused", 5),
+    ]
+    tool = next(s for s in spans(log) if s.kind == "tool_call")
+    assert tool.attributes["loomcore.tool.open"] is True
+    assert (tool.parent, tool.duration_ms) == ("s1/r1/turn:1", 3000)
+
+
+def test_a_completion_with_no_request_that_looks_like_a_call_that_ran_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("tool_completed", 2, tool_use_id="t9", ok=True, duration_ms=40),
+    ]
+    with caplog.at_level("WARNING"):
+        found = spans(log)
+    assert not [s for s in found if s.kind == "tool_call"]  # still no span
+    assert "no tool_requested" in caplog.text
+    assert "t9" in caplog.text
+
+
+def test_the_finish_call_and_a_call_that_did_not_run_are_not_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    finishing = {
+        "content": [
+            {"type": "tool_use", "id": "f1", "name": "finish", "input": {}},
+            {"type": "tool_use", "id": "a", "name": "search", "input": {}},
+        ]
+    }
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("model_call", 2, message=finishing),
+        make("tool_completed", 3, tool_use_id="a", ok=False, duration_ms=0),
+        make("tool_completed", 4, tool_use_id="f1", ok=True, duration_ms=0),
+    ]
+    with caplog.at_level("WARNING"):
+        spans(log)
+    assert caplog.text == ""
+
+
 def test_a_call_with_no_logged_duration_falls_back_to_the_timestamps() -> None:
     log = [
         make("run_started", 0),

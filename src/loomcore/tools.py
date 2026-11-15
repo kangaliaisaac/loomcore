@@ -266,7 +266,11 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         value = tool.fn(**kwargs)
     except _FIXABLE as error:
-        return ToolResult(False, f"{name} failed: {_fixable(error)}")
+        # A refusal comes from the harness's own sandbox, not from the tool's logic.
+        own_words = not isinstance(error, PathRefusedError | CommandRefusedError)
+        return ToolResult(
+            False, f"{name} failed: {_fixable(error)}", from_tool=own_words
+        )
     try:
         return ToolResult(True, _JSON.validate_python(value))
     except ValidationError:

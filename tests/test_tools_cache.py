@@ -137,6 +137,7 @@ def test_a_call_past_the_timeout_is_abandoned_and_its_late_write_still_invalidat
         result = tools.execute("slow_write", {"key": "a"})
         assert not result.ok
         assert "timed out" in str(result.content)
+        assert result.from_tool is False  # the registry's message to the model
         assert workspace.generation == 1  # bumped when abandoned
         # While the writer may still write, a read is neither served nor stored.
         assert not tools.execute("look", {"key": "a"}).cached

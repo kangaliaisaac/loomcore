@@ -1,6 +1,7 @@
 """f08 and f09: a scripted model drives runs to finished, paused and resumed."""
 
 import logging
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from fakes import (
 from fakes import ref as run_ref
 
 from loomcore import ladder
-from loomcore.conversation import FORK_CONTINUE, call_hash
+from loomcore.conversation import FORK_CONTINUE, call_hash, mark_as_data
 from loomcore.engine import ResumeRefusedError
 from loomcore.eventlog import read_events
 from loomcore.events import (
@@ -49,6 +50,8 @@ from loomcore.prompt import DATA_RULE
 from loomcore.rewind import ForkRefusedError
 from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
+from loomcore.tools import ToolRegistry
+from loomcore.workspace import FilesystemWorkspace
 
 TASK = Task("find it", CAPS)
 
@@ -330,8 +333,28 @@ def test_the_model_sees_a_tools_output_marked_as_data(tmp_path: Path) -> None:
     assert block["content"] == '<tool_data id="t1">\nresult t1\n</tool_data id="t1">'
 
 
+def test_a_registrys_message_about_an_unknown_tool_reaches_the_model_unwrapped(
+    tmp_path: Path,
+) -> None:
+    """With the real registry in the driver: its own "fix the call" message is an
+    instruction, so it arrives with no data tags."""
+    (tmp_path / "work").mkdir()
+    registry = ToolRegistry(
+        FilesystemWorkspace(tmp_path / "work", on_refusal=lambda _refusal: None)
+    )
+    world = World(script=[use(("t1", "nope")), reply("done")])
+    ports = replace(world.ports(), tool=registry.execute)
+    Driver(CONFIG, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl").run(TASK)
+    sent = world.requests[-1].messages[-1]["content"]
+    assert isinstance(sent, list) and isinstance(sent[0], dict)
+    text = str(sent[0]["content"])
+    assert text.startswith("Unknown tool") and "<tool_data" not in text
+
+
 def test_the_data_rule_names_the_tags_the_renderer_uses() -> None:
-    assert "<tool_data id=" in DATA_RULE and "same id" in DATA_RULE
+    marked = mark_as_data("X", "")  # the tags the renderer really emits
+    opening, closing = marked.split("\n\n")
+    assert opening in DATA_RULE and closing in DATA_RULE
 
 
 # --- f08: forks ---------------------------------------------------------------

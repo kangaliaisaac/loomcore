@@ -142,7 +142,9 @@ def test_a_return_value_that_is_not_json_is_a_failed_result(tools: Registry) -> 
         return object()
 
     tools.registry.register(odd)
-    assert "not JSON" in str(tools.registry.execute("odd", {}).content)
+    result = tools.registry.execute("odd", {})
+    assert "not JSON" in str(result.content)
+    assert result.from_tool is False  # the registry's message, not the tool's data
 
 
 def test_a_bug_in_a_tool_is_not_swallowed(tools: Registry) -> None:
@@ -350,6 +352,6 @@ def test_the_registrys_own_messages_are_not_marked_as_a_tools_data(
     invalid = tools.registry.execute("read_file", {})
     assert (invalid.ok, invalid.from_tool) == (False, False)
     refused = tools.registry.execute("read_file", {"path": "../secret"})
-    assert (refused.ok, refused.from_tool) == (False, True)  # the workspace's refusal
-    fine = tools.registry.execute("read_file", {"path": "missing.txt"})
-    assert fine.from_tool is True
+    assert (refused.ok, refused.from_tool) == (False, False)  # the harness's sandbox
+    missing = tools.registry.execute("read_file", {"path": "missing.txt"})
+    assert (missing.ok, missing.from_tool) == (False, True)  # the OS's words, a tool's

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from factories import make
-from fakes import CAPS, CONFIG, World, finish, kinds, reply
+from fakes import CAPS, CONFIG, World, finish, kinds, reply, use
 from fakes import ref as run_ref
 
 from loomcore.eventlog import open_writer, read_events
@@ -102,6 +102,28 @@ def test_the_other_calls_beside_a_rejected_finish_are_not_run(tmp_path: Path) ->
     world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
     assert completed(tmp_path)["a"].ok is False
     assert world.tool_calls == []
+
+
+def test_a_rejected_finish_completes_its_other_calls_first(tmp_path: Path) -> None:
+    """The finish call's completion is what makes resume forget the claim, so it
+    is written last, whatever order the model listed the calls in."""
+    world = World(
+        script=[finish("x", ("a", "write"), call_id="f1"), finish("y", call_id="f2")]
+    )
+    world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
+    first = log(tmp_path)
+    at = first.index("verification_failed")
+    assert first[at - 2 : at + 1] == [
+        "tool_completed",
+        "tool_completed",
+        "verification_failed",
+    ]
+    order = [
+        e.tool_use_id
+        for e in read_events(tmp_path / "s1.jsonl").events
+        if isinstance(e, ToolCompleted)
+    ]
+    assert order[:2] == ["a", "f1"]
 
 
 def test_a_stop_that_is_not_a_claim_is_not_verified(tmp_path: Path) -> None:
@@ -255,5 +277,14 @@ def test_a_crash_after_the_other_calls_of_a_rejected_finish_judges_the_claim_aga
 def test_an_empty_reply_that_is_rejected_still_tells_the_model(tmp_path: Path) -> None:
     empty: JsonObject = {"content": [], "stop_reason": "end_turn"}
     world = World(script=[empty, reply("now with text")])
+    world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
+    assert critique("tests", "2 tests fail") in last_user_text(world)
+
+
+def test_an_empty_reply_after_a_tool_turn_still_gets_its_critique(
+    tmp_path: Path,
+) -> None:
+    empty: JsonObject = {"content": [], "stop_reason": "end_turn"}
+    world = World(script=[use(("t1", "search")), empty, reply("now with text")])
     world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
     assert critique("tests", "2 tests fail") in last_user_text(world)

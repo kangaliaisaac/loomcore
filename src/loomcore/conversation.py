@@ -23,7 +23,7 @@ from loomcore.events import (
     ToolCompleted,
     VerificationFailed,
 )
-from loomcore.replay import content_blocks, tool_use_ids
+from loomcore.replay import content_blocks, finish_call, tool_use_ids
 from loomcore.verify import critique
 
 FORK_CONTINUE = "Carry on with the task."
@@ -76,11 +76,13 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
     done = {e.tool_use_id: e for e in events if isinstance(e, ToolCompleted)}
     items = [_item("task", "task", 0, [{"role": "user", "content": task}], count)]
     last = "user"
+    claim: JsonObject = {}  # the latest response, which a rejected claim came from
     plan_at: int | None = None
     for event in events:
         messages: list[JsonObject] = []
         kind: ItemKind
         if isinstance(event, ModelCall):
+            claim = event.message
             if sent := _sent(event.message):  # an empty turn would be rejected
                 messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
@@ -89,7 +91,7 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
             if _updates_plan(event.message, done):
                 plan_at = len(items)  # the index this exchange is appended at
         elif isinstance(event, RunForked | VerificationFailed):
-            messages = _hint(last, items[-1].messages[-1], event)
+            messages = _hint(last, claim, event)
             kind = "hint"
             key = (
                 f"hint:{event.run_id}"
@@ -181,23 +183,16 @@ def _after_fork(last: str, event: RunForked) -> list[JsonObject]:
 
 
 def _hint(
-    last: str, previous: JsonObject, event: RunForked | VerificationFailed
+    last: str, claim: JsonObject, event: RunForked | VerificationFailed
 ) -> list[JsonObject]:
     """The user message a fork hint or a rejected claim adds. After a `finish` call
     the tool result already carries the critique; after a bare reply (even an empty
     one, which is not sent) the model needs a user message to answer."""
     if isinstance(event, RunForked):
         return _after_fork(last, event)
-    if _has_result(previous):
+    if finish_call(claim) is not None:
         return []
     return [{"role": "user", "content": critique(event.verifier, event.message)}]
-
-
-def _has_result(message: JsonObject) -> bool:
-    content = message.get("content")
-    return isinstance(content, list) and any(
-        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-    )
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

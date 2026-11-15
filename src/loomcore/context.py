@@ -32,7 +32,8 @@ class Cleared:
 
 @dataclass(frozen=True)
 class Item:
-    id: str  # "task", "hint:<run>" or "seq:<run>:<seq of the model_call>"
+    # "task", "hint:<run>", "verify:<run>:<seq>" or "seq:<run>:<seq of the model_call>"
+    id: str
     kind: ItemKind
     order: int  # position in the history; a later item is worth more
     tokens: int  # counted at the edge, never here

@@ -11,14 +11,23 @@ from types import TracebackType
 
 import pytest
 from factories import make
-from fakes import CAPS, CONFIG, ToolBugError, World, reply, use
+from fakes import (
+    CAPS,
+    CONFIG,
+    ToolBugError,
+    World,
+    reply,
+    run_started,
+    use,
+    write_log,
+)
 from fakes import ref as run_ref
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from loomcore.conversation import call_hash
 from loomcore.engine import MAX_TOGETHER
-from loomcore.eventlog import open_writer, read_events
+from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
 from loomcore.loop import Driver
 from loomcore.ports import RunResult, Task, ToolResult
@@ -205,14 +214,7 @@ def test_lines_a_crash_left_unwritten_go_after_every_wave_already_in_the_log(
 ) -> None:
     args: JsonObject = {"q": "a"}
     log_events = [
-        make(
-            "run_started",
-            0,
-            task="go",
-            config=CONFIG.to_json(),
-            limits=CAPS.to_json(),
-            config_digest=CONFIG.digest(),
-        ),
+        run_started(),
         make("turn_started", 1, turn=1),
         make(
             "model_call",
@@ -229,9 +231,7 @@ def test_lines_a_crash_left_unwritten_go_after_every_wave_already_in_the_log(
             wave=5,  # whatever the old process worked out
         ),
     ]
-    with open_writer(tmp_path / "s1.jsonl") as writer:
-        for event in log_events:
-            writer.append(event)
+    write_log(tmp_path, log_events)
     world = World(script=[reply("done")], together={"scan"})
     result = driver(world, tmp_path, Lanes().tool).resume(run_ref())
     assert result.status == "finished"
@@ -309,3 +309,21 @@ def test_a_signal_while_the_driver_waits_for_a_wave_still_logs_what_the_calls_ca
     events = log(tmp_path)
     assert [e.tool_use_id for e in events if isinstance(e, NoteWritten)] == ["t1", "t2"]
     assert not any(isinstance(e, ToolCompleted) for e in events)
+
+
+@pytest.mark.parametrize("together", [False, True])
+def test_a_notices_port_that_fails_to_open_a_bucket_is_not_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, together: bool
+) -> None:
+    """The call fails before its bucket exists, so `caused` has no entry for it; the
+    original error must reach the caller, not a KeyError or an unbound name from the
+    `finally` that reads it. Covers a single call and a wave."""
+    calls = (("a", "scan"), ("b", "scan")) if together else (("a", "scan"),)
+    world = World(script=[use(*calls)], together={"scan"})
+
+    def refuse() -> None:
+        raise RuntimeError("no bucket")
+
+    monkeypatch.setattr(world.notices, "collecting", refuse)
+    with pytest.raises(RuntimeError, match="no bucket"):
+        world.driver(tmp_path).run(TASK)

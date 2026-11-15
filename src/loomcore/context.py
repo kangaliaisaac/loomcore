@@ -18,13 +18,15 @@ from loomcore.events import JsonObject
 ItemKind = Literal["task", "exchange", "hint"]
 Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 CLEARED = "[tool result cleared to save context]"
+CLEARED_INPUT = "[tool input cleared to save context; the call ran with its real input]"
 PLAN_TOOL = "update_plan"  # the exchange of its latest successful call is pinned
 STRATEGY = "clear_tool_results"  # what `context_compacted` names for `compact`
 
 
 @dataclass(frozen=True)
 class Cleared:
-    """An exchange with its tool results replaced by `CLEARED`."""
+    """An exchange with its tool results replaced by `CLEARED` and the inputs of its
+    tool calls (the plan's excepted) by `CLEARED_INPUT`."""
 
     messages: tuple[JsonObject, ...]
     tokens: int
@@ -39,7 +41,7 @@ class Item:
     tokens: int  # counted at the edge, never here
     messages: tuple[JsonObject, ...]
     pinned: bool = False
-    cleared: Cleared | None = None  # None when there is no tool result to clear
+    cleared: Cleared | None = None  # None when there is nothing to clear
     # A pinned item (never dropped) whose tool results may still be cleared: the
     # exchange that holds the plan, whose text is in a tool call's input, not a result.
     may_clear: bool = False
@@ -154,7 +156,10 @@ def _as_cleared(item: Item, cleared: Cleared) -> Item:
 
 def clear_results(messages: Sequence[JsonObject]) -> tuple[JsonObject, ...]:
     """The messages with the content of every tool result replaced by `CLEARED`
-    (the `tool_use_id` and `is_error` stay)."""
+    (the `tool_use_id` and `is_error` stay) and the input of every tool call but the
+    plan's replaced by `CLEARED_INPUT` (the call's `id` and `name` stay). A cleared
+    exchange is shown the same way whether or not it holds the plan pin when it is
+    shown, so a window never grows back between two events."""
     return tuple(_clear_message(message) for message in messages)
 
 
@@ -182,13 +187,18 @@ def _clear_message(message: JsonObject) -> JsonObject:
     content = message["content"]
     if not isinstance(content, list):
         return message
-    kept: list[JsonValue] = [
-        {**block, "content": CLEARED}
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-        else block
-        for block in content
-    ]
+    kept: list[JsonValue] = [_clear_block(block) for block in content]
     return {**message, "content": kept}
+
+
+def _clear_block(block: JsonValue) -> JsonValue:
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") == "tool_result":
+        return {**block, "content": CLEARED}
+    if block.get("type") == "tool_use" and block.get("name") != PLAN_TOOL:
+        return {**block, "input": {"note": CLEARED_INPUT}}
+    return block
 
 
 def _check_split(candidates: Sequence[Item], pinned: Sequence[Item]) -> None:

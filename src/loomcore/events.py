@@ -154,8 +154,8 @@ class SandboxDenied(_Envelope):
 
 class ContextPacked(_Envelope):
     kind: Literal["context_packed"] = "context_packed"
-    selected: list[JsonValue]
-    dropped: list[JsonValue]
+    selected: list[str]  # item ids: a number or null is refused when the line is read
+    dropped: list[str]
     tokens: int
     budget: int
 

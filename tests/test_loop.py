@@ -44,6 +44,7 @@ from loomcore.loop import (
     Driver,
     PortsDisagreeError,
     RunIdTakenError,
+    Settings,
     SpendLogMissingError,
 )
 from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
@@ -317,7 +318,9 @@ def test_the_spend_log_path_is_logged_and_a_missing_directory_refused(
     assert str(tmp_path / "spend.jsonl") in caplog.text
     with pytest.raises(SpendLogMissingError):
         Driver(
-            CONFIG, World().ports(), tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"
+            CONFIG,
+            World().ports(),
+            Settings(tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"),
         )
 
 
@@ -326,14 +329,14 @@ def test_a_driver_refuses_ports_that_disagree_about_a_listed_tool(
 ) -> None:
     world = World()
     ports = replace(world.ports(), read_only=lambda name: name == "search")
-    session, spend = tmp_path / "s1.jsonl", tmp_path / "spend.jsonl"
+    settings = Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
     with pytest.raises(PortsDisagreeError, match="search"):
-        Driver(CONFIG, ports, session, spend)  # access: search writes; read_only: no
+        Driver(CONFIG, ports, settings)  # access: search writes; read_only: no
     other = replace(CONFIG, tools=({"name": "unlisted"},))
-    Driver(other, ports, session, spend)  # a tool the configuration does not list
+    Driver(other, ports, settings)  # a tool the configuration does not list
     switching = replace(other, switch_to=CONFIG)
     with pytest.raises(PortsDisagreeError, match="search"):
-        Driver(switching, ports, session, spend)  # nor the one a switch would bring
+        Driver(switching, ports, settings)  # nor the one a switch would bring
 
 
 # --- f08: forks ---------------------------------------------------------------

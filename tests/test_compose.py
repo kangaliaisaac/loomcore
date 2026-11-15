@@ -9,7 +9,7 @@ from fakes import CAPS, World, reply
 from loomcore.compose import tool_kit
 from loomcore.eventlog import read_events
 from loomcore.events import JsonObject, SandboxDenied
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.ports import Config, Task
 from loomcore.workspace import PathRefusedError, Workspace
 
@@ -51,8 +51,8 @@ def test_a_refusal_inside_a_driven_tool_call_is_logged_with_the_call(
     world = World(script=[call, reply("done")])
     ports = replace(world.ports(), **kit.tool_ports())
     config = Config(model="m", system="be brief", tools=tools)
-    session, spend = tmp_path / "s1.jsonl", tmp_path / "spend.jsonl"
-    result = Driver(config, ports, session, spend).run(Task("go", CAPS))
+    settings = Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    result = Driver(config, ports, settings).run(Task("go", CAPS))
     assert result.status == "finished"
     denied = [
         e

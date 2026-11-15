@@ -1,6 +1,5 @@
 """f15, part 2: the driver runs a turn's independent calls together."""
 
-import sys
 import tempfile
 import threading
 import time
@@ -9,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 import pytest
 from factories import make
@@ -319,14 +319,37 @@ def test_a_failure_before_the_tool_starts_is_not_hidden_by_a_missing_bucket(
 ) -> None:
     """`caused` has no entry for a call that failed before its bucket opened; the
     original error must reach the caller, not a KeyError from reading it."""
+    inside = threading.local()
+    real_call = engine.Run._call
+
+    def entered(self: engine.Run, tool_use_id: str, caused: dict[str, Any]) -> Any:  # noqa: ANN401
+        inside.on = True
+        try:
+            return real_call(self, tool_use_id, caused)
+        finally:
+            inside.on = False
 
     def broken(chain: Sequence[Event], tool_use_id: str) -> tuple[str, JsonObject]:
-        if sys._getframe(1).f_code.co_name == "_call":
+        if getattr(inside, "on", False):  # only the call `_call` makes
             raise RuntimeError("no such call")
         return tool_call(chain, tool_use_id)
 
+    monkeypatch.setattr(engine.Run, "_call", entered)
     monkeypatch.setattr(engine, "tool_call", broken)
     calls = (("a", "scan"), ("b", "scan")) if together else (("a", "scan"),)
     world = World(script=[use(*calls)], together={"scan"})
     with pytest.raises(RuntimeError, match="no such call"):
+        world.driver(tmp_path).run(TASK)
+
+
+def test_a_notices_port_that_fails_to_open_a_bucket_is_not_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = World(script=[use(("a", "scan"))])
+
+    def refuse() -> None:
+        raise RuntimeError("no bucket")
+
+    monkeypatch.setattr(world.notices, "collecting", refuse)
+    with pytest.raises(RuntimeError, match="no bucket"):
         world.driver(tmp_path).run(TASK)

@@ -132,7 +132,9 @@ def _model_span(base: str, parent: str, call: ModelCall) -> Span:
         "gen_ai.response.model": message.get("model"),
         "gen_ai.response.id": message.get("id"),
         "gen_ai.response.finish_reasons": [message.get("stop_reason")],
-        "loomcore.cost_usd": format(call.cost_usd, "f"),  # a string: no float price
+        # A string, normalised: the log stores the cost as a float, so an event has
+        # "2.50" in memory and "2.5" read back, and a span must not tell them apart.
+        "loomcore.cost_usd": format(call.cost_usd.normalize(), "f"),
         "loomcore.pricing_version": call.pricing_version,
     }
     if tokens is not None:

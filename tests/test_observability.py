@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 from factories import make
+from fakes import write_log
 from pydantic import JsonValue
 
-from loomcore.eventlog import open_writer, read_events
+from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject
 from loomcore.observability.cost import (
     PricingTable,
@@ -311,11 +312,20 @@ def test_spans_of_a_recorded_log_are_stable() -> None:
 
 
 def test_spans_of_a_log_read_back_from_disk_match(tmp_path: Path) -> None:
-    path = tmp_path / "s1.jsonl"
-    with open_writer(path) as writer:
-        for event in recorded():
-            writer.append(event)
-    assert spans(read_events(path).events) == spans(recorded())
+    write_log(tmp_path, recorded())
+    assert spans(read_events(tmp_path / "s1.jsonl").events) == spans(recorded())
+
+
+@pytest.mark.parametrize("cost", ["2.50", "0E-6", "1E+1", "0.00772"])
+def test_a_cost_computed_in_memory_gives_the_span_it_gives_from_disk(
+    tmp_path: Path, cost: str
+) -> None:
+    priced = make("model_call", 2, message=response()).model_copy(
+        update={"cost_usd": D(cost)}  # a Decimal as the driver computes it
+    )
+    log = [make("run_started", 0), make("turn_started", 1, turn=1), priced]
+    write_log(tmp_path, log)
+    assert spans(read_events(tmp_path / "s1.jsonl").events) == spans(log)
 
 
 def test_a_model_span_carries_the_gen_ai_attributes_and_its_tokens() -> None:

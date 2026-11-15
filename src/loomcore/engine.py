@@ -483,7 +483,9 @@ class Run:
             # refusal precedes the call's completion. The bucket was closed when the
             # call ended, so a notice that arrives later is not logged, only warned
             # about (spec 3.2).
-            written = self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+            written = self._emit_notices(
+                run.tool_use_id, caused.get(run.tool_use_id, ())
+            )
         return [*written, *self._completed(run, screened, ms)]
 
     def _call(
@@ -526,7 +528,9 @@ class Run:
         events: list[Event] = []
         bug: BaseException | None = None
         for run, future in zip(wave, futures, strict=True):
-            events += self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+            events += self._emit_notices(
+                run.tool_use_id, caused.get(run.tool_use_id, ())
+            )
             error = future.exception()
             if error is None:
                 screened, ms = future.result()

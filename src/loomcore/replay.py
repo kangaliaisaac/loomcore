@@ -40,6 +40,12 @@ from loomcore.ladder import ASK_RUNG
 from loomcore.months import month_key
 
 
+class ContextIdError(Exception):
+    """A `context_packed` or `context_compacted` line holds an id that is not a string.
+    Raised like `LogCorruptError` and `ForkChainError`: the log is damaged and needs
+    repair. Reading a line refuses it first, so this is a line that got past that."""
+
+
 class ForkChainError(Exception):
     """A run_forked event points at an event the log lacks, or loops back.
 
@@ -193,10 +199,19 @@ def _context(state: RunState, event: Event) -> RunState:
     return state
 
 
-def _with_ids(known: tuple[str, ...], new: Sequence[JsonValue]) -> tuple[str, ...]:
-    """`known` and the ids in `new` that are not in it yet, in order."""
-    added = [i for i in new if isinstance(i, str) and i not in known]
-    return (*known, *dict.fromkeys(added))
+def _with_ids(known: tuple[str, ...], new: Sequence[object]) -> tuple[str, ...]:
+    """`known` and the ids in `new` that are not in it yet, in order. The events
+    types hold only strings, so a number here means a line that bypassed validation:
+    that is a damaged log (`ContextIdError`), not something to skip."""
+    ids: list[str] = []
+    for item_id in new:
+        if not isinstance(item_id, str):
+            raise ContextIdError(
+                f"context id {item_id!r} is not a string: the log is damaged and "
+                "needs repair"
+            )
+        ids.append(item_id)
+    return (*known, *dict.fromkeys(i for i in ids if i not in known))
 
 
 def _tools(state: RunState, event: Event) -> RunState:

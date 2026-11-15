@@ -106,6 +106,11 @@ def _tool_spans(base: str, run_id: str, log: list[Event]) -> list[Span]:
     orphans: list[ToolCompleted] = []
     for turn, event in _in_turns(base, run_id, log):
         if isinstance(event, ToolRequested):
+            if event.tool_use_id in asked:  # the first one's span would be lost
+                _LOG.warning(
+                    "tool_requested repeated for %s, so one span is lost",
+                    event.tool_use_id,
+                )
             asked[event.tool_use_id] = (turn, event)
         elif isinstance(event, ToolCompleted):
             hit = asked.pop(event.tool_use_id, None)

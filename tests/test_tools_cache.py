@@ -12,7 +12,7 @@ from fakes import CAPS, CONFIG, World, reply, use
 
 from loomcore.eventlog import read_events
 from loomcore.events import ToolCompleted
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.notices import Notices
 from loomcore.ports import Task, ToolResult
 from loomcore.tools import ToolRegistry
@@ -277,7 +277,9 @@ def test_a_cache_hit_reaches_the_log_as_cached(
     tools.register(look, read_only=True, cacheable=True)
     world = World(script=[use(("t1", "look"), ("t2", "look"), q="same"), reply()])
     ports = replace(world.ports(), tool=tools.execute, read_only=tools.read_only)
-    driver = Driver(CONFIG, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    driver = Driver(
+        CONFIG, ports, Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    )
     driver.run(Task("find it", CAPS))
     log = read_events(tmp_path / "s1.jsonl").events
     done = [e for e in log if isinstance(e, ToolCompleted)]

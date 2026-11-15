@@ -6,6 +6,7 @@ configuration matches, repairs the spend log, and hands the run to `engine.Run`.
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loomcore.engine import ResumeRefusedError, Run
@@ -27,6 +28,11 @@ class ConfigChangedError(Exception):
     """The configuration this process holds is not the one the run started with."""
 
 
+class PortsDisagreeError(Exception):
+    """`Ports.read_only` and `Ports.access` give different answers for a tool the
+    configuration lists, so the schedule and the cache would not agree about it."""
+
+
 class RunIdTakenError(Exception):
     """The `new_run_id` port returned an id the session file already uses."""
 
@@ -35,32 +41,37 @@ class SpendLogMissingError(Exception):
     """The spend log's directory does not exist; a mistyped path would read as $0."""
 
 
+@dataclass(frozen=True)
+class Settings:
+    """Where the driver keeps its files, and the policy that is not part of the
+    configuration digest: a resume may use a different retry policy, guards or
+    verifier than the process that started the run."""
+
+    session_path: Path
+    spend_path: Path
+    retry: RetryPolicy = field(default_factory=RetryPolicy)
+    guards: Guards = field(default_factory=Guards)
+    verifier: Verifier | None = None
+
+
 class Driver:
     """Runs a task, resumes a paused or crashed run, forks one from a clean point."""
 
-    def __init__(  # noqa: PLR0913  (the composition root's settings, all read once)
-        self,
-        config: Config,
-        ports: Ports,
-        session_path: Path,
-        spend_path: Path,
-        retry: RetryPolicy = RetryPolicy(),  # noqa: B008  (frozen, so shared safely)
-        *,
-        guards: Guards = Guards(),  # noqa: B008  (frozen, so shared safely)
-        verifier: Verifier | None = None,
-    ) -> None:
-        if not spend_path.parent.is_dir():
+    def __init__(self, config: Config, ports: Ports, settings: Settings) -> None:
+        spend_dir = settings.spend_path.parent
+        if not spend_dir.is_dir():
             raise SpendLogMissingError(
-                f"{spend_path.parent} does not exist; create it or fix the path"
+                f"{spend_dir} does not exist; create it or fix the path"
             )
-        _LOG.info("spend log: %s", spend_path)
+        _check_read_only_agrees(config, ports)
+        _LOG.info("spend log: %s", settings.spend_path)
         self._config = config
         self._ports = ports
-        self._session_path = session_path
-        self._spend_path = spend_path
-        self._retry = retry
-        self._guards = guards
-        self._verifier = verifier
+        self._session_path = settings.session_path
+        self._spend_path = settings.spend_path
+        self._retry = settings.retry
+        self._guards = settings.guards
+        self._verifier = settings.verifier
 
     def run(self, task: Task) -> RunResult:
         with open_writer(self._session_path) as writer:
@@ -202,3 +213,18 @@ _CHANGED = (
 def _note_cut(writer: EventWriter) -> None:
     if writer.cut_tail:
         _LOG.warning("cut a torn final line of %d bytes", len(writer.cut_tail))
+
+
+def _check_read_only_agrees(config: Config, ports: Ports) -> None:
+    """A tool is read-only in one place only: both ports must say the same for every
+    tool the configuration (and the one the switch rung changes to) lists."""
+    tools = (*config.tools, *(config.switch_to.tools if config.switch_to else ()))
+    for tool in tools:
+        name = tool.get("name")
+        if not isinstance(name, str):
+            continue
+        if ports.read_only(name) != ports.access(name).read_only:
+            raise PortsDisagreeError(
+                f"Ports.read_only and Ports.access disagree about {name!r}; build "
+                "both from one ToolRegistry (its read_only and access methods)"
+            )

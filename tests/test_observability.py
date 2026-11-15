@@ -426,6 +426,19 @@ def test_a_call_requested_and_never_completed_is_an_open_span_to_the_log_end() -
     assert (tool.parent, tool.duration_ms) == ("s1/r1/turn:1", 3000)
 
 
+def test_calls_pending_while_the_run_waits_for_approval_are_open_spans() -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("tool_requested", 2, tool_use_id="a", name="write"),
+        make("approval_requested", 3, tool_use_id="a", question="ok?"),
+        make("run_paused", 4, reason="awaiting_approval", resume_from=3),
+    ]
+    tool = next(s for s in spans(log) if s.kind == "tool_call")
+    assert tool.attributes["loomcore.tool.open"] is True
+    assert tool.attributes["loomcore.tool.ok"] is None  # same keys as any tool span
+
+
 def test_a_completion_with_no_request_that_looks_like_a_call_that_ran_is_reported(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

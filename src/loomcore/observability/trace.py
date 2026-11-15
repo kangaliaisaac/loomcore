@@ -24,9 +24,8 @@ from loomcore.events import (
     ToolRequested,
     TurnStarted,
 )
-from loomcore.finish import NAME as FINISH_NAME
 from loomcore.observability.cost import Tokens, find_usage
-from loomcore.replay import content_blocks
+from loomcore.replay import finish_call
 
 _LOG = logging.getLogger(__name__)
 Kind = Literal["run", "turn", "model_call", "tool_call"]
@@ -98,7 +97,8 @@ def _in_turns(base: str, run_id: str, log: list[Event]) -> Iterator[tuple[str, E
 
 def _tool_spans(base: str, run_id: str, log: list[Event]) -> list[Span]:
     """A span for each call that was requested: it ends at its completion, or, for a
-    call with none (a crash mid-tool), at the run's last event, marked open. A
+    call with none (a crash mid-tool, or a run paused for approval), at the run's
+    last event, marked open. A
     completion with no request has no span (spec 3.8); one that looks like a call
     that ran is reported."""
     asked: dict[str, tuple[str, ToolRequested]] = {}
@@ -120,19 +120,20 @@ def _tool_spans(base: str, run_id: str, log: list[Event]) -> list[Span]:
 
 def _report_orphans(orphans: list[ToolCompleted], log: list[Event]) -> None:
     """A completion with no request is by design for the `finish` call and for a call
-    that did not run (`ok=false`, no time spent); any other is a damaged log."""
-    names = {
-        str(block["id"]): block.get("name")
+    that did not run (`ok=false`, no time spent); any other is a damaged log. This is
+    the one place the core logs, so a damaged log is not silent (spec 3.8); a real call
+    that failed in under a millisecond looks like "did not run" and is not reported."""
+    if not orphans:
+        return
+    finishing = {
+        found[0]
         for event in log
-        if isinstance(event, ModelCall)
-        for block in content_blocks(event.message)
-        if block.get("type") == "tool_use" and "id" in block
+        if isinstance(event, ModelCall) and (found := finish_call(event.message))
     }
     odd = [
         done.tool_use_id
         for done in orphans
-        if names.get(done.tool_use_id) != FINISH_NAME
-        and (done.ok or done.duration_ms > 0)
+        if done.tool_use_id not in finishing and (done.ok or done.duration_ms > 0)
     ]
     if odd:
         _LOG.warning(
@@ -249,7 +250,8 @@ def _tool_span(
 def _open_tool_span(
     base: str, parent: str, asked: ToolRequested, end: datetime
 ) -> Span:
-    """A call that was requested and never completed: it ran until the log ended."""
+    """A call that was requested and not completed when the log ended (a crash
+    mid-tool, or a run paused for an approval): it is open until the last event."""
     return Span(
         _id(base, "tool_call", asked.tool_use_id),
         parent,
@@ -261,6 +263,8 @@ def _open_tool_span(
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": asked.name,
             "gen_ai.tool.call.id": asked.tool_use_id,
+            "loomcore.tool.ok": None,
+            "loomcore.tool.cached": None,
             "loomcore.tool.open": True,
         },
     )

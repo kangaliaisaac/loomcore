@@ -1,6 +1,6 @@
 {
   "version": "2026-11-15",
-  "source": "Anthropic's published model pricing table, USD per million tokens, fetched 2026-11-15",
+  "source": "Anthropic's published model pricing table, USD per million tokens, fetched 2026-11-15; cache writes are 1.25x (5m) and 2x (1h) input, cache hits 0.1x input (0.05x for Opus and Sonnet 5.5, 0.025x for Fable 5.2) per its footnotes",
   "models": {
     "claude-fable-5-2": {
       "input": "8", "output": "40",

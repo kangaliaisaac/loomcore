@@ -1,6 +1,7 @@
 """f21: spans from a recorded log are stable; pricing from tokens matches
 hand-computed values; cache read and write tokens are priced separately (spec 3.8)."""
 
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -64,6 +65,29 @@ def test_the_vendored_table_is_the_published_one() -> None:
 def test_a_model_the_table_does_not_list_is_an_error_that_says_what_to_do() -> None:
     with pytest.raises(UnknownModelError, match="pricing table"):
         price(usage("claude-unknown-1", input=1), TABLE)
+
+
+def test_the_published_ratios_hold_in_every_row() -> None:
+    """The published table's multipliers (and its footnotes on cache hits), so a
+    mistyped row is caught rather than restated."""
+    reads = {
+        "claude-fable-5-2": D("0.025"),
+        "claude-opus-5-5": D("0.05"),
+        "claude-sonnet-5-5": D("0.05"),
+        "claude-haiku-5-5": D("0.1"),
+    }
+    assert set(TABLE.models) == set(reads)
+    for name, row in TABLE.models.items():
+        for tier in (row, row.long_context):
+            if tier is None:
+                continue
+            assert tier.cache_write_5m == tier.input * D("1.25"), name
+            assert tier.cache_write_1h == tier.input * 2, name
+            assert tier.cache_read == tier.input * reads[name], name
+    haiku = TABLE.price_of("claude-haiku-5-5")
+    assert haiku.long_context is not None
+    assert haiku.long_context.input == haiku.input * 5
+    assert haiku.long_context.output == haiku.output * 5
 
 
 # --- pricing from tokens ------------------------------------------------------
@@ -142,6 +166,12 @@ def test_cache_writes_with_no_breakdown_are_five_minute_writes() -> None:
     assert usage_of(message).tokens.cache_write_5m == 300
 
 
+@pytest.mark.parametrize("bad", [1840.0, "1840", None, -1, True])
+def test_a_usage_field_that_is_not_a_count_is_an_error_not_free(bad: JsonValue) -> None:
+    with pytest.raises(ValueError, match="input_tokens"):
+        usage_of(response(input_tokens=bad))
+
+
 def test_a_response_with_no_usage_cannot_be_priced() -> None:
     with pytest.raises(ValueError, match="usage"):
         usage_of({"model": "claude-sonnet-5-5", "content": []})
@@ -183,6 +213,24 @@ def test_the_table_prices_for_the_driver_and_says_which_version() -> None:
     assert pricing.worst_case(request) == D("0.083920")
     with pytest.raises(UnknownModelError):
         pricing.worst_case(ModelRequest("nope", "s", [], (), max_tokens=1))
+
+
+def test_a_log_with_calls_that_have_no_usage_counts_them_unpriced() -> None:
+    fake = make("model_call", 1, message={"content": []})
+    costs = tally([fake, call(2)], TABLE)
+    assert (costs["r1"].calls, costs["r1"].unpriced) == (1, 1)
+    assert tally([fake], TABLE)["r1"].usd == D(0)
+
+
+def test_the_worst_case_prices_a_cached_prefix_at_the_dearest_input_rate() -> None:
+    pricing = TablePricing(TABLE, count_input=lambda _: 1000)
+    plain = ModelRequest("claude-sonnet-5-5", "s", [], (), max_tokens=8192)
+    cached = ModelRequest(
+        "claude-sonnet-5-5", "s", [], (), max_tokens=8192, cache_prefix=1
+    )
+    # 1000 tokens at the 1-hour write rate ($4) instead of the input rate ($2).
+    assert pricing.worst_case(cached) == D("0.085920")
+    assert pricing.worst_case(cached) > pricing.worst_case(plain)
 
 
 def test_the_table_loads_from_json_with_exact_decimals() -> None:
@@ -256,6 +304,40 @@ def test_a_model_span_carries_the_gen_ai_attributes_and_its_tokens() -> None:
     assert tool.attributes["gen_ai.tool.name"] == "search"
     assert tool.attributes["gen_ai.tool.call.id"] == "t1"
     assert tool.attributes["loomcore.tool.ok"] is True
+
+
+def test_a_turn_written_the_way_the_driver_writes_it_holds_its_model_call() -> None:
+    """The driver logs `turn_started` just after the answer, with the `model_call`,
+    so the two share a timestamp and the call started `duration_ms` before it."""
+    at = "2026-11-03T08:00:10.000Z"
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1, timestamp=at),
+        make("model_call", 2, message=response(), duration_ms=4000, timestamp=at),
+        make("tool_requested", 3, tool_use_id="t1", name="search"),
+        make("tool_completed", 4, tool_use_id="t1", duration_ms=0),
+        make("turn_started", 5, turn=2),
+        make("model_call", 6, message=response(), duration_ms=250),
+    ]
+    found = spans(log)
+    turn = next(s for s in found if s.id == "s1/r1/turn:1")
+    model = next(s for s in found if s.id == "s1/r1/model_call:2")
+    assert model.parent == turn.id
+    assert (turn.start, model.start) == (model.start, model.end - timedelta(seconds=4))
+    assert found.index(turn) < found.index(model)  # a parent before its child
+    second = next(s for s in found if s.id == "s1/r1/turn:5")
+    assert turn.end == second.start  # a turn ends where the next begins
+
+
+def test_a_denied_call_has_a_span_that_says_it_did_not_succeed() -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("tool_requested", 2, tool_use_id="t1", name="rm"),
+        make("tool_completed", 3, tool_use_id="t1", ok=False, duration_ms=0),
+    ]
+    tool = next(s for s in spans(log) if s.kind == "tool_call")
+    assert tool.attributes["loomcore.tool.ok"] is False
 
 
 def test_a_call_with_no_logged_duration_falls_back_to_the_timestamps() -> None:

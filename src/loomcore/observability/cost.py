@@ -7,7 +7,7 @@ never rounded here.
 
 import json
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import cache
 from importlib import resources
@@ -108,8 +108,12 @@ class Usage:
 
 
 def _count(block: JsonObject, key: str) -> int:
+    """A token count: 0 when the key is absent, a `ValueError` when it is not a
+    whole number (a malformed block must not price as free)."""
     value = block.get(key, 0)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise ValueError(f"usage.{key} is {value!r}, not a count of tokens")
 
 
 def usage_of(message: JsonObject) -> Usage:
@@ -153,9 +157,10 @@ def price(usage: Usage, table: PricingTable) -> Decimal:
 
 @dataclass(frozen=True)
 class RunCost:
-    calls: int
+    calls: int  # the calls priced
     tokens: Tokens
     usd: Decimal
+    unpriced: int = 0  # calls whose response had no `usage` (a scripted fake's)
 
 
 def tally(events: Iterable[Event], table: PricingTable) -> dict[str, RunCost]:
@@ -163,14 +168,19 @@ def tally(events: Iterable[Event], table: PricingTable) -> dict[str, RunCost]:
     `cost_usd` is advisory and ignored). A fork's calls are its own."""
     runs: dict[str, RunCost] = {}
     for event in events:
-        if isinstance(event, ModelCall):
-            usage = usage_of(event.message)
-            before = runs.get(event.run_id, RunCost(0, Tokens(), Decimal(0)))
-            runs[event.run_id] = RunCost(
-                before.calls + 1,
-                before.tokens + usage.tokens,
-                before.usd + price(usage, table),
-            )
+        if not isinstance(event, ModelCall):
+            continue
+        before = runs.get(event.run_id, RunCost(0, Tokens(), Decimal(0)))
+        if tokens_of(event.message) is None:
+            runs[event.run_id] = replace(before, unpriced=before.unpriced + 1)
+            continue
+        usage = usage_of(event.message)
+        runs[event.run_id] = RunCost(
+            before.calls + 1,
+            before.tokens + usage.tokens,
+            before.usd + price(usage, table),
+            before.unpriced,
+        )
     return runs
 
 
@@ -183,21 +193,27 @@ class TablePricing:
     count_input: Callable[[ModelRequest], int]
 
     def worst_case(self, request: ModelRequest) -> Decimal:
-        """The known input plus `max_tokens` of output, at the model's rates."""
+        """The known input plus `max_tokens` of output, at the model's rates. A
+        request that sets a cache prefix may write it to the cache, which costs more
+        than plain input, so its input is priced at the dearest of the three."""
         known = self.count_input(request)
         rates = self.table.price_of(request.model).for_prompt(known)
-        return (known * rates.input + request.max_tokens * rates.output) / PER_TOKENS
+        per_input = rates.input
+        if request.cache_prefix is not None:
+            per_input = max(rates.input, rates.cache_write_5m, rates.cache_write_1h)
+        return (known * per_input + request.max_tokens * rates.output) / PER_TOKENS
 
     def cost(self, message: JsonObject) -> tuple[Decimal, str]:
         return price(usage_of(message), self.table), self.table.version
 
 
 def tokens_of(message: JsonValue) -> Tokens | None:
-    """The tokens of a response if it has a usage block, else None (a log written
-    by a fake model has none)."""
+    """The tokens of a response, or None when it has no `model` and `usage` (a log
+    written by a scripted fake has none). A malformed `usage` still raises."""
     if not isinstance(message, dict):
         return None
-    try:
-        return usage_of(message).tokens
-    except ValueError:
+    if not isinstance(message.get("model"), str) or not isinstance(
+        message.get("usage"), dict
+    ):
         return None
+    return usage_of(message).tokens

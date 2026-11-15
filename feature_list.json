@@ -198,5 +198,13 @@
     "spec": "6",
     "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion",
     "passes": false
+  },
+  {
+    "id": "f26",
+    "card": "10",
+    "title": "Untrusted tool output is marked as data",
+    "spec": "3.7, Untrusted results",
+    "acceptance": "a tool's output is rendered between tags carrying the call's id, with the ladder's message after them; what the harness writes (a denial, not run, a critique, the registry's own messages) is not wrapped; a replay renders the same; an older log without the new fields renders as before",
+    "passes": true
   }
 ]

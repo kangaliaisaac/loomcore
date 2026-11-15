@@ -355,3 +355,15 @@ def test_the_registrys_own_messages_are_not_marked_as_a_tools_data(
     assert (refused.ok, refused.from_tool) == (False, False)  # the harness's sandbox
     missing = tools.registry.execute("read_file", {"path": "missing.txt"})
     assert (missing.ok, missing.from_tool) == (False, True)  # the OS's words, a tool's
+
+
+def test_a_tools_own_error_guidance_is_the_tools_words_and_stays_data(
+    tools: Registry,
+) -> None:
+    def picky(text: str) -> str:
+        """Refuses empty text."""
+        raise ToolError("write something first")
+
+    tools.registry.register(picky)
+    result = tools.registry.execute("picky", {"text": ""})
+    assert (result.ok, result.from_tool) == (False, True)

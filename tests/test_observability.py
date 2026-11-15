@@ -166,6 +166,30 @@ def test_cache_writes_with_no_breakdown_are_five_minute_writes() -> None:
     assert usage_of(message).tokens.cache_write_5m == 300
 
 
+def test_a_null_cache_count_is_zero_but_a_null_input_count_is_an_error() -> None:
+    message = response(
+        cache_read_input_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_creation={
+            "ephemeral_5m_input_tokens": None,
+            "ephemeral_1h_input_tokens": None,
+        },
+    )
+    assert usage_of(message) == usage(input=1840, output=312)
+    with pytest.raises(ValueError, match="input_tokens"):
+        usage_of(response(input_tokens=None))
+
+
+def test_a_dated_snapshot_id_is_priced_as_its_model() -> None:
+    dated = usage("claude-sonnet-5-5-20261101", input=1_000_000)
+    assert price(dated, TABLE) == D(2)
+    pricing = TablePricing(TABLE, count_input=lambda _: 1000)
+    request = ModelRequest("claude-opus-5-5-20261101", "s", [], (), max_tokens=1)
+    assert pricing.worst_case(request) == D("0.004020")
+    with pytest.raises(UnknownModelError):
+        price(usage("claude-sonnet-5-5-latest", input=1), TABLE)
+
+
 @pytest.mark.parametrize("bad", [1840.0, "1840", None, -1, True])
 def test_a_usage_field_that_is_not_a_count_is_an_error_not_free(bad: JsonValue) -> None:
     with pytest.raises(ValueError, match="input_tokens"):
@@ -306,6 +330,11 @@ def test_a_model_span_carries_the_gen_ai_attributes_and_its_tokens() -> None:
     assert tool.attributes["loomcore.tool.ok"] is True
 
 
+def at10(seconds: int) -> str:
+    """A timestamp `seconds` after the ten-second mark of the test clock."""
+    return f"2026-11-03T08:00:{10 + seconds:02d}.000Z"
+
+
 def test_a_turn_written_the_way_the_driver_writes_it_holds_its_model_call() -> None:
     """The driver logs `turn_started` just after the answer, with the `model_call`,
     so the two share a timestamp and the call started `duration_ms` before it."""
@@ -314,12 +343,22 @@ def test_a_turn_written_the_way_the_driver_writes_it_holds_its_model_call() -> N
         make("run_started", 0),
         make("turn_started", 1, turn=1, timestamp=at),
         make("model_call", 2, message=response(), duration_ms=4000, timestamp=at),
-        make("tool_requested", 3, tool_use_id="t1", name="search"),
-        make("tool_completed", 4, tool_use_id="t1", duration_ms=0),
-        make("turn_started", 5, turn=2),
-        make("model_call", 6, message=response(), duration_ms=250),
+        make("tool_requested", 3, tool_use_id="t1", name="search", timestamp=at10(1)),
+        make("tool_completed", 4, tool_use_id="t1", duration_ms=0, timestamp=at10(2)),
+        make("turn_started", 5, turn=2, timestamp=at10(3)),
+        make(
+            "model_call",
+            6,
+            message=response(),
+            duration_ms=250,
+            timestamp=at10(3),
+        ),
     ]
     found = spans(log)
+    assert all(s.start <= s.end for s in found)
+    for span in found:  # a parent is listed before its children
+        if span.parent is not None:
+            assert [s.id for s in found].index(span.parent) < found.index(span)
     turn = next(s for s in found if s.id == "s1/r1/turn:1")
     model = next(s for s in found if s.id == "s1/r1/model_call:2")
     assert model.parent == turn.id

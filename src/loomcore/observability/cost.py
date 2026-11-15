@@ -6,6 +6,7 @@ never rounded here.
 """
 
 import json
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -18,6 +19,7 @@ from loomcore.events import Event, JsonObject, ModelCall
 from loomcore.ports import ModelRequest
 
 PER_TOKENS = Decimal(1_000_000)
+_DATED = re.compile(r"-\d{8}$")
 
 
 class UnknownModelError(LookupError):
@@ -60,12 +62,14 @@ class PricingTable(BaseModel):
     models: dict[str, ModelPrice]
 
     def price_of(self, model: str) -> ModelPrice:
-        try:
-            return self.models[model]
-        except KeyError:
-            raise UnknownModelError(
-                f"no price for {model!r} in pricing table {self.version}"
-            ) from None
+        """The model's prices. The table is keyed by undated ids; a dated snapshot
+        of one (`claude-sonnet-5-5-20261101`) is priced as the model it snapshots."""
+        for key in (model, _DATED.sub("", model)):
+            if key in self.models:
+                return self.models[key]
+        raise UnknownModelError(
+            f"no price for {model!r} in pricing table {self.version}"
+        )
 
 
 @cache
@@ -107,10 +111,13 @@ class Usage:
     tokens: Tokens
 
 
-def _count(block: JsonObject, key: str) -> int:
+def _count(block: JsonObject, key: str, *, nullable: bool = False) -> int:
     """A token count: 0 when the key is absent, a `ValueError` when it is not a
-    whole number (a malformed block must not price as free)."""
+    whole number (a malformed block must not price as free). The API documents the
+    cache counts as `integer | null`, so those (`nullable`) read null as 0."""
     value = block.get(key, 0)
+    if value is None and nullable:
+        return 0
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
     raise ValueError(f"usage.{key} is {value!r}, not a count of tokens")
@@ -125,17 +132,17 @@ def usage_of(message: JsonObject) -> Usage:
     split = usage.get("cache_creation")
     if isinstance(split, dict):
         writes = (
-            _count(split, "ephemeral_5m_input_tokens"),
-            _count(split, "ephemeral_1h_input_tokens"),
+            _count(split, "ephemeral_5m_input_tokens", nullable=True),
+            _count(split, "ephemeral_1h_input_tokens", nullable=True),
         )
     else:
-        writes = (_count(usage, "cache_creation_input_tokens"), 0)
+        writes = (_count(usage, "cache_creation_input_tokens", nullable=True), 0)
     return Usage(
         model,
         Tokens(
             _count(usage, "input_tokens"),
             _count(usage, "output_tokens"),
-            _count(usage, "cache_read_input_tokens"),
+            _count(usage, "cache_read_input_tokens", nullable=True),
             *writes,
         ),
     )

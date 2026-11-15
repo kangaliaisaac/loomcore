@@ -12,6 +12,7 @@ from functools import reduce
 
 from pydantic import JsonValue
 
+from loomcore.eventlog import LogCorruptError
 from loomcore.events import (
     ApprovalDenied,
     ApprovalGranted,
@@ -196,14 +197,17 @@ def _context(state: RunState, event: Event) -> RunState:
 def _with_ids(known: tuple[str, ...], new: Sequence[object]) -> tuple[str, ...]:
     """`known` and the ids in `new` that are not in it yet, in order. The events
     types hold only strings, so a number here means a line that bypassed validation:
-    that is a damaged log, not something to skip."""
+    that is a damaged log (`LogCorruptError`, the one a caller already catches), not
+    something to skip."""
+    ids: list[str] = []
     for item_id in new:
         if not isinstance(item_id, str):
-            raise ValueError(
-                f"context id {item_id!r} is not a string: the log is damaged"
+            raise LogCorruptError(
+                f"context id {item_id!r} is not a string: the log is damaged and "
+                "needs repair"
             )
-    added = [i for i in new if isinstance(i, str) and i not in known]
-    return (*known, *dict.fromkeys(added))
+        ids.append(item_id)
+    return (*known, *dict.fromkeys(i for i in ids if i not in known))
 
 
 def _tools(state: RunState, event: Event) -> RunState:

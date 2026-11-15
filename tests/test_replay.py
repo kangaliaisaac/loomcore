@@ -7,7 +7,7 @@ from factories import calling, make
 from fakes import write_log
 from pydantic import ValidationError
 
-from loomcore.eventlog import read_events
+from loomcore.eventlog import LogCorruptError, read_events
 from loomcore.events import Event
 from loomcore.replay import (
     ForkChainError,
@@ -203,7 +203,7 @@ def test_a_non_string_id_that_got_past_validation_is_a_damaged_log() -> None:
     packed = make("context_packed", 1, dropped=["seq:r1:1"]).model_copy(
         update={"dropped": ["seq:r1:1", 7]}  # a copy skips validation
     )
-    with pytest.raises(ValueError, match="damaged"):
+    with pytest.raises(LogCorruptError, match="damaged"):
         replay([make("run_started"), packed])
 
 

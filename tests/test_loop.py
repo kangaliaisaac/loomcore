@@ -42,6 +42,7 @@ from loomcore.loop import (
     ConfigChangedError,
     Driver,
     RunIdTakenError,
+    Settings,
     SpendLogMissingError,
 )
 from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
@@ -315,7 +316,9 @@ def test_the_spend_log_path_is_logged_and_a_missing_directory_refused(
     assert str(tmp_path / "spend.jsonl") in caplog.text
     with pytest.raises(SpendLogMissingError):
         Driver(
-            CONFIG, World().ports(), tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"
+            CONFIG,
+            World().ports(),
+            Settings(tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"),
         )
 
 

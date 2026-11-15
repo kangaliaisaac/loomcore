@@ -29,7 +29,7 @@ from loomcore.conversation import call_hash
 from loomcore.engine import MAX_TOGETHER
 from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.ports import RunResult, Task, ToolResult
 from loomcore.schedule import Access, conflict
 
@@ -60,7 +60,7 @@ class Lanes:
 
 def driver(world: World, tmp: Path, tool: Tool) -> Driver:
     ports = replace(world.ports(), tool=tool)
-    return Driver(CONFIG, ports, tmp / "s1.jsonl", tmp / "spend.jsonl")
+    return Driver(CONFIG, ports, Settings(tmp / "s1.jsonl", tmp / "spend.jsonl"))
 
 
 def log(tmp: Path) -> tuple[Event, ...]:

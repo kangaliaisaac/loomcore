@@ -14,7 +14,7 @@ from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event, JsonObject, ToolCompleted
 from loomcore.guards import Guards
 from loomcore.limits import Limits
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.notices import Notices
 from loomcore.ports import (
     Config,
@@ -197,14 +197,10 @@ class World:
         guards: Guards = Guards(),  # noqa: B008
         verifier: Verifier | None = None,
     ) -> Driver:
-        return Driver(
-            config,
-            self.ports(),
-            tmp / "s1.jsonl",
-            tmp / "spend.jsonl",
-            guards=guards,
-            verifier=verifier,
+        settings = Settings(
+            tmp / "s1.jsonl", tmp / "spend.jsonl", guards=guards, verifier=verifier
         )
+        return Driver(config, self.ports(), settings)
 
 
 def ref(run_id: str = "r1") -> RunRef:

@@ -6,6 +6,7 @@ configuration matches, repairs the spend log, and hands the run to `engine.Run`.
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from loomcore.engine import ResumeRefusedError, Run
@@ -35,32 +36,36 @@ class SpendLogMissingError(Exception):
     """The spend log's directory does not exist; a mistyped path would read as $0."""
 
 
+@dataclass(frozen=True)
+class Settings:
+    """Where the driver keeps its files, and the policy that is not part of the
+    configuration digest: a resume may use a different retry policy, guards or
+    verifier than the process that started the run."""
+
+    session_path: Path
+    spend_path: Path
+    retry: RetryPolicy = RetryPolicy()  # noqa: RUF009  (frozen, so shared safely)
+    guards: Guards = Guards()  # noqa: RUF009  (frozen, so shared safely)
+    verifier: Verifier | None = None
+
+
 class Driver:
     """Runs a task, resumes a paused or crashed run, forks one from a clean point."""
 
-    def __init__(  # noqa: PLR0913  (the composition root's settings, all read once)
-        self,
-        config: Config,
-        ports: Ports,
-        session_path: Path,
-        spend_path: Path,
-        retry: RetryPolicy = RetryPolicy(),  # noqa: B008  (frozen, so shared safely)
-        *,
-        guards: Guards = Guards(),  # noqa: B008  (frozen, so shared safely)
-        verifier: Verifier | None = None,
-    ) -> None:
-        if not spend_path.parent.is_dir():
+    def __init__(self, config: Config, ports: Ports, settings: Settings) -> None:
+        spend_dir = settings.spend_path.parent
+        if not spend_dir.is_dir():
             raise SpendLogMissingError(
-                f"{spend_path.parent} does not exist; create it or fix the path"
+                f"{spend_dir} does not exist; create it or fix the path"
             )
-        _LOG.info("spend log: %s", spend_path)
+        _LOG.info("spend log: %s", settings.spend_path)
         self._config = config
         self._ports = ports
-        self._session_path = session_path
-        self._spend_path = spend_path
-        self._retry = retry
-        self._guards = guards
-        self._verifier = verifier
+        self._session_path = settings.session_path
+        self._spend_path = settings.spend_path
+        self._retry = settings.retry
+        self._guards = settings.guards
+        self._verifier = settings.verifier
 
     def run(self, task: Task) -> RunResult:
         with open_writer(self._session_path) as writer:

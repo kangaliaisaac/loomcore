@@ -1,6 +1,7 @@
 """f16, part 2: the driver builds its window through the context store."""
 
 import json
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from fakes import CAPS, CONFIG, Crash, World, fake_count, reply, use
 from fakes import ref as run_ref
 
 from loomcore.conversation import build_messages
+from loomcore.engine import remembered
 from loomcore.eventlog import read_events
 from loomcore.events import (
     ContextCompacted,
@@ -239,3 +241,22 @@ def test_a_window_that_is_over_its_budget_says_so_in_the_process_log(
     with caplog.at_level("WARNING"):
         finish(world, task, tmp_path)
     assert "context window over its budget" in caplog.text
+
+
+def test_the_token_memo_forgets_the_least_recently_used_entry() -> None:
+    memo: OrderedDict[str, int] = OrderedDict()
+    asked: list[str] = []
+
+    def measure(key: str) -> int:
+        asked.append(key)
+        return len(key)
+
+    def count(key: str) -> int:
+        return remembered(memo, key, lambda: measure(key), 2)
+
+    assert [count("a"), count("bb"), count("a")] == [1, 2, 1]
+    assert asked == ["a", "bb"]  # the second "a" was remembered
+    count("ccc")  # "bb" was the least recently used, so it goes
+    assert list(memo) == ["a", "ccc"]
+    count("bb")
+    assert asked == ["a", "bb", "ccc", "bb"] and len(memo) == 2

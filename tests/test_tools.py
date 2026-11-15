@@ -5,9 +5,14 @@ from contextvars import copy_context
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from loomcore.notices import Notice, Notices
+from loomcore.notices import (
+    NoteWrittenNotice,
+    Notice,
+    Notices,
+    SandboxDeniedNotice,
+)
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError, Refusal
 from loomcore.tools import ToolError, ToolRegistry
@@ -187,14 +192,14 @@ def test_a_refusal_becomes_a_sandbox_denied_notice(tools: Registry) -> None:
     assert not result.ok
     (notice,) = notices
     assert notice.kind == "sandbox_denied"
-    assert notice.fields["action"] == "read"
-    assert notice.fields["target"] == "../secret"
+    assert isinstance(notice, SandboxDeniedNotice)
+    assert (notice.action, notice.target) == ("read", "../secret")
 
 
 def test_a_note_becomes_a_note_written_notice(tools: Registry) -> None:
     tools.registry.register(write_note)
     _, notices = tools.run("write_note", {"text": "x"})
-    assert notices == [Notice("note_written", {"path": "notes.md"})]
+    assert notices == [NoteWrittenNotice(path="notes.md")]
 
 
 def test_notices_land_with_the_call_that_caused_them(tools: Registry) -> None:
@@ -239,7 +244,7 @@ def test_a_worker_thread_under_a_copied_context_reports_to_its_call(
         )
         worker.start()
         worker.join()
-    assert bucket.snapshot() == (Notice("note_written", {"path": "notes.md"}),)
+    assert bucket.snapshot() == (NoteWrittenNotice(path="notes.md"),)
 
 
 def test_a_tool_named_finish_is_refused(tools: Registry) -> None:
@@ -293,9 +298,8 @@ def test_a_command_refusal_is_a_failed_result_and_its_notice_is_kept(
     result, notices = tools.run("run_it", {})
     assert not result.ok
     assert notices == [
-        Notice(
-            "sandbox_denied",
-            {"action": "exec", "target": "/bin/sh", "reason": "not an allowed command"},
+        SandboxDeniedNotice(
+            action="exec", target="/bin/sh", reason="not an allowed command"
         )
     ]
 
@@ -334,6 +338,14 @@ def test_a_notice_is_either_in_the_closed_buckets_snapshot_or_refused_as_late(
     with tools.notices.collecting() as bucket:
         tools.notices.noted("a.md")
     assert bucket.closed
-    assert bucket.snapshot() == (Notice("note_written", {"path": "a.md"}),)
-    assert not bucket.add(Notice("note_written", {"path": "late.md"}))
+    assert bucket.snapshot() == (NoteWrittenNotice(path="a.md"),)
+    assert not bucket.add(NoteWrittenNotice(path="late.md"))
     assert len(bucket.snapshot()) == 1
+
+
+def test_a_notice_with_a_misspelt_or_missing_field_is_refused_when_built() -> None:
+    with pytest.raises(ValidationError):
+        NoteWrittenNotice(pth="notes.md")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        SandboxDeniedNotice(action="read", target="x")  # type: ignore[call-arg]
+    assert NoteWrittenNotice(path="n.md").event_fields() == {"path": "n.md"}

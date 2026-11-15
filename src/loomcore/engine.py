@@ -578,7 +578,7 @@ class Run:
 
     def _emit_notices(self, tool_use_id: str, notices: Sequence[Notice]) -> list[Event]:
         return [
-            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.fields)
+            self.emit(notice.kind, tool_use_id=tool_use_id, **notice.event_fields())
             for notice in notices
         ]
 

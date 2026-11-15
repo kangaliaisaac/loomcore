@@ -138,8 +138,8 @@ def recount(items: Sequence[Item], count: Counter) -> list[Item]:
 
 
 def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared | None:
-    """The exchange with its results cleared, or None when that would not make it
-    smaller (no result, or one shorter than the placeholder)."""
+    """The exchange with its results and its calls' inputs (but the plan's) cleared,
+    or None when that would not make it smaller."""
     blank = clear_results(messages)
     if blank == tuple(messages):
         return None  # no tool result to clear, so nothing to count

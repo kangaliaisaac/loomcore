@@ -23,6 +23,7 @@ from loomcore.events import (
     RunStarted,
     ToolCompleted,
     ToolRequested,
+    VerificationFailed,
 )
 from loomcore.replay import RunState, apply, finish_call, tool_use_ids, unanswered_asks
 
@@ -132,7 +133,13 @@ def _effects(
     old: RunState, state: RunState, event: Event, read_only: ReadOnly
 ) -> list[Effect]:
     match event:
-        case RunStarted() | RunForked() | RunResumed(reason="limit"):
+        # A rejected claim goes back to the model, which answers the critique.
+        case (
+            RunStarted()
+            | RunForked()
+            | RunResumed(reason="limit")
+            | VerificationFailed()
+        ):
             return [CallModel()]
         case RunResumed(reason="crash"):
             return _after_crash(state, read_only)

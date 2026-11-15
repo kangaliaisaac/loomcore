@@ -78,6 +78,24 @@ def test_max_turns_pauses_when_the_turns_are_used() -> None:
     assert check(log, limits(max_turns=2)) == LimitReached("max_turns")
 
 
+def failures(count: int) -> list[Event]:
+    return [make("verification_failed", n) for n in range(1, count + 1)]
+
+
+def test_max_verifications_pauses_when_the_failures_are_used() -> None:
+    log = [started(), *failures(2)]
+    assert check(log, limits(max_verifications=3)) == WithinLimits()
+    assert check(log, limits(max_verifications=2)) == LimitReached("max_verifications")
+
+
+def test_max_turns_wins_over_max_verifications_and_both_beat_timeout() -> None:
+    log = [started(), *turns(2), *failures(2)]
+    both = limits(max_turns=2, max_verifications=2, timeout=1)
+    assert check(log, both, after=5) == LimitReached("max_turns")
+    only = limits(max_turns=9, max_verifications=2, timeout=1)
+    assert check(log, only, after=5) == LimitReached("max_verifications")
+
+
 def test_timeout_pauses_on_active_time() -> None:
     log = [started()]
     assert check(log, limits(timeout=60), after=59) == WithinLimits()

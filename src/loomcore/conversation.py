@@ -15,8 +15,16 @@ from loomcore.context import (
     ItemKind,
     clear_results,
 )
-from loomcore.events import Event, JsonObject, ModelCall, RunForked, ToolCompleted
-from loomcore.replay import content_blocks, tool_use_ids
+from loomcore.events import (
+    Event,
+    JsonObject,
+    ModelCall,
+    RunForked,
+    ToolCompleted,
+    VerificationFailed,
+)
+from loomcore.replay import content_blocks, finish_call, tool_use_ids
+from loomcore.verify import critique
 
 FORK_CONTINUE = "Carry on with the task."
 CONTINUE = "Your last reply was cut off. Carry on from where it stopped."
@@ -68,11 +76,13 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
     done = {e.tool_use_id: e for e in events if isinstance(e, ToolCompleted)}
     items = [_item("task", "task", 0, [{"role": "user", "content": task}], count)]
     last = "user"
+    claim: JsonObject = {}  # the latest response, which a rejected claim came from
     plan_at: int | None = None
     for event in events:
         messages: list[JsonObject] = []
         kind: ItemKind
         if isinstance(event, ModelCall):
+            claim = event.message
             if sent := _sent(event.message):  # an empty turn would be rejected
                 messages.append({"role": "assistant", "content": sent})
             if reply := _reply(event.message, done):
@@ -80,9 +90,14 @@ def exchanges(task: JsonValue, events: Sequence[Event], count: Counter) -> list[
             kind, key = "exchange", f"seq:{event.run_id}:{event.seq}"
             if _updates_plan(event.message, done):
                 plan_at = len(items)  # the index this exchange is appended at
-        elif isinstance(event, RunForked):
-            messages = _after_fork(last, event)
-            kind, key = "hint", f"hint:{event.run_id}"
+        elif isinstance(event, RunForked | VerificationFailed):
+            messages = _hint(last, claim, event)
+            kind = "hint"
+            key = (
+                f"hint:{event.run_id}"
+                if isinstance(event, RunForked)
+                else f"verify:{event.run_id}:{event.seq}"
+            )
         if messages:
             last = str(messages[-1]["role"])
             items.append(_item(key, kind, len(items), messages, count))
@@ -165,6 +180,19 @@ def _after_fork(last: str, event: RunForked) -> list[JsonObject]:
     if last == "assistant":
         return [{"role": "user", "content": FORK_CONTINUE}]
     return []
+
+
+def _hint(
+    last: str, claim: JsonObject, event: RunForked | VerificationFailed
+) -> list[JsonObject]:
+    """The user message a fork hint or a rejected claim adds. After a `finish` call
+    the tool result already carries the critique; after a bare reply (even an empty
+    one, which is not sent) the model needs a user message to answer."""
+    if isinstance(event, RunForked):
+        return _after_fork(last, event)
+    if finish_call(claim) is not None:
+        return []
+    return [{"role": "user", "content": critique(event.verifier, event.message)}]
 
 
 def _sent(message: JsonObject) -> list[JsonValue]:

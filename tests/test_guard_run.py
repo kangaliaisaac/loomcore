@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from factories import calling, make
-from fakes import CAPS, CONFIG, Crash, World, kinds, reply, use
+from fakes import CAPS, CONFIG, Crash, World, log, reply, use
 from fakes import ref as run_ref
 
 from loomcore.eventlog import open_writer, read_events
@@ -33,10 +33,6 @@ class Rule:
 
 def driver(world: World, tmp: Path, *rules: Rule) -> Driver:
     return world.driver(tmp, guards=Guards(pre=rules))
-
-
-def log(tmp: Path) -> list[str]:
-    return kinds(read_events(tmp / "s1.jsonl").events)
 
 
 def test_a_deny_stops_the_call_and_the_model_sees_the_reason(tmp_path: Path) -> None:

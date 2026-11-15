@@ -10,7 +10,8 @@ from pathlib import Path
 from factories import START
 from pydantic import JsonValue
 
-from loomcore.events import Event, JsonObject
+from loomcore.eventlog import read_events
+from loomcore.events import Event, JsonObject, ToolCompleted
 from loomcore.guards import Guards
 from loomcore.limits import Limits
 from loomcore.loop import Driver
@@ -26,6 +27,7 @@ from loomcore.ports import (
 from loomcore.retry import CallError
 from loomcore.sandbox import Refusal
 from loomcore.schedule import Access
+from loomcore.verify import Verifier
 
 CONFIG = Config(model="m", system="be brief", tools=({"name": "search"},))
 CAPS = Limits(run_cap=None, month_cap=None)
@@ -63,10 +65,17 @@ def use(
     return {"content": blocks, "stop_reason": stop}
 
 
-def finish(result: JsonValue, *others: tuple[str, str]) -> JsonObject:
+def finish(
+    result: JsonValue, *others: tuple[str, str], call_id: str = "fin"
+) -> JsonObject:
     """A response that calls the finish tool, beside any other tool calls."""
     blocks: list[JsonValue] = [
-        {"type": "tool_use", "id": "fin", "name": "finish", "input": {"result": result}}
+        {
+            "type": "tool_use",
+            "id": call_id,
+            "name": "finish",
+            "input": {"result": result},
+        }
     ]
     blocks += [
         {"type": "tool_use", "id": i, "name": name, "input": {"q": i}}
@@ -186,9 +195,15 @@ class World:
         tmp: Path,
         config: Config = CONFIG,
         guards: Guards = Guards(),  # noqa: B008
+        verifier: Verifier | None = None,
     ) -> Driver:
         return Driver(
-            config, self.ports(), tmp / "s1.jsonl", tmp / "spend.jsonl", guards=guards
+            config,
+            self.ports(),
+            tmp / "s1.jsonl",
+            tmp / "spend.jsonl",
+            guards=guards,
+            verifier=verifier,
         )
 
 
@@ -198,3 +213,17 @@ def ref(run_id: str = "r1") -> RunRef:
 
 def kinds(events: tuple[Event, ...], run_id: str = "r1") -> list[str]:
     return [e.kind for e in events if e.run_id == run_id]
+
+
+def log(tmp: Path) -> list[str]:
+    """The kinds of the events in the session file, in order."""
+    return kinds(read_events(tmp / "s1.jsonl").events)
+
+
+def completed(tmp: Path) -> dict[str, ToolCompleted]:
+    """The session file's `tool_completed` events by tool_use id."""
+    return {
+        e.tool_use_id: e
+        for e in read_events(tmp / "s1.jsonl").events
+        if isinstance(e, ToolCompleted)
+    }

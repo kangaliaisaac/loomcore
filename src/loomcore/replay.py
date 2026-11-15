@@ -12,7 +12,6 @@ from functools import reduce
 
 from pydantic import JsonValue
 
-from loomcore.eventlog import LogCorruptError
 from loomcore.events import (
     ApprovalDenied,
     ApprovalGranted,
@@ -39,6 +38,12 @@ from loomcore.finish import NAME as FINISH
 from loomcore.finish import result_of
 from loomcore.ladder import ASK_RUNG
 from loomcore.months import month_key
+
+
+class ContextIdError(Exception):
+    """A `context_packed` or `context_compacted` line holds an id that is not a string.
+    Raised like `LogCorruptError` and `ForkChainError`: the log is damaged and needs
+    repair. Reading a line refuses it first, so this is a line that got past that."""
 
 
 class ForkChainError(Exception):
@@ -197,12 +202,11 @@ def _context(state: RunState, event: Event) -> RunState:
 def _with_ids(known: tuple[str, ...], new: Sequence[object]) -> tuple[str, ...]:
     """`known` and the ids in `new` that are not in it yet, in order. The events
     types hold only strings, so a number here means a line that bypassed validation:
-    that is a damaged log (`LogCorruptError`, the one a caller already catches), not
-    something to skip."""
+    that is a damaged log (`ContextIdError`), not something to skip."""
     ids: list[str] = []
     for item_id in new:
         if not isinstance(item_id, str):
-            raise LogCorruptError(
+            raise ContextIdError(
                 f"context id {item_id!r} is not a string: the log is damaged and "
                 "needs repair"
             )

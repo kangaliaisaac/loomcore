@@ -208,7 +208,7 @@ The field names `sessionId`, `timestamp` and the `message` block below follow th
 | `approval_requested` | driver | `tool_use_id`, `question` |
 | `approval_granted`, `approval_denied` | driver | `tool_use_id`, `by`, `note` |
 | `sandbox_denied` | driver (from the call's `Notices` bucket) | `tool_use_id` (when a tool call caused it), `action`, `target`, `reason` |
-| `context_packed` | driver | `selected` (the whole window, item ids; strings only, a number or null is refused when the line is read and folding one is a `LogCorruptError`), `dropped` (only the ids newly dropped, not the complement of `selected`), `tokens`, `budget` |
+| `context_packed` | driver | `selected` (the whole window, item ids; strings only, a number or null is refused when the line is read and folding one is a `ContextIdError`, a damaged log like a broken fork chain), `dropped` (only the ids newly dropped, not the complement of `selected`), `tokens`, `budget` |
 | `context_compacted` | driver | `strategy`, `tokens_before`, `tokens_after`, `cleared` (the ids newly cleared; absent in an older log) |
 | `verification_passed`, `verification_failed` | driver (from the verifier's `Verdict`) | `verifier` (who judged), `message` (the critique on a failure; empty on a pass) |
 | `escalation` | driver | `rung`, `reason`, `tool_use_id` and `call_hash` (of the first call that tripped), `tripped` (every call that tripped), `config` and `config_digest` (on switch strategy) |

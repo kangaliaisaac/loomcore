@@ -4,8 +4,9 @@ import json
 from collections.abc import Sequence
 
 from factories import calling, make
+from pydantic import JsonValue
 
-from loomcore.context import CLEARED, pack
+from loomcore.context import CLEARED, CLEARED_INPUT, PLAN_TOOL, apply_cleared, pack
 from loomcore.conversation import (
     CONTINUE,
     FORK_CONTINUE,
@@ -199,3 +200,90 @@ def test_item_ids_stay_unique_in_a_fork_of_a_fork_because_seq_restarts_per_run()
     ]
     pinned = [i for i in items if i.pinned]
     pack([i for i in items if not i.pinned], 10_000, pinned)  # the first window works
+
+
+def test_the_plan_exchange_clears_its_other_calls_inputs_but_keeps_the_plan() -> None:
+    big = "x" * 2000
+    calls: JsonObject = {
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "p",
+                "name": PLAN_TOOL,
+                "input": {"text": "1. go"},
+            },
+            {
+                "type": "tool_use",
+                "id": "w",
+                "name": "write_file",
+                "input": {"path": "a.py", "content": big},
+            },
+        ],
+        "stop_reason": "tool_use",
+    }
+    log = [
+        make("run_started"),
+        make("model_call", 1, message=calls),
+        make("tool_completed", 2, tool_use_id="p", content="plan saved"),
+        make("tool_completed", 3, tool_use_id="w", content="written"),
+        make("model_call", 4, message=calling("t")),  # a later exchange is the latest
+        make("tool_completed", 5, tool_use_id="t"),
+    ]
+    items = exchanges("go", run_events(log, "r1"), size)
+    plan = items[1]
+    assert (plan.pinned, plan.may_clear) == (True, True)
+    assert plan.cleared is not None
+    assert plan.cleared.tokens < plan.tokens  # the file's content is what made it big
+    first = plan.cleared.messages[0]["content"]
+    assert isinstance(first, list)
+    by_name = {b["name"]: b for b in first if isinstance(b, dict)}
+    assert by_name[PLAN_TOOL]["input"] == {"text": "1. go"}  # the plan stays
+    assert by_name["write_file"]["input"] == {"note": CLEARED_INPUT}  # id and name too
+    assert by_name["write_file"]["id"] == "w"
+    # the full form still shows the whole input until the window needs the room
+    shown = plan.messages[0]["content"]
+    assert isinstance(shown, list) and big in json.dumps(shown)
+
+
+def test_a_cleared_exchange_gives_up_its_inputs_with_or_without_the_pin() -> None:
+    """A window is the previous window plus the new exchange: an exchange cleared
+    while it held the plan pin must not get its inputs back when a newer plan takes
+    the pin."""
+    big = "y" * 500
+
+    def plan_and_write(call: str, plan: str) -> JsonObject:
+        blocks: list[JsonValue] = [
+            {
+                "type": "tool_use",
+                "id": f"p{call}",
+                "name": PLAN_TOOL,
+                "input": {"text": plan},
+            },
+            {
+                "type": "tool_use",
+                "id": f"w{call}",
+                "name": "write_file",
+                "input": {"c": big},
+            },
+        ]
+        return {"content": blocks, "stop_reason": "tool_use"}
+
+    log = [
+        make("run_started"),
+        make("model_call", 1, message=plan_and_write("1", "first plan")),
+        make("tool_completed", 2, tool_use_id="p1"),
+        make("tool_completed", 3, tool_use_id="w1"),
+        make("model_call", 4, message=plan_and_write("2", "second plan")),
+        make("tool_completed", 5, tool_use_id="p2"),
+        make("tool_completed", 6, tool_use_id="w2"),
+        make("model_call", 7, message=calling("t")),
+        make("tool_completed", 8, tool_use_id="t"),
+    ]
+    items = exchanges("go", run_events(log, "r1"), size)
+    first, second = items[1], items[2]
+    assert (first.pinned, second.pinned) == (False, True)  # the pin moved on
+    shown = apply_cleared(items, {first.id}, size)[1]
+    text = json.dumps(shown.messages)
+    assert big not in text  # still cleared, though the pin is no longer its own
+    assert "first plan" in text  # the plan call's input stays
+    assert shown.tokens < first.tokens

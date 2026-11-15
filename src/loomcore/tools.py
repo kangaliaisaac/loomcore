@@ -41,6 +41,10 @@ _VALUES = frozenset({"default", "const", "enum", "examples"})  # data, not schem
 
 
 DEFAULT_TIMEOUT = 60.0  # seconds per call
+_NO_TIMEOUT = (
+    "timeout must be a positive number of seconds, not {got!r}: a tool that hangs "
+    "would hang the run, so every call has a timeout (default {default:g})"
+)
 DEFAULT_CACHE_SIZE = 128  # results kept, least recently used dropped first
 
 
@@ -86,9 +90,13 @@ class ToolRegistry:
         self,
         workspace: Workspace,
         *,
-        timeout: float | None = DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
         cache_size: int = DEFAULT_CACHE_SIZE,
     ) -> None:
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+            raise ValueError(_NO_TIMEOUT.format(got=timeout, default=DEFAULT_TIMEOUT))
+        if not 0 < timeout <= threading.TIMEOUT_MAX:  # also refuses nan and inf
+            raise ValueError(_NO_TIMEOUT.format(got=timeout, default=DEFAULT_TIMEOUT))
         self._workspace = workspace
         self._timeout = timeout
         self._cache_size = cache_size
@@ -176,8 +184,6 @@ class ToolRegistry:
         """Run the call, abandoning it if it outlasts the timeout. Python cannot kill
         a thread, so an abandoned call may keep running: its write, if it is not
         read-only, bumps the generation again when it finally returns."""
-        if self._timeout is None:
-            return self._run(name, tool, input)
         future: Future[ToolResult] = Future()
         context = copy_context()
 

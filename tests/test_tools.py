@@ -1,5 +1,6 @@
 """f14: typed functions become tools; invalid input is a fixable result."""
 
+import dataclasses
 import threading
 from contextvars import copy_context
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from loomcore.events import NoteWritten, SandboxDenied, TurnStarted
 from loomcore.notices import (
     NoteWrittenNotice,
     Notice,
@@ -349,3 +351,18 @@ def test_a_notice_with_a_misspelt_or_missing_field_is_refused_when_built() -> No
     with pytest.raises(ValidationError):
         SandboxDeniedNotice(action="read", target="x")  # type: ignore[call-arg]
     assert NoteWrittenNotice(path="n.md").event_fields() == {"path": "n.md"}
+
+
+def event_fields(event_type: type[BaseModel]) -> set[str]:
+    """What an event carries beyond its envelope, `kind` and `tool_use_id`."""
+    envelope = set(TurnStarted.model_fields) - {"turn"}  # the envelope and `kind`
+    return set(event_type.model_fields) - envelope - {"tool_use_id"}
+
+
+def test_a_notice_carries_the_fields_of_its_event_and_of_a_refusal() -> None:
+    """Three places name a refusal's fields and two a note's; if one drifts, the
+    notice built from it would fail only when the event is written. This fails first."""
+    refusal = {f.name for f in dataclasses.fields(Refusal)}
+    assert set(SandboxDeniedNotice.model_fields) - {"kind"} == refusal
+    assert refusal == event_fields(SandboxDenied)
+    assert set(NoteWrittenNotice.model_fields) - {"kind"} == event_fields(NoteWritten)

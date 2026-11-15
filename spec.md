@@ -80,6 +80,8 @@ class Driver(Protocol):                 # built as Driver(config, ports, setting
 
 The driver is built as `Driver(config, ports, settings)`: `config` and `ports` are the run's configuration and the world it touches, and `Settings(session_path, spend_path, retry, guards, verifier)` holds the files it keeps and the policy that is not part of the configuration digest, so a resume may use a different retry policy, guards or verifier.
 
+The driver refuses to start (`PortsDisagreeError`) when `Ports.read_only(name)` and `Ports.access(name).read_only` differ for a tool the configuration lists (or the one its switch rung changes to): a tool is read-only in one place, and `ToolRegistry.read_only` and `.access` give both from one declaration.
+
 Every component below works without the driver: a user may call the registry, the sandbox, the guards and the context store from their own loop.
 
 **Ports** (the only places that touch the world, injected into the driver):

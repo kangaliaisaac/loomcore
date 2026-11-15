@@ -28,6 +28,11 @@ class ConfigChangedError(Exception):
     """The configuration this process holds is not the one the run started with."""
 
 
+class PortsDisagreeError(Exception):
+    """`Ports.read_only` and `Ports.access` give different answers for a tool the
+    configuration lists, so the schedule and the cache would not agree about it."""
+
+
 class RunIdTakenError(Exception):
     """The `new_run_id` port returned an id the session file already uses."""
 
@@ -58,6 +63,7 @@ class Driver:
             raise SpendLogMissingError(
                 f"{spend_dir} does not exist; create it or fix the path"
             )
+        _check_read_only_agrees(config, ports)
         _LOG.info("spend log: %s", settings.spend_path)
         self._config = config
         self._ports = ports
@@ -207,3 +213,18 @@ _CHANGED = (
 def _note_cut(writer: EventWriter) -> None:
     if writer.cut_tail:
         _LOG.warning("cut a torn final line of %d bytes", len(writer.cut_tail))
+
+
+def _check_read_only_agrees(config: Config, ports: Ports) -> None:
+    """A tool is read-only in one place only: both ports must say the same for every
+    tool the configuration (and the one the switch rung changes to) lists."""
+    tools = (*config.tools, *(config.switch_to.tools if config.switch_to else ()))
+    for tool in tools:
+        name = tool.get("name")
+        if not isinstance(name, str):
+            continue
+        if ports.read_only(name) != ports.access(name).read_only:
+            raise PortsDisagreeError(
+                f"Ports.read_only and Ports.access disagree about {name!r}; build "
+                "both from one ToolRegistry (its read_only and access methods)"
+            )

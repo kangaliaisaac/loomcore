@@ -92,7 +92,7 @@ class ToolResult:
 
 
 class Pricing(Protocol):
-    """Prices from recorded tokens; the vendored table arrives with card 10."""
+    """Prices from recorded tokens; `observability.cost.TablePricing` is the table's."""
 
     def worst_case(self, request: ModelRequest) -> Decimal:
         """The request's known input plus `max_tokens` of output."""

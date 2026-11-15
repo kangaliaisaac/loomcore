@@ -173,7 +173,7 @@
     "title": "Observability: spans and token-based cost",
     "spec": "3.8, 2 Tokens and cost",
     "acceptance": "spans from a recorded log are stable; pricing from tokens matches hand-computed values; cache read and write tokens are priced separately",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f22",

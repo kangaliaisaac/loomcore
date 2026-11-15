@@ -3,12 +3,11 @@
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
-from typing import Any
 
 import pytest
 from factories import make
@@ -26,8 +25,7 @@ from fakes import ref as run_ref
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from loomcore import engine
-from loomcore.conversation import call_hash, tool_call
+from loomcore.conversation import call_hash
 from loomcore.engine import MAX_TOGETHER
 from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
@@ -314,38 +312,14 @@ def test_a_signal_while_the_driver_waits_for_a_wave_still_logs_what_the_calls_ca
 
 
 @pytest.mark.parametrize("together", [False, True])
-def test_a_failure_before_the_tool_starts_is_not_hidden_by_a_missing_bucket(
+def test_a_notices_port_that_fails_to_open_a_bucket_is_not_hidden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, together: bool
 ) -> None:
-    """`caused` has no entry for a call that failed before its bucket opened; the
-    original error must reach the caller, not a KeyError from reading it."""
-    inside = threading.local()
-    real_call = engine.Run._call
-
-    def entered(self: engine.Run, tool_use_id: str, caused: dict[str, Any]) -> Any:  # noqa: ANN401
-        inside.on = True
-        try:
-            return real_call(self, tool_use_id, caused)
-        finally:
-            inside.on = False
-
-    def broken(chain: Sequence[Event], tool_use_id: str) -> tuple[str, JsonObject]:
-        if getattr(inside, "on", False):  # only the call `_call` makes
-            raise RuntimeError("no such call")
-        return tool_call(chain, tool_use_id)
-
-    monkeypatch.setattr(engine.Run, "_call", entered)
-    monkeypatch.setattr(engine, "tool_call", broken)
+    """The call fails before its bucket exists, so `caused` has no entry for it; the
+    original error must reach the caller, not a KeyError or an unbound name from the
+    `finally` that reads it. Covers a single call and a wave."""
     calls = (("a", "scan"), ("b", "scan")) if together else (("a", "scan"),)
     world = World(script=[use(*calls)], together={"scan"})
-    with pytest.raises(RuntimeError, match="no such call"):
-        world.driver(tmp_path).run(TASK)
-
-
-def test_a_notices_port_that_fails_to_open_a_bucket_is_not_hidden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    world = World(script=[use(("a", "scan"))])
 
     def refuse() -> None:
         raise RuntimeError("no bucket")

@@ -381,3 +381,16 @@ def test_a_crash_after_a_verifier_error_settled_the_finish_call_goes_on(
     assert (result.status, result.result) == ("finished", "fixed")
     assert verifier.calls == 1  # asked once, at the claim after the resume
     assert "run ended: error" in last_user_text(world)
+
+
+def test_a_crash_on_an_end_turn_claim_asks_the_verifier_again_with_no_model_call(
+    tmp_path: Path,
+) -> None:
+    """A verifier that could not judge an `end_turn` claim left nothing to settle, so
+    after a crash the claim is judged again, without asking the model first."""
+    write_log(tmp_path, _started(make("model_call", 2, message=reply("done"))))
+    world = World(script=[])
+    verifier = Scripted([True])
+    result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
+    assert (result.status, result.result) == ("finished", "done")
+    assert (verifier.calls, world.requests) == (1, [])

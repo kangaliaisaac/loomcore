@@ -265,6 +265,17 @@ def test_a_window_that_is_over_clears_and_drops_nothing_of_its_own() -> None:
     ]  # left out of this window; the driver records none
 
 
+def test_an_over_window_reports_the_pinned_items_as_cleared_as_they_can_be() -> None:
+    plan = item(0, 300, pinned=True, may_clear=True, cleared_tokens=20)
+    latest = item(1, 400, pinned=True)  # nothing to clear
+    over = pack([item(2, 30)], 100, [plan, latest])
+    assert over.over
+    assert over.tokens == 20 + 400  # not the 700 they come to as they stand
+    assert [i.tokens for i in over.selected] == [20, 400]  # the cleared forms
+    assert over.cleared == ("i0",)  # what it took to get there; the driver records none
+    assert ids(over.dropped) == ["i2"]
+
+
 def test_pack_refuses_items_the_caller_split_wrongly() -> None:
     a, b = item(0, 5), item(1, 5)
     with pytest.raises(ValueError, match="share an id"):

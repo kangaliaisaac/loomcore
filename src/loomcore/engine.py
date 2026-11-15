@@ -566,8 +566,8 @@ class Run:
 
     def _completed(self, run: RunTool, screened: Screened, ms: int) -> list[Event]:
         """The post guards' decisions and then the call's completion. The log holds
-        what the guards left, never the raw result (spec 3.7); the ladder's note is
-        added after them, so it holds what the model sees."""
+        what the guards left, never the raw result (spec 3.7). The ladder's note is
+        kept in its own field, so it can be shown to the model outside the data."""
         events: list[Event] = [
             self.emit(
                 "guard_decision",
@@ -579,13 +579,12 @@ class Run:
             for decision in screened.decisions
         ]
         shown = screened.result
-        denied = any(isinstance(decision, Deny) for decision in screened.decisions)
         events.append(
             self._complete(
                 run.tool_use_id,
                 ok=shown.ok,
                 content=shown.content,
-                ran=Ran(ms, shown.cached, from_tool=not denied, note=run.note),
+                ran=Ran(ms, shown.cached, from_tool=shown.from_tool, note=run.note),
             )
         )
         return events

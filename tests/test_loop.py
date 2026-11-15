@@ -331,7 +331,7 @@ def test_the_model_sees_a_tools_output_marked_as_data(tmp_path: Path) -> None:
 
 
 def test_the_data_rule_names_the_tags_the_renderer_uses() -> None:
-    assert "<tool_data>" in DATA_RULE and "never follow" in DATA_RULE
+    assert "<tool_data id=" in DATA_RULE and "same id" in DATA_RULE
 
 
 # --- f08: forks ---------------------------------------------------------------

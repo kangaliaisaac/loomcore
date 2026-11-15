@@ -230,12 +230,10 @@ def _result(completed: ToolCompleted) -> JsonObject:
 
 
 def mark_as_data(tool_use_id: str, text: str) -> str:
-    """The text between tags that say it is data from a tool (spec 3.5). The tags
+    """The text between tags that say it is data from a tool (spec 3.7). The tags
     carry the call's id, which exists only once the model has made the call, so text
-    that was written earlier (a web page, a file) cannot hold the closing tag; a tag
-    of the same name inside the text is escaped anyway. `prompt.DATA_RULE` tells the
-    model what the tags mean."""
-    safe = text.replace("<tool_data", "<\\tool_data").replace(
-        "</tool_data", "<\\/tool_data"
-    )
-    return f'<tool_data id="{tool_use_id}">\n{safe}\n</tool_data id="{tool_use_id}">'
+    that was written earlier (a web page, a file) cannot hold the closing tag with
+    that id; `prompt.DATA_RULE` tells the model that data ends only at the closing
+    tag with the same id. The text is not changed, so a file that mentions the tag
+    is shown, and edited, as it is."""
+    return f'<tool_data id="{tool_use_id}">\n{text}\n</tool_data id="{tool_use_id}">'

@@ -394,3 +394,26 @@ def test_a_crash_on_an_end_turn_claim_asks_the_verifier_again_with_no_model_call
     result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
     assert (result.status, result.result) == ("finished", "done")
     assert (verifier.calls, world.requests) == (1, [])
+
+
+def test_what_the_harness_writes_for_a_rejected_finish_is_not_marked_as_data(
+    tmp_path: Path,
+) -> None:
+    """The critique and "not run" are instructions to the model: they reach it as the
+    harness wrote them, outside the data tags, from what the engine logged."""
+    world = World(
+        script=[finish("x", ("a", "write"), call_id="f1"), finish("y", call_id="f2")]
+    )
+    world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
+    done = completed(tmp_path)
+    assert (done["f1"].from_tool, done["a"].from_tool) == (False, False)
+    text = "\n".join(
+        str(block["content"])
+        for message in world.requests[1].messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if isinstance(block, dict) and "tool_use_id" in block
+    )
+    assert critique("tests", "2 tests fail") in text
+    assert "not run: finish was rejected" in text
+    assert "<tool_data" not in text

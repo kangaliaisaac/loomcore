@@ -337,3 +337,19 @@ def test_a_notice_is_either_in_the_closed_buckets_snapshot_or_refused_as_late(
     assert bucket.snapshot() == (Notice("note_written", {"path": "a.md"}),)
     assert not bucket.add(Notice("note_written", {"path": "late.md"}))
     assert len(bucket.snapshot()) == 1
+
+
+def test_the_registrys_own_messages_are_not_marked_as_a_tools_data(
+    tools: Registry,
+) -> None:
+    """An unknown tool and invalid input are the harness telling the model how to fix
+    the call; a tool's own failure text is the tool's, and stays data."""
+    unknown = tools.registry.execute("nope", {})
+    assert (unknown.ok, unknown.from_tool) == (False, False)
+    tools.registry.register(read_file)
+    invalid = tools.registry.execute("read_file", {})
+    assert (invalid.ok, invalid.from_tool) == (False, False)
+    refused = tools.registry.execute("read_file", {"path": "../secret"})
+    assert (refused.ok, refused.from_tool) == (False, True)  # the workspace's refusal
+    fine = tools.registry.execute("read_file", {"path": "missing.txt"})
+    assert fine.from_tool is True

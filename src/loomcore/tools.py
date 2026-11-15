@@ -150,7 +150,11 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             known = ", ".join(sorted(self._tools)) or "none"
-            return ToolResult(False, f"Unknown tool {name!r}. The tools are: {known}.")
+            return ToolResult(
+                False,
+                f"Unknown tool {name!r}. The tools are: {known}.",
+                from_tool=False,
+            )
         key = (call_hash(name, input), self._workspace.generation)
         use_cache = tool.cacheable and self._abandoned == 0
         if use_cache and (hit := self._hit(key)) is not None:
@@ -214,6 +218,7 @@ class ToolRegistry:
             False,
             f"{name} timed out after {self._timeout:g} s and was abandoned; it may "
             "still be running. Try a smaller input or another approach.",
+            from_tool=False,
         )
 
     def _abandon(self, name: str, tool: _Tool, future: Future[ToolResult]) -> None:
@@ -244,6 +249,7 @@ class ToolRegistry:
                 False,
                 f"Invalid input for {name}: {_problems(error)}. Check the arguments "
                 "against the tool's schema and call it again.",
+                from_tool=False,
             )
         kwargs: dict[str, object] = {
             field: getattr(parsed, field) for field in tool.arguments.model_fields
@@ -267,6 +273,7 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
         return ToolResult(
             False,
             f"{name} returned something that is not JSON or not finite.",
+            from_tool=False,
         )
 
 

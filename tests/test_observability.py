@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 from factories import make
+from fakes import write_log
 from pydantic import JsonValue
 
-from loomcore.eventlog import open_writer, read_events
+from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject
 from loomcore.observability.cost import (
     PricingTable,
@@ -29,12 +30,6 @@ from loomcore.ports import ModelRequest
 
 TABLE = vendored_table()
 D = Decimal
-
-
-def write_log(tmp: Path, rows: list[Event]) -> None:
-    with open_writer(tmp / "s1.jsonl") as writer:
-        for row in rows:
-            writer.append(row)
 
 
 def usage(model: str = "claude-sonnet-5-5", /, **tokens: int) -> Usage:
@@ -437,6 +432,22 @@ def test_a_turn_with_no_model_call_before_the_next_turn_keeps_its_own_start() ->
     assert first.start == log[1].timestamp  # no call of its own to start earlier
     assert second.start == log[3].timestamp - timedelta(milliseconds=1500)
     assert first.end == second.start
+
+
+def test_a_request_repeated_for_one_call_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("tool_requested", 2, tool_use_id="t1", name="search"),
+        make("tool_requested", 3, tool_use_id="t1", name="search"),
+        make("tool_completed", 4, tool_use_id="t1", duration_ms=5),
+    ]
+    with caplog.at_level("WARNING"):
+        found = spans(log)
+    assert len([s for s in found if s.kind == "tool_call"]) == 1
+    assert "repeated for t1" in caplog.text
 
 
 def test_a_denied_call_has_a_span_that_says_it_did_not_succeed() -> None:

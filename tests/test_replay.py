@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from factories import calling, make
 from fakes import write_log
+from pydantic import ValidationError
 
 from loomcore.eventlog import read_events
 from loomcore.events import Event
@@ -183,12 +184,27 @@ def test_what_windows_dropped_and_cleared_is_folded_and_only_grows() -> None:
         make("run_started"),
         make("context_packed", 1, dropped=["seq:r1:1", "seq:r1:2"]),
         make("context_compacted", 2, cleared=["seq:r1:3"]),
-        make("context_packed", 3, dropped=["seq:r1:2", "seq:r1:4", 7]),  # a repeat
+        make("context_packed", 3, dropped=["seq:r1:2", "seq:r1:4"]),  # a repeat
         make("context_compacted", 4),  # an older line, or nothing newly cleared
     ]
     state = replay(log)
-    assert state.dropped == ("seq:r1:1", "seq:r1:2", "seq:r1:4")  # no number, no repeat
+    assert state.dropped == ("seq:r1:1", "seq:r1:2", "seq:r1:4")  # no repeat
     assert state.cleared == ("seq:r1:3",)
+
+
+def test_a_context_line_with_a_non_string_id_is_refused_where_it_is_read() -> None:
+    with pytest.raises(ValidationError):
+        make("context_packed", 1, dropped=["seq:r1:1", 7])
+    with pytest.raises(ValidationError):
+        make("context_packed", 1, selected=[None])
+
+
+def test_a_non_string_id_that_got_past_validation_is_a_damaged_log() -> None:
+    packed = make("context_packed", 1, dropped=["seq:r1:1"]).model_copy(
+        update={"dropped": ["seq:r1:1", 7]}  # a copy skips validation
+    )
+    with pytest.raises(ValueError, match="damaged"):
+        replay([make("run_started"), packed])
 
 
 def test_a_fork_keeps_what_its_parent_had_dropped_and_cleared() -> None:

@@ -193,8 +193,15 @@ def _context(state: RunState, event: Event) -> RunState:
     return state
 
 
-def _with_ids(known: tuple[str, ...], new: Sequence[JsonValue]) -> tuple[str, ...]:
-    """`known` and the ids in `new` that are not in it yet, in order."""
+def _with_ids(known: tuple[str, ...], new: Sequence[object]) -> tuple[str, ...]:
+    """`known` and the ids in `new` that are not in it yet, in order. The events
+    types hold only strings, so a number here means a line that bypassed validation:
+    that is a damaged log, not something to skip."""
+    for item_id in new:
+        if not isinstance(item_id, str):
+            raise ValueError(
+                f"context id {item_id!r} is not a string: the log is damaged"
+            )
     added = [i for i in new if isinstance(i, str) and i not in known]
     return (*known, *dict.fromkeys(added))
 

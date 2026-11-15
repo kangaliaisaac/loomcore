@@ -395,7 +395,8 @@ def test_the_state_a_guard_sees_is_the_one_the_spec_names(tmp_path: Path) -> Non
     )
     spy = Spy()
     guards = Guards(pre=(spy,), post=(PostSpy(spy),))
-    world.driver(tmp_path, guards=guards).run(REPEATING)
+    result = world.driver(tmp_path, guards=guards).run(REPEATING)
+    assert result.status == "finished"
     assert spy.pre_seen["a"].rung == 0  # a first call trips nothing
     before = spy.pre_seen["b"]
     assert before.rung == 0  # the escalation is written after the verdicts

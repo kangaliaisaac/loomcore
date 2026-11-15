@@ -396,6 +396,7 @@ def test_the_state_a_guard_sees_is_the_one_the_spec_names(tmp_path: Path) -> Non
     spy = Spy()
     guards = Guards(pre=(spy,), post=(PostSpy(spy),))
     world.driver(tmp_path, guards=guards).run(REPEATING)
+    assert spy.pre_seen["a"].rung == 0  # a first call trips nothing
     before = spy.pre_seen["b"]
     assert before.rung == 0  # the escalation is written after the verdicts
     assert (
@@ -407,3 +408,15 @@ def test_the_state_a_guard_sees_is_the_one_the_spec_names(tmp_path: Path) -> Non
     assert dict(after.requested) == {"b": "search", "c": "search"}
     assert after.pending_tools == ("b", "c")  # nothing of this turn has completed
     assert spy.post_seen["c"].pending_tools == ("b", "c")  # not even b, for c
+
+
+def test_a_post_guard_sees_the_calls_of_an_earlier_wave_as_pending(
+    tmp_path: Path,
+) -> None:
+    """Two writes conflict, so they run in two waves; the state is not refreshed
+    between the waves, so the second call's guard still sees the first as pending."""
+    world = World(script=[use(("a", "write"), ("b", "write")), reply("ok")])
+    spy = Spy()
+    world.driver(tmp_path, guards=Guards(post=(PostSpy(spy),))).run(TASK)
+    assert world.tool_calls == ["a", "b"]  # a ran in the first wave, b in the second
+    assert spy.post_seen["b"].pending_tools == ("a", "b")

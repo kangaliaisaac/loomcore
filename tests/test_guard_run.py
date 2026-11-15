@@ -8,6 +8,7 @@ from factories import calling, make
 from fakes import CAPS, Crash, World, log, reply, run_started, use, write_log
 from fakes import ref as run_ref
 
+from loomcore.conversation import call_hash
 from loomcore.eventlog import read_events
 from loomcore.events import ApprovalRequested, GuardDecision, JsonObject, ToolCompleted
 from loomcore.guards import (
@@ -421,3 +422,45 @@ def test_a_post_guard_sees_the_calls_of_an_earlier_wave_as_pending(
     world.driver(tmp_path, guards=Guards(post=(PostSpy(spy),))).run(TASK)
     assert world.tool_calls == ["a", "b"]  # a ran in the first wave, b in the second
     assert spy.post_seen["b"].pending_tools == ("a", "b")
+
+
+def test_after_a_crash_between_two_waves_a_post_guard_sees_the_first_as_completed(
+    tmp_path: Path,
+) -> None:
+    """On a first pass every call of the turn is pending for the whole turn; on a
+    resume the state is rebuilt from the log, where the first wave has completed."""
+    args: JsonObject = {"q": "x"}
+    write_log(
+        tmp_path,
+        [
+            run_started(),
+            make("turn_started", 1, turn=1),
+            make("model_call", 2, message=use(("a", "read"), ("b", "read"))),
+            make(
+                "tool_requested",
+                3,
+                tool_use_id="a",
+                name="read",
+                input=args,
+                call_hash=call_hash("read", args),
+                wave=0,
+            ),
+            make(
+                "tool_requested",
+                4,
+                tool_use_id="b",
+                name="read",
+                input=args,
+                call_hash=call_hash("read", args),
+                wave=1,
+            ),
+            make("tool_completed", 5, tool_use_id="a"),
+        ],
+    )
+    world = World(script=[reply("ok")], read_only={"read"})
+    spy = Spy()
+    driver_ = world.driver(tmp_path, guards=Guards(post=(PostSpy(spy),)))
+    assert driver_.resume(run_ref()).status == "finished"
+    assert spy.post_seen["b"].pending_tools == (
+        "b",
+    )  # a had completed before the crash

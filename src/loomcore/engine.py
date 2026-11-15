@@ -40,7 +40,7 @@ from loomcore.guards import (
     run_pre,
 )
 from loomcore.limits import LimitReached, Limits, check_limits, elapsed
-from loomcore.notices import Notice
+from loomcore.notices import Bucket, Notice
 from loomcore.ports import (
     Config,
     Decision,
@@ -483,7 +483,9 @@ class Run:
             # refusal precedes the call's completion. The bucket was closed when the
             # call ended, so a notice that arrives later is not logged, only warned
             # about (spec 3.2).
-            written = self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+            written = self._emit_notices(
+                run.tool_use_id, caused.get(run.tool_use_id, ())
+            )
         return [*written, *self._completed(run, screened, ms)]
 
     def _call(
@@ -496,12 +498,14 @@ class Run:
         nothing."""
         name, args = tool_call(self.chain, tool_use_id)
         started = self.ports.monotonic()
+        bucket: Bucket | None = None  # unset if opening it fails: nothing to keep
         try:
             with self.ports.notices.collecting() as bucket:
                 result = self.ports.tool(name, args)
                 ms = self._since(started)  # before any log write
         finally:
-            caused[tool_use_id] = bucket.snapshot()
+            if bucket is not None:
+                caused[tool_use_id] = bucket.snapshot()
         request = ToolRequest(tool_use_id, name, args, call_hash(name, args))
         return run_post(self.guards, request, result, self.state), ms
 
@@ -526,7 +530,9 @@ class Run:
         events: list[Event] = []
         bug: BaseException | None = None
         for run, future in zip(wave, futures, strict=True):
-            events += self._emit_notices(run.tool_use_id, caused[run.tool_use_id])
+            events += self._emit_notices(
+                run.tool_use_id, caused.get(run.tool_use_id, ())
+            )
             error = future.exception()
             if error is None:
                 screened, ms = future.result()

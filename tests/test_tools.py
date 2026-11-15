@@ -315,7 +315,7 @@ def test_a_notice_with_no_bucket_open_is_warned_about_not_dropped_quietly(
 ) -> None:
     with caplog.at_level("WARNING"), pytest.raises(PathRefusedError):
         tools.workspace.read("../x")
-    assert "sandbox_denied reported outside a tool call" in caplog.text
+    assert "sandbox_denied reported with no tool call collecting it" in caplog.text
 
 
 def test_an_oserror_with_no_errno_names_its_class(tools: Registry) -> None:

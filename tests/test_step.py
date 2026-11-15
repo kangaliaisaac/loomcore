@@ -736,5 +736,10 @@ def test_a_crash_between_the_fails_does_not_ask_again_about_the_other_denied_cal
 
 def test_a_denial_does_not_fail_a_read_only_call_of_the_wave() -> None:
     effects = crash(*denied_wave(), read_only=frozenset({"read"}))
-    # nothing risky was in the question, so no one was denied; both just re-run
-    assert Fail("b", "denied by me: no") not in effects
+    # a was named in the question and is denied; b is read-only, so it just re-runs
+    assert effects == [
+        Fail("a", "denied by me: no"),
+        RunTool("b"),
+        RunTool("c"),
+        RunTool("d"),
+    ]

@@ -6,14 +6,31 @@ from pathlib import Path
 
 import pytest
 from factories import make
-from fakes import CAPS, CONFIG, World, completed, finish, log, reply, use
+from fakes import (
+    CAPS,
+    World,
+    completed,
+    finish,
+    kinds,
+    log,
+    reply,
+    run_started,
+    use,
+    write_log,
+)
 from fakes import ref as run_ref
 
-from loomcore.eventlog import open_writer, read_events
-from loomcore.events import ContextPacked, Event, JsonObject, ToolCompleted
+from loomcore.eventlog import read_events
+from loomcore.events import (
+    ContextPacked,
+    Event,
+    ForkOrigin,
+    JsonObject,
+    ToolCompleted,
+)
 from loomcore.limits import Limits
 from loomcore.ports import Task, ToolResult
-from loomcore.replay import RunState, replay
+from loomcore.replay import RunState, replay, run_events
 from loomcore.verify import Verdict, VerifierError, critique
 
 TASK = Task("go", CAPS)
@@ -142,25 +159,11 @@ def test_the_cap_pauses_the_run_and_a_resume_with_more_continues(
 
 
 def _started(*rest: Event) -> list[Event]:
-    limits = Limits.model_validate({"run_cap": None, "month_cap": None})
     return [
-        make(
-            "run_started",
-            0,
-            task="go",
-            config=CONFIG.to_json(),
-            limits=limits.to_json(),
-            config_digest=CONFIG.digest(),
-        ),
+        run_started(),
         make("turn_started", 1, turn=1),
         *rest,
     ]
-
-
-def _write(tmp: Path, rows: list[Event]) -> None:
-    with open_writer(tmp / "s1.jsonl") as writer:
-        for row in rows:
-            writer.append(row)
 
 
 def test_a_crash_after_verification_failed_calls_the_model_not_the_verifier(
@@ -170,7 +173,7 @@ def test_a_crash_after_verification_failed_calls_the_model_not_the_verifier(
         make("model_call", 2, message=reply("done")),
         make("verification_failed", 3, verifier="tests", message="2 tests fail"),
     )
-    _write(tmp_path, rows)
+    write_log(tmp_path, rows)
     world = World(script=[reply("fixed")])
     verifier = Scripted([True])
     result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
@@ -186,7 +189,7 @@ def test_a_crash_after_verification_passed_ends_without_a_second_check(
         make("model_call", 2, message=reply("done")),
         make("verification_passed", 3, verifier="tests", message=""),
     )
-    _write(tmp_path, rows)
+    write_log(tmp_path, rows)
     result = World(script=[]).driver(tmp_path, verifier=Never()).resume(run_ref())
     assert (result.status, result.reason) == ("finished", "end_turn")
 
@@ -204,7 +207,7 @@ def test_a_crash_between_a_rejected_finish_and_its_failure_line_goes_on(
             content=critique("tests", "2 tests fail"),
         ),
     )
-    _write(tmp_path, rows)
+    write_log(tmp_path, rows)
     world = World(script=[reply("fixed")])
     result = world.driver(tmp_path, verifier=Scripted([True])).resume(run_ref())
     assert (result.status, result.result) == ("finished", "fixed")
@@ -214,22 +217,33 @@ def test_a_crash_between_a_rejected_finish_and_its_failure_line_goes_on(
 def test_a_crash_before_the_verdict_is_logged_asks_the_verifier_again(
     tmp_path: Path,
 ) -> None:
-    _write(tmp_path, _started(make("model_call", 2, message=reply("done"))))
+    write_log(tmp_path, _started(make("model_call", 2, message=reply("done"))))
     verifier = Scripted([True])
     result = World(script=[]).driver(tmp_path, verifier=verifier).resume(run_ref())
     assert (result.status, verifier.calls) == ("finished", 1)
 
 
-def test_a_fork_counts_its_own_rejections() -> None:
-    parent = [
-        *_started(
-            make("model_call", 2, message=reply("done")),
-            make("verification_failed", 3, verifier="tests", message="x"),
-        ),
-    ]
-    assert replay(parent).verification_failures == 1
-    fork = make("run_forked", 4, run="r2")
-    assert replay([*parent, fork]).verification_failures == 0
+def test_a_fork_counts_its_own_rejections(tmp_path: Path) -> None:
+    """The parent was rejected once before the fork point. A fork with a cap of one
+    starts again from none, so it calls the model, is rejected itself and pauses on
+    the cap; had it inherited the parent's count it would pause before any call."""
+    world = World(
+        script=[reply("a"), use(("t1", "search")), reply("b"), reply("c")],
+    )
+    driver = world.driver(tmp_path, verifier=Scripted([False, True, False]))
+    parent = driver.run(TASK)
+    assert (parent.status, parent.result) == ("finished", "b")
+    first = read_events(tmp_path / "s1.jsonl").events
+    assert replay(run_events(first, "r1")).verification_failures == 1
+    clean = next(e for e in first if isinstance(e, ToolCompleted))
+    one = Limits.model_validate(
+        {"run_cap": None, "month_cap": None, "max_verifications": 1}
+    )
+    forked = driver.fork(ForkOrigin(run_id="r1", seq=clean.seq), limits=one)
+    assert (forked.status, forked.limit) == ("paused", "max_verifications")
+    events = read_events(tmp_path / "s1.jsonl").events
+    assert kinds(events, "r2").count("model_call") == 1
+    assert replay(run_events(events, "r2")).verification_failures == 1
 
 
 def test_the_run_without_a_verifier_ends_as_before(tmp_path: Path) -> None:
@@ -255,7 +269,7 @@ def test_a_crash_after_the_other_calls_of_a_rejected_finish_judges_the_claim_aga
         make("model_call", 2, message=finish("x", ("a", "write"), call_id="f1")),
         make("tool_completed", 3, tool_use_id="a", ok=False, content="not run"),
     )
-    _write(tmp_path, rows)
+    write_log(tmp_path, rows)
     world = World(script=[reply("fixed")])
     verifier = Scripted([False, True])
     result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
@@ -342,3 +356,28 @@ def test_the_critique_stays_in_a_window_that_drops_older_exchanges(
     assert all(key in e.selected for e in packed if e.seq > failed.seq)
     sent = [m["content"] for m in world.requests[-1].messages]
     assert critique("tests", "2 tests fail") in sent
+
+
+def test_a_crash_after_a_verifier_error_settled_the_finish_call_goes_on(
+    tmp_path: Path,
+) -> None:
+    """The error stop settled the finish call `ok=false` and the process died before
+    `run_finished`. Resume treats it like a crash during any error stop: the model
+    is called with the settled result and the verifier is asked at its next claim."""
+    rows = _started(
+        make("model_call", 2, message=finish("x", call_id="f1")),
+        make(
+            "tool_completed",
+            3,
+            tool_use_id="f1",
+            ok=False,
+            content="run ended: error",
+        ),
+    )
+    write_log(tmp_path, rows)
+    world = World(script=[reply("fixed")])
+    verifier = Scripted([True])
+    result = world.driver(tmp_path, verifier=verifier).resume(run_ref())
+    assert (result.status, result.result) == ("finished", "fixed")
+    assert verifier.calls == 1  # asked once, at the claim after the resume
+    assert "run ended: error" in last_user_text(world)

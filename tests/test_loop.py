@@ -17,16 +17,14 @@ from fakes import (
     finish,
     kinds,
     reply,
-    run_started,
     use,
-    write_log,
 )
 from fakes import ref as run_ref
 
 from loomcore import ladder
 from loomcore.conversation import FORK_CONTINUE, call_hash
 from loomcore.engine import ResumeRefusedError
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import (
     Escalation,
     Event,
@@ -581,7 +579,14 @@ def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
     args: JsonObject = {"q": "x"}
     digest = call_hash("search", args)
     log = [
-        run_started(limits(repeat_threshold=2)),
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=limits(repeat_threshold=2).to_json(),
+            config_digest=CONFIG.digest(),
+        ),
         make("turn_started", 1, turn=1),
         make("model_call", 2, message=use(("a", "search"), ("b", "search"), q="x")),
         make(
@@ -593,7 +598,9 @@ def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
             call_hash=digest,
         ),
     ]
-    write_log(tmp_path, log)
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log:
+            writer.append(event)
     world = World(script=[reply("done")])
     world.read_only.add("search")
     result = world.driver(tmp_path).resume(run_ref())
@@ -615,7 +622,14 @@ def test_an_open_approval_question_is_not_repeated_after_a_crash(
     args: JsonObject = {"q": "a"}
     asked = "run again?; may have run before the crash: write (a)"
     log = [
-        run_started(limits()),
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=limits().to_json(),
+            config_digest=CONFIG.digest(),
+        ),
         make("turn_started", 1, turn=1),
         make("model_call", 2, message=use(("a", "write"))),
         make(
@@ -628,7 +642,9 @@ def test_an_open_approval_question_is_not_repeated_after_a_crash(
         ),
         make("approval_requested", 4, tool_use_id="a", question=asked),
     ]
-    write_log(tmp_path, log)
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log:
+            writer.append(event)
     paused = World(script=[]).driver(tmp_path).resume(run_ref())
     assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
     assert paused.question == asked  # not "... (may have run before the crash: ...)"

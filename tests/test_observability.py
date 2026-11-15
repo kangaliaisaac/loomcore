@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pytest
 from factories import make
-from fakes import write_log
 from pydantic import JsonValue
 
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event, JsonObject
 from loomcore.observability.cost import (
     PricingTable,
@@ -28,6 +27,12 @@ from loomcore.ports import ModelRequest
 
 TABLE = vendored_table()
 D = Decimal
+
+
+def write_log(tmp: Path, rows: list[Event]) -> None:
+    with open_writer(tmp / "s1.jsonl") as writer:
+        for row in rows:
+            writer.append(row)
 
 
 def usage(model: str = "claude-sonnet-5-5", /, **tokens: int) -> Usage:

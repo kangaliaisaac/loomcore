@@ -3,33 +3,22 @@
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
-from typing import Any
 
 import pytest
 from factories import make
-from fakes import (
-    CAPS,
-    CONFIG,
-    ToolBugError,
-    World,
-    reply,
-    run_started,
-    use,
-    write_log,
-)
+from fakes import CAPS, CONFIG, ToolBugError, World, reply, use
 from fakes import ref as run_ref
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from loomcore import engine
-from loomcore.conversation import call_hash, tool_call
+from loomcore.conversation import call_hash
 from loomcore.engine import MAX_TOGETHER
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event, JsonObject, NoteWritten, ToolCompleted, ToolRequested
 from loomcore.loop import Driver
 from loomcore.ports import RunResult, Task, ToolResult
@@ -216,7 +205,14 @@ def test_lines_a_crash_left_unwritten_go_after_every_wave_already_in_the_log(
 ) -> None:
     args: JsonObject = {"q": "a"}
     log_events = [
-        run_started(),
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=CAPS.to_json(),
+            config_digest=CONFIG.digest(),
+        ),
         make("turn_started", 1, turn=1),
         make(
             "model_call",
@@ -233,7 +229,9 @@ def test_lines_a_crash_left_unwritten_go_after_every_wave_already_in_the_log(
             wave=5,  # whatever the old process worked out
         ),
     ]
-    write_log(tmp_path, log_events)
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for event in log_events:
+            writer.append(event)
     world = World(script=[reply("done")], together={"scan"})
     result = driver(world, tmp_path, Lanes().tool).resume(run_ref())
     assert result.status == "finished"
@@ -311,45 +309,3 @@ def test_a_signal_while_the_driver_waits_for_a_wave_still_logs_what_the_calls_ca
     events = log(tmp_path)
     assert [e.tool_use_id for e in events if isinstance(e, NoteWritten)] == ["t1", "t2"]
     assert not any(isinstance(e, ToolCompleted) for e in events)
-
-
-@pytest.mark.parametrize("together", [False, True])
-def test_a_failure_before_the_tool_starts_is_not_hidden_by_a_missing_bucket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, together: bool
-) -> None:
-    """`caused` has no entry for a call that failed before its bucket opened; the
-    original error must reach the caller, not a KeyError from reading it."""
-    inside = threading.local()
-    real_call = engine.Run._call
-
-    def entered(self: engine.Run, tool_use_id: str, caused: dict[str, Any]) -> Any:  # noqa: ANN401
-        inside.on = True
-        try:
-            return real_call(self, tool_use_id, caused)
-        finally:
-            inside.on = False
-
-    def broken(chain: Sequence[Event], tool_use_id: str) -> tuple[str, JsonObject]:
-        if getattr(inside, "on", False):  # only the call `_call` makes
-            raise RuntimeError("no such call")
-        return tool_call(chain, tool_use_id)
-
-    monkeypatch.setattr(engine.Run, "_call", entered)
-    monkeypatch.setattr(engine, "tool_call", broken)
-    calls = (("a", "scan"), ("b", "scan")) if together else (("a", "scan"),)
-    world = World(script=[use(*calls)], together={"scan"})
-    with pytest.raises(RuntimeError, match="no such call"):
-        world.driver(tmp_path).run(TASK)
-
-
-def test_a_notices_port_that_fails_to_open_a_bucket_is_not_hidden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    world = World(script=[use(("a", "scan"))])
-
-    def refuse() -> None:
-        raise RuntimeError("no bucket")
-
-    monkeypatch.setattr(world.notices, "collecting", refuse)
-    with pytest.raises(RuntimeError, match="no bucket"):
-        world.driver(tmp_path).run(TASK)

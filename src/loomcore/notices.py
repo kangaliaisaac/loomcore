@@ -96,10 +96,9 @@ class Notices:
 
     def _add(self, notice: Notice) -> None:
         bucket = self._bucket.get()
-        if bucket is None:  # no call is collecting here, so there is no call to blame
+        if bucket is None:  # outside a tool call there is no call to blame
             _LOG.warning(
-                "%s reported with no tool call collecting it and not logged "
-                "(outside a call, or to a Notices that is not the driver's): %s",
+                "%s reported outside a tool call and not logged: %s",
                 notice.kind,
                 notice.fields,
             )

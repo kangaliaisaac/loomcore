@@ -159,10 +159,8 @@ def apply(state: RunState, event: Event) -> RunState:
 
 def _verification(state: RunState, event: Event) -> RunState:
     """A rejected claim is not the run's ending any more: a failure clears what the
-    crash rules would re-issue, and so does a `finish` call completed `ok=false`,
-    which a finish that ends the run as `finished` never is. A verifier error settles
-    its finish call that way too, so a crash after it resumes like one after any
-    error stop (spec 3.6, "After a crash")."""
+    crash rules would re-issue, and a rejected `finish` call (completed `ok=false`,
+    which a finish that ends the run never is) clears it the same way."""
     match event:
         case ModelCall():
             state = replace(state, verified=False)

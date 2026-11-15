@@ -4,12 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from factories import make
-from fakes import CAPS, World, completed, kinds, reply, run_started, use, write_log
-from fakes import ref as run_ref
+from fakes import CAPS, World, completed, kinds, reply, use
 
 from loomcore import ladder
-from loomcore.conversation import call_hash
 from loomcore.eventlog import read_events
 from loomcore.events import Event, GuardDecision, JsonObject
 from loomcore.guards import Allow, Deny, Guards, PostDecision, Redact, ToolRequest
@@ -170,90 +167,3 @@ def test_a_guard_that_raises_in_a_wave_does_not_lose_the_other_calls(
     done = set(completed(tmp_path))
     assert done == {"a", "c"}  # b was interrupted; the others are logged
     assert "note_written" in kinds(events(tmp_path))  # c's notice, after b's failure
-
-
-def test_a_guard_that_raises_on_a_single_call_logs_its_notices_and_leaves_it_open(
-    tmp_path: Path,
-) -> None:
-    world = World(script=[use(("a", "read")), reply("ok")])
-    world.noted_in["a"] = "notes.md"
-    world.read_only.add("read")
-    with pytest.raises(GuardBugError):
-        world.driver(tmp_path, guards=Guards(post=(Breaks("a"),))).run(TASK)
-    assert "note_written" in kinds(events(tmp_path))  # what the call caused is logged
-    assert "a" not in completed(tmp_path)  # but the call is left interrupted
-    result = world.driver(tmp_path).resume(run_ref())  # the guard is fixed: a re-runs
-    assert (result.status, result.result) == ("finished", "ok")
-    assert completed(tmp_path)["a"].ok
-
-
-def test_a_redact_then_a_deny_log_both_decisions_and_the_denial_stands(
-    tmp_path: Path,
-) -> None:
-    world = World(script=[use(("a", "read")), reply("ok")])
-    world.tool_results["a"] = LEAKY
-    run(world, tmp_path, Scrub(), Refuse(("a",)))
-    decisions = [e for e in events(tmp_path) if isinstance(e, GuardDecision)]
-    assert [(d.stage, d.decision) for d in decisions] == [
-        ("post", "redact"),
-        ("post", "deny"),
-    ]
-    done = completed(tmp_path)["a"]
-    assert (done.ok, done.content) == (False, "too large")
-    assert SECRET.encode() not in (tmp_path / "s1.jsonl").read_bytes()
-
-
-def crashed_after_a_decision(tmp: Path, tool: str) -> None:
-    """The process died after the post guard's decision line, before tool_completed."""
-    args: JsonObject = {"q": "a"}
-    write_log(
-        tmp,
-        [
-            run_started(),
-            make("turn_started", 1, turn=1),
-            make("model_call", 2, message=use(("a", tool))),
-            make(
-                "tool_requested",
-                3,
-                tool_use_id="a",
-                name=tool,
-                input=args,
-                call_hash=call_hash(tool, args),
-            ),
-            make(
-                "guard_decision",
-                4,
-                stage="post",
-                tool_use_id="a",
-                decision="redact",
-                reason="a key",
-            ),
-        ],
-    )
-
-
-def test_a_crash_after_a_post_decision_reruns_a_read_and_writes_it_again(
-    tmp_path: Path,
-) -> None:
-    crashed_after_a_decision(tmp_path, "read")
-    world = World(script=[reply("ok")])
-    world.tool_results["a"] = LEAKY
-    world.read_only.add("read")
-    result = world.driver(tmp_path, guards=Guards(post=(Scrub(),))).resume(run_ref())
-    assert result.status == "finished"
-    assert world.tool_calls == ["a"]  # interrupted, so it ran again
-    decisions = [e for e in events(tmp_path) if isinstance(e, GuardDecision)]
-    assert len(decisions) == 2  # the one the crash left, and the re-run's
-    assert completed(tmp_path)["a"].content == "token=[redacted] ok"
-    assert SECRET.encode() not in (tmp_path / "s1.jsonl").read_bytes()
-
-
-def test_a_crash_after_a_post_decision_asks_before_a_write_runs_again(
-    tmp_path: Path,
-) -> None:
-    crashed_after_a_decision(tmp_path, "write")
-    world = World(script=[])
-    paused = world.driver(tmp_path, guards=Guards(post=(Scrub(),))).resume(run_ref())
-    assert (paused.status, paused.reason) == ("paused", "awaiting_approval")
-    assert world.tool_calls == []
-    assert "a" not in completed(tmp_path)

@@ -4,9 +4,8 @@ from pathlib import Path
 
 import pytest
 from factories import calling, make
-from fakes import write_log
 
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import Event
 from loomcore.replay import (
     ForkChainError,
@@ -154,8 +153,10 @@ def test_a_log_read_back_from_disk_folds_to_the_same_state(tmp_path: Path) -> No
         make("model_call", 1, message=calling("a")),
         make("tool_completed", 2, tool_use_id="a"),
     ]
-    write_log(tmp_path, events)
     path = tmp_path / "s1.jsonl"
+    with open_writer(path) as writer:
+        for event in events:
+            writer.append(event)
     first, second = read_events(path).events, read_events(path).events
     assert replay(first) == replay(second) == replay(events)
 

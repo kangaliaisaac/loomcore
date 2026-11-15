@@ -7,10 +7,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from factories import START, make
+from factories import START
 from pydantic import JsonValue
 
-from loomcore.eventlog import open_writer, read_events
+from loomcore.eventlog import read_events
 from loomcore.events import Event, JsonObject, ToolCompleted
 from loomcore.guards import Guards
 from loomcore.limits import Limits
@@ -213,25 +213,6 @@ def ref(run_id: str = "r1") -> RunRef:
 
 def kinds(events: tuple[Event, ...], run_id: str = "r1") -> list[str]:
     return [e.kind for e in events if e.run_id == run_id]
-
-
-def run_started(limits: Limits = CAPS) -> Event:
-    """The first line of a session file written by hand, for a test that seeds a log."""
-    return make(
-        "run_started",
-        0,
-        task="go",
-        config=CONFIG.to_json(),
-        limits=limits.to_json(),
-        config_digest=CONFIG.digest(),
-    )
-
-
-def write_log(tmp: Path, rows: Sequence[Event]) -> None:
-    """Write `rows` as the session file a crashed process left behind."""
-    with open_writer(tmp / "s1.jsonl") as writer:
-        for row in rows:
-            writer.append(row)
 
 
 def log(tmp: Path) -> list[str]:

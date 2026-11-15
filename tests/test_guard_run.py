@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 from factories import calling, make
-from fakes import CAPS, Crash, World, log, reply, run_started, use, write_log
+from fakes import CAPS, CONFIG, Crash, World, log, reply, use
 from fakes import ref as run_ref
 
-from loomcore.eventlog import read_events
+from loomcore.eventlog import open_writer, read_events
 from loomcore.events import ApprovalRequested, GuardDecision, JsonObject, ToolCompleted
 from loomcore.guards import Allow, Ask, Deny, Guards, PreDecision, ToolRequest
 from loomcore.limits import Limits
@@ -140,7 +140,14 @@ def test_a_run_killed_before_the_question_is_logged_asks_it_on_resume(
 ) -> None:
     limits = Limits.model_validate({"run_cap": None, "month_cap": None})
     rows = [
-        run_started(limits),
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=limits.to_json(),
+            config_digest=CONFIG.digest(),
+        ),
         make("turn_started", 1, turn=1),
         make("model_call", 2, message=use(("a", "write"))),
         make(
@@ -152,7 +159,9 @@ def test_a_run_killed_before_the_question_is_logged_asks_it_on_resume(
             reason="write a?",
         ),
     ]
-    write_log(tmp_path, rows)
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for row in rows:
+            writer.append(row)
     world = World(script=[reply("ok")])
     paused = driver(world, tmp_path, Rule(("a",), Ask("write a?"))).resume(run_ref())
     assert paused.question == "write a?"
@@ -305,7 +314,16 @@ def test_a_crash_before_the_request_lines_keeps_a_denial_after_them(
     tmp_path: Path,
 ) -> None:
     rows = [
-        run_started(Limits.model_validate({"run_cap": None, "month_cap": None})),
+        make(
+            "run_started",
+            0,
+            task="go",
+            config=CONFIG.to_json(),
+            limits=Limits.model_validate(
+                {"run_cap": None, "month_cap": None}
+            ).to_json(),
+            config_digest=CONFIG.digest(),
+        ),
         make("turn_started", 1, turn=1),
         make("model_call", 2, message=use(("a", "write"), ("b", "read"))),
         make(
@@ -317,7 +335,9 @@ def test_a_crash_before_the_request_lines_keeps_a_denial_after_them(
             reason="no",
         ),
     ]
-    write_log(tmp_path, rows)
+    with open_writer(tmp_path / "s1.jsonl") as writer:
+        for row in rows:
+            writer.append(row)
     world = World(script=[reply("ok")])
     result = driver(world, tmp_path, Rule(("a",), Deny("no"))).resume(run_ref())
     assert result.status == "finished"

@@ -10,7 +10,8 @@ from pathlib import Path
 from factories import START
 from pydantic import JsonValue
 
-from loomcore.events import Event, JsonObject
+from loomcore.eventlog import read_events
+from loomcore.events import Event, JsonObject, ToolCompleted
 from loomcore.guards import Guards
 from loomcore.limits import Limits
 from loomcore.loop import Driver
@@ -212,3 +213,17 @@ def ref(run_id: str = "r1") -> RunRef:
 
 def kinds(events: tuple[Event, ...], run_id: str = "r1") -> list[str]:
     return [e.kind for e in events if e.run_id == run_id]
+
+
+def log(tmp: Path) -> list[str]:
+    """The kinds of the events in the session file, in order."""
+    return kinds(read_events(tmp / "s1.jsonl").events)
+
+
+def completed(tmp: Path) -> dict[str, ToolCompleted]:
+    """The session file's `tool_completed` events by tool_use id."""
+    return {
+        e.tool_use_id: e
+        for e in read_events(tmp / "s1.jsonl").events
+        if isinstance(e, ToolCompleted)
+    }

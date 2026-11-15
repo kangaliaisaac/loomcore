@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from fakes import CAPS, World, kinds, reply, use
+from fakes import CAPS, World, completed, kinds, reply, use
 
 from loomcore import ladder
 from loomcore.eventlog import read_events
-from loomcore.events import Event, GuardDecision, JsonObject, ToolCompleted
+from loomcore.events import Event, GuardDecision, JsonObject
 from loomcore.guards import Allow, Deny, Guards, PostDecision, Redact, ToolRequest
 from loomcore.limits import Limits
 from loomcore.ports import Task, ToolResult
@@ -47,10 +47,6 @@ def run(world: World, tmp: Path, *guards: Scrub | Refuse, task: Task = TASK) -> 
 
 def events(tmp: Path) -> tuple[Event, ...]:
     return read_events(tmp / "s1.jsonl").events
-
-
-def completed(tmp: Path) -> dict[str, ToolCompleted]:
-    return {e.tool_use_id: e for e in events(tmp) if isinstance(e, ToolCompleted)}
 
 
 def test_a_redacted_secret_is_in_neither_the_log_nor_a_request(tmp_path: Path) -> None:

@@ -4,16 +4,17 @@ run (spec 3.6)."""
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
 from factories import make
-from fakes import CAPS, CONFIG, World, finish, kinds, reply, use
+from fakes import CAPS, CONFIG, World, completed, finish, log, reply, use
 from fakes import ref as run_ref
 
 from loomcore.eventlog import open_writer, read_events
-from loomcore.events import Event, JsonObject, ToolCompleted
+from loomcore.events import ContextPacked, Event, JsonObject, ToolCompleted
 from loomcore.limits import Limits
-from loomcore.ports import Task
+from loomcore.ports import Task, ToolResult
 from loomcore.replay import RunState, replay
-from loomcore.verify import Verdict, critique
+from loomcore.verify import Verdict, VerifierError, critique
 
 TASK = Task("go", CAPS)
 
@@ -38,18 +39,6 @@ class Never:
 
     def __call__(self, state: RunState) -> Verdict:
         raise AssertionError("the verifier must not run here")
-
-
-def log(tmp: Path) -> list[str]:
-    return kinds(read_events(tmp / "s1.jsonl").events)
-
-
-def completed(tmp: Path) -> dict[str, ToolCompleted]:
-    return {
-        e.tool_use_id: e
-        for e in read_events(tmp / "s1.jsonl").events
-        if isinstance(e, ToolCompleted)
-    }
 
 
 def last_user_text(world: World) -> str:
@@ -288,3 +277,68 @@ def test_an_empty_reply_after_a_tool_turn_still_gets_its_critique(
     world = World(script=[use(("t1", "search")), empty, reply("now with text")])
     world.driver(tmp_path, verifier=Scripted([False, True])).run(TASK)
     assert critique("tests", "2 tests fail") in last_user_text(world)
+
+
+class Broken:
+    """A verifier that cannot reach a verdict."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def __call__(self, state: RunState) -> Verdict:
+        raise self.error
+
+
+def test_a_verifier_that_cannot_judge_ends_the_run_with_an_error(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[finish("x", ("a", "write"), call_id="f1")])
+    verifier = Broken(VerifierError("pytest would not start"))
+    result = world.driver(tmp_path, verifier=verifier).run(TASK)
+    assert (result.status, result.reason) == ("finished", "error")
+    assert log(tmp_path)[-1] == "run_finished"
+    assert not {"verification_passed", "verification_failed"} & set(log(tmp_path))
+    assert not completed(tmp_path)["f1"].ok
+    assert not completed(tmp_path)["a"].ok  # every call is settled
+    assert world.tool_calls == []
+
+
+def test_any_other_error_from_a_verifier_is_a_bug_and_propagates(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[reply("done")])
+    with pytest.raises(ZeroDivisionError):
+        world.driver(tmp_path, verifier=Broken(ZeroDivisionError())).run(TASK)
+
+
+def test_the_critique_stays_in_a_window_that_drops_older_exchanges(
+    tmp_path: Path,
+) -> None:
+    ids = [f"t{k}" for k in range(14)]
+    world = World(
+        script=[reply("early"), *(use((i, "search")) for i in ids), reply("done")],
+        tool_results={i: ToolResult(True, f"{i} " + "data " * 80) for i in ids},
+        read_only={"search"},
+    )
+    limits = Limits.model_validate(
+        {"run_cap": None, "month_cap": None, "max_turns": 100, "context_budget": 700}
+    )
+    result = world.driver(tmp_path, verifier=Scripted([False, True])).run(
+        Task("go", limits)
+    )
+    assert result.status == "finished"
+    packed = [
+        e
+        for e in read_events(tmp_path / "s1.jsonl").events
+        if isinstance(e, ContextPacked)
+    ]
+    assert any(e.dropped for e in packed)  # the budget did force drops
+    failed = next(
+        e
+        for e in read_events(tmp_path / "s1.jsonl").events
+        if e.kind == "verification_failed"
+    )
+    key = f"verify:r1:{failed.seq}"
+    assert all(key in e.selected for e in packed if e.seq > failed.seq)
+    sent = [m["content"] for m in world.requests[-1].messages]
+    assert critique("tests", "2 tests fail") in sent

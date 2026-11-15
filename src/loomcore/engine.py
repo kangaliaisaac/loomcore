@@ -63,7 +63,7 @@ from loomcore.step import (
     Stop,
     step,
 )
-from loomcore.verify import Verdict, Verifier, critique
+from loomcore.verify import Verdict, Verifier, VerifierError, critique
 from loomcore.window import Budget, Carried, Window, build_window
 
 _LOG = logging.getLogger(__name__)
@@ -625,7 +625,10 @@ class Run:
         claim = stop.reason in ("finished", "end_turn")
         if self.verifier is None or not claim or self.state.verified:
             return self._finish(stop)
-        verdict = self.verifier(self.state)
+        try:
+            verdict = self.verifier(self.state)
+        except VerifierError as error:
+            return self._finish(Stop("error", str(error)))
         if verdict.passed:
             self.fold(
                 [

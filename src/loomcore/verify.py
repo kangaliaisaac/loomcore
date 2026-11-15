@@ -18,8 +18,14 @@ class Verdict:
     message: str = ""  # the short critique on a failure; no secret in it
 
 
+class VerifierError(Exception):
+    """The verifier could not judge (its tests would not run, its check timed out).
+    The run ends with reason `error`; any other exception is a bug and propagates."""
+
+
 # It checks the outcome (tests, a checker function), may do I/O, and should be
-# idempotent: a crash between the check and its event runs it again.
+# idempotent: a crash between the check and its event runs it again. It raises
+# `VerifierError` when it cannot reach a verdict, and bounds its own time.
 Verifier = Callable[[RunState], Verdict]
 
 

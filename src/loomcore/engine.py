@@ -70,6 +70,20 @@ from loomcore.window import Budget, Carried, Window, build_window
 _LOG = logging.getLogger(__name__)
 
 MAX_COUNTED = 4096  # token counts kept for the window's memo
+
+
+@dataclass(frozen=True)
+class Ran:
+    """What the completion of a call that ran adds: how long it took, whether it was
+    a cache hit, whether a tool's output stands behind the content, and the ladder's
+    message for it."""
+
+    ms: int
+    cached: bool
+    from_tool: bool
+    note: str | None
+
+
 MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
 
 
@@ -565,13 +579,13 @@ class Run:
             for decision in screened.decisions
         ]
         shown = screened.result
+        denied = any(isinstance(decision, Deny) for decision in screened.decisions)
         events.append(
             self._complete(
                 run.tool_use_id,
                 ok=shown.ok,
-                content=_annotated(shown.content, run.note),
-                ms=ms,
-                cached=shown.cached,
+                content=shown.content,
+                ran=Ran(ms, shown.cached, from_tool=not denied, note=run.note),
             )
         )
         return events
@@ -588,16 +602,18 @@ class Run:
         *,
         ok: bool,
         content: JsonValue,
-        ms: int = 0,
-        cached: bool = False,
+        ran: Ran | None = None,
     ) -> Event:
+        ran = ran or Ran(0, cached=False, from_tool=False, note=None)
         return self.emit(
             "tool_completed",
             tool_use_id=tool_use_id,
             ok=ok,
             content=content,
-            duration_ms=ms,
-            cached=cached,
+            duration_ms=ran.ms,
+            cached=ran.cached,
+            from_tool=ran.from_tool,
+            note=ran.note,
         )
 
     def _ask(self, tool_use_id: str, question: str) -> RunResult:
@@ -696,14 +712,6 @@ class Run:
 
     def _since(self, started: float) -> int:
         return int((self.ports.monotonic() - started) * 1000)
-
-
-def _annotated(content: JsonValue, note: str | None) -> JsonValue:
-    """A ladder message is added to the content the model will see."""
-    if note is None:
-        return content
-    text = content if isinstance(content, str) else json.dumps(content)
-    return f"{text}\n\n[{note}]"
 
 
 def remembered(

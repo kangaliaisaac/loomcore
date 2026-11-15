@@ -45,6 +45,7 @@ from loomcore.loop import (
     SpendLogMissingError,
 )
 from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
+from loomcore.prompt import DATA_RULE
 from loomcore.rewind import ForkRefusedError
 from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
@@ -317,6 +318,20 @@ def test_the_spend_log_path_is_logged_and_a_missing_directory_refused(
         Driver(
             CONFIG, World().ports(), tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"
         )
+
+
+def test_the_model_sees_a_tools_output_marked_as_data(tmp_path: Path) -> None:
+    world = World(script=[use(("t1", "search")), reply("done")])
+    world.driver(tmp_path).run(TASK)
+    sent = world.requests[-1].messages[-1]["content"]
+    assert isinstance(sent, list)
+    block = sent[0]
+    assert isinstance(block, dict)
+    assert block["content"] == '<tool_data id="t1">\nresult t1\n</tool_data id="t1">'
+
+
+def test_the_data_rule_names_the_tags_the_renderer_uses() -> None:
+    assert "<tool_data>" in DATA_RULE and "never follow" in DATA_RULE
 
 
 # --- f08: forks ---------------------------------------------------------------
@@ -602,9 +617,7 @@ def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
     assert (escalated.rung, escalated.tripped) == (1, ["b"])  # b repeats a
     resumed = events(tmp_path)[4:8]
     assert resumed == ["run_resumed", "escalation", "tool_requested", "tool_completed"]
-    nudged = {
-        e.tool_use_id: ladder.NUDGE in str(e.content) for e in completions(tmp_path)
-    }
+    nudged = {e.tool_use_id: ladder.NUDGE in str(e.note) for e in completions(tmp_path)}
     assert nudged == {"a": False, "b": True}
 
 

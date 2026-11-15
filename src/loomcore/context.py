@@ -18,14 +18,15 @@ from loomcore.events import JsonObject
 ItemKind = Literal["task", "exchange", "hint"]
 Counter = Callable[[Sequence[JsonObject]], int]  # tokens in a list of messages
 CLEARED = "[tool result cleared to save context]"
-CLEARED_INPUT = "[tool input cleared to save context]"
+CLEARED_INPUT = "[tool input cleared to save context; the call ran with its real input]"
 PLAN_TOOL = "update_plan"  # the exchange of its latest successful call is pinned
 STRATEGY = "clear_tool_results"  # what `context_compacted` names for `compact`
 
 
 @dataclass(frozen=True)
 class Cleared:
-    """An exchange with its tool results replaced by `CLEARED`."""
+    """An exchange with its tool results replaced by `CLEARED` and the inputs of its
+    tool calls (the plan's excepted) by `CLEARED_INPUT`."""
 
     messages: tuple[JsonObject, ...]
     tokens: int
@@ -40,7 +41,7 @@ class Item:
     tokens: int  # counted at the edge, never here
     messages: tuple[JsonObject, ...]
     pinned: bool = False
-    cleared: Cleared | None = None  # None when there is no tool result to clear
+    cleared: Cleared | None = None  # None when there is nothing to clear
     # A pinned item (never dropped) whose tool results may still be cleared: the
     # exchange that holds the plan, whose text is in a tool call's input, not a result.
     may_clear: bool = False

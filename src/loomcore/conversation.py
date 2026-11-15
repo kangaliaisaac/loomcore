@@ -142,7 +142,7 @@ def _cleared(messages: list[JsonObject], tokens: int, count: Counter) -> Cleared
     or None when that would not make it smaller."""
     blank = clear_results(messages)
     if blank == tuple(messages):
-        return None  # no tool result to clear, so nothing to count
+        return None  # nothing to clear, so nothing to count
     cleared = count(blank)
     return None if cleared >= tokens else Cleared(blank, cleared)
 

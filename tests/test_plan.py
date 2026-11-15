@@ -13,7 +13,7 @@ from loomcore.context import PLAN_TOOL, Cleared, Item
 from loomcore.conversation import exchanges
 from loomcore.eventlog import read_events
 from loomcore.events import ContextPacked, Event, JsonObject
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.notices import Notices
 from loomcore.plan import MAX_PLAN_CHARS, PLAN_FILE, update_plan
 from loomcore.ports import Config, Task, ToolResult
@@ -202,7 +202,7 @@ def run_with_plan(scene: Scene, *, sibling: bool = False) -> tuple[World, list[s
     limits = CAPS.model_copy(update={"context_budget": BUDGET, "max_turns": 100})
     session, spend = scene.tmp_path / "s1.jsonl", scene.tmp_path / "spend.jsonl"
     assert (
-        Driver(config, ports, session, spend).run(Task("go", limits)).status
+        Driver(config, ports, Settings(session, spend)).run(Task("go", limits)).status
         == "finished"
     )
     assert scene.workspace.read(PLAN_FILE) == "NEW PLAN: finish\n"

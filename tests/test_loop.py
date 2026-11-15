@@ -42,7 +42,9 @@ from loomcore.limits import Limits
 from loomcore.loop import (
     ConfigChangedError,
     Driver,
+    PortsDisagreeError,
     RunIdTakenError,
+    Settings,
     SpendLogMissingError,
 )
 from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
@@ -319,8 +321,25 @@ def test_the_spend_log_path_is_logged_and_a_missing_directory_refused(
     assert str(tmp_path / "spend.jsonl") in caplog.text
     with pytest.raises(SpendLogMissingError):
         Driver(
-            CONFIG, World().ports(), tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"
+            CONFIG,
+            World().ports(),
+            Settings(tmp_path / "s1.jsonl", tmp_path / "no" / "s.jsonl"),
         )
+
+
+def test_a_driver_refuses_ports_that_disagree_about_a_listed_tool(
+    tmp_path: Path,
+) -> None:
+    world = World()
+    ports = replace(world.ports(), read_only=lambda name: name == "search")
+    settings = Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    with pytest.raises(PortsDisagreeError, match="search"):
+        Driver(CONFIG, ports, settings)  # access: search writes; read_only: no
+    other = replace(CONFIG, tools=({"name": "unlisted"},))
+    Driver(other, ports, settings)  # a tool the configuration does not list
+    switching = replace(other, switch_to=CONFIG)
+    with pytest.raises(PortsDisagreeError, match="search"):
+        Driver(switching, ports, settings)  # nor the one a switch would bring
 
 
 def test_the_model_sees_a_tools_output_marked_as_data(tmp_path: Path) -> None:
@@ -344,7 +363,8 @@ def test_a_registrys_message_about_an_unknown_tool_reaches_the_model_unwrapped(
     )
     world = World(script=[use(("t1", "nope")), reply("done")])
     ports = replace(world.ports(), tool=registry.execute)
-    Driver(CONFIG, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl").run(TASK)
+    settings = Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    Driver(CONFIG, ports, settings).run(TASK)
     sent = world.requests[-1].messages[-1]["content"]
     assert isinstance(sent, list) and isinstance(sent[0], dict)
     text = str(sent[0]["content"])

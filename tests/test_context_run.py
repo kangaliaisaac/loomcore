@@ -19,7 +19,7 @@ from loomcore.events import (
     JsonObject,
     TurnStarted,
 )
-from loomcore.loop import Driver
+from loomcore.loop import Driver, Settings
 from loomcore.ports import Config, Task, ToolResult
 from loomcore.replay import replay, run_events
 from loomcore.window import Budget, Carried, build_window
@@ -71,7 +71,9 @@ def test_with_no_budget_nothing_is_counted_and_requests_are_the_whole_history(
         raise AssertionError("with no budget nothing is counted")
 
     ports = replace(world.ports(), count_tokens=refuse)
-    driver = Driver(CONFIG, ports, tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    driver = Driver(
+        CONFIG, ports, Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    )
     assert driver.run(task).status == "finished"
     log = list(read_events(tmp_path / "s1.jsonl").events)
     assert context_events(log) == []

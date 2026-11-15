@@ -90,35 +90,40 @@ def _run_spans(log: list[Event]) -> list[Span]:
 
 def _turns(base: str, parent: str, log: list[Event]) -> list[Span]:
     """A turn lasts from its start to the next turn's start, or the run's last event.
-    The driver writes `turn_started` after the model has answered, just before the
+    The driver logs `turn_started` after the model has answered, just before the
     `model_call`, so a turn starts when its model call did, if that is earlier."""
     starts = [e for e in log if isinstance(e, TurnStarted)]
-    begins = [_turn_start(event, log) for event in starts]
-    ends = [*begins[1:], log[-1].timestamp]
+    begins = _turn_starts(log)
+    ends = [*(begins[e.seq] for e in starts[1:]), log[-1].timestamp]
     return [
         Span(
             _id(base, "turn", event.seq),
             parent,
             "turn",
             f"turn {event.turn}",
-            begin,
+            begins[event.seq],
             end,
             {"loomcore.turn": event.turn},
         )
-        for event, begin, end in zip(starts, begins, ends, strict=True)
+        for event, end in zip(starts, ends, strict=True)
     ]
 
 
-def _turn_start(turn: TurnStarted, log: list[Event]) -> datetime:
-    """The earlier of the turn's own event and its model call's start."""
-    call = next((e for e in log if isinstance(e, ModelCall) and e.seq > turn.seq), None)
-    if call is None or any(
-        isinstance(e, TurnStarted) and turn.seq < e.seq < call.seq for e in log
-    ):
-        return turn.timestamp
-    return min(
-        turn.timestamp, call.timestamp - timedelta(milliseconds=call.duration_ms)
-    )
+def _turn_starts(log: list[Event]) -> dict[int, datetime]:
+    """Each turn's start by its `turn_started` seq, in one pass: the earlier of its
+    own event and the start of the model call that follows it (if no other turn
+    began first)."""
+    begins: dict[int, datetime] = {}
+    waiting: TurnStarted | None = None
+    for event in log:
+        if isinstance(event, TurnStarted):
+            begins[event.seq] = event.timestamp
+            waiting = event
+        elif isinstance(event, ModelCall) and waiting is not None:
+            call_start = event.timestamp - timedelta(milliseconds=event.duration_ms)
+            begins[waiting.seq] = min(begins[waiting.seq], call_start)
+            waiting = None
+    return begins
 
 
 def _model_span(base: str, parent: str, call: ModelCall) -> Span:

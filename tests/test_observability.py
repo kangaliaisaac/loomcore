@@ -63,6 +63,10 @@ def test_the_vendored_table_is_the_published_one() -> None:
     assert TABLE.version == "2026-11-15"
 
 
+def test_the_table_names_where_its_prices_came_from() -> None:
+    assert TABLE.source.startswith("https://")
+
+
 def test_a_model_the_table_does_not_list_is_an_error_that_says_what_to_do() -> None:
     with pytest.raises(UnknownModelError, match="pricing table"):
         price(usage("claude-unknown-1", input=1), TABLE)
@@ -384,6 +388,19 @@ def test_a_turn_written_the_way_the_driver_writes_it_holds_its_model_call() -> N
     assert found.index(turn) < found.index(model)  # a parent before its child
     second = next(s for s in found if s.id == "s1/r1/turn:5")
     assert turn.end == second.start  # a turn ends where the next begins
+
+
+def test_a_turn_with_no_model_call_before_the_next_turn_keeps_its_own_start() -> None:
+    log = [
+        make("run_started", 0),
+        make("turn_started", 1, turn=1),
+        make("turn_started", 2, turn=2),
+        make("model_call", 3, message=response(), duration_ms=1500),
+    ]
+    first, second = (s for s in spans(log) if s.kind == "turn")
+    assert first.start == log[1].timestamp  # no call of its own to start earlier
+    assert second.start == log[3].timestamp - timedelta(milliseconds=1500)
+    assert first.end == second.start
 
 
 def test_a_denied_call_has_a_span_that_says_it_did_not_succeed() -> None:

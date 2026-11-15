@@ -112,10 +112,15 @@ class Usage:
 
 
 def _count(block: JsonObject, key: str, *, nullable: bool = False) -> int:
-    """A token count: 0 when the key is absent, a `ValueError` when it is not a
-    whole number (a malformed block must not price as free). The API documents the
-    cache counts as `integer | null`, so those (`nullable`) read null as 0."""
-    value = block.get(key, 0)
+    """A token count, a `ValueError` when it is missing or is not a whole number (a
+    malformed block must not price as free). The API documents the cache counts as
+    `integer | null` and leaves them out when there is no caching, so those
+    (`nullable`) read absent or null as 0; the input and output counts are required."""
+    if key not in block:
+        if nullable:
+            return 0
+        raise ValueError(f"usage.{key} is missing, so the call cannot be priced")
+    value = block[key]
     if value is None and nullable:
         return 0
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:

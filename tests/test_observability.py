@@ -1,8 +1,10 @@
 """f21: spans from a recorded log are stable; pricing from tokens matches
 hand-computed values; cache read and write tokens are priced separately (spec 3.8)."""
 
+import json
 from datetime import timedelta
 from decimal import Decimal
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -176,6 +178,22 @@ def test_cache_writes_with_no_breakdown_are_five_minute_writes() -> None:
     assert usage_of(message).tokens.cache_write_5m == 300
 
 
+@pytest.mark.parametrize("missing", ["input_tokens", "output_tokens"])
+def test_a_missing_input_or_output_count_is_an_error_not_free(missing: str) -> None:
+    message = response()
+    usage_block = message["usage"]
+    assert isinstance(usage_block, dict)
+    del usage_block[missing]
+    with pytest.raises(ValueError, match=missing):
+        usage_of(message)
+    with pytest.raises(ValueError, match=missing):
+        TablePricing(TABLE, count_input=lambda _: 0).cost(message)
+
+
+def test_missing_cache_counts_are_zero() -> None:
+    assert usage_of(response()) == usage(input=1840, output=312)
+
+
 def test_a_null_cache_count_is_zero_but_a_null_input_count_is_an_error() -> None:
     message = response(
         cache_read_input_tokens=None,
@@ -275,9 +293,22 @@ def test_the_worst_case_prices_a_cached_prefix_at_the_dearest_input_rate() -> No
     assert pricing.worst_case(cached) > pricing.worst_case(plain)
 
 
-def test_the_table_loads_from_json_with_exact_decimals() -> None:
-    text = TABLE.model_dump_json()
-    assert PricingTable.model_validate_json(text) == TABLE
+def test_every_price_in_the_vendored_file_is_a_string_so_no_float_stands_for_one() -> (
+    None
+):
+    raw = json.loads(
+        (resources.files("loomcore.observability") / "pricing.json").read_text("utf-8")
+    )
+    for model, row in raw["models"].items():
+        for tier in (row, row.get("long_context", {})):
+            prices = {
+                k: v for k, v in tier.items() if k not in ("over", "long_context")
+            }
+            assert all(isinstance(v, str) for v in prices.values()), model
+
+
+def test_the_table_round_trips_through_json() -> None:
+    assert PricingTable.model_validate_json(TABLE.model_dump_json()) == TABLE
 
 
 # --- spans --------------------------------------------------------------------

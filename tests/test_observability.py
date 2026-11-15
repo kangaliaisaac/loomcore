@@ -246,6 +246,14 @@ def test_a_log_with_calls_that_have_no_usage_counts_them_unpriced() -> None:
     assert tally([fake], TABLE)["r1"].usd == D(0)
 
 
+def test_the_driver_port_raises_on_a_response_with_no_usage_where_tally_counts_it() -> (
+    None
+):
+    pricing = TablePricing(TABLE, count_input=lambda _: 0)
+    with pytest.raises(ValueError, match="usage"):
+        pricing.cost({"content": []})
+
+
 def test_the_worst_case_prices_a_cached_prefix_at_the_dearest_input_rate() -> None:
     pricing = TablePricing(TABLE, count_input=lambda _: 1000)
     plain = ModelRequest("claude-sonnet-5-5", "s", [], (), max_tokens=8192)
@@ -321,7 +329,7 @@ def test_a_model_span_carries_the_gen_ai_attributes_and_its_tokens() -> None:
         "gen_ai.usage.output_tokens": 312,
         "gen_ai.usage.cache_read.input_tokens": 9200,
         "gen_ai.usage.cache_creation.input_tokens": 0,
-        "loomcore.cost_usd": 0.00772,
+        "loomcore.cost_usd": "0.00772",
         "loomcore.pricing_version": "2026-11-15",
     }
     tool = next(s for s in spans(recorded()) if s.kind == "tool_call")

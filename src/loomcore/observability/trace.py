@@ -23,7 +23,7 @@ from loomcore.events import (
     ToolRequested,
     TurnStarted,
 )
-from loomcore.observability.cost import Tokens, tokens_of
+from loomcore.observability.cost import Tokens, find_usage
 
 Kind = Literal["run", "turn", "model_call", "tool_call"]
 _RANK: dict[Kind, int] = {"run": 0, "turn": 1, "model_call": 2, "tool_call": 2}
@@ -125,13 +125,14 @@ def _model_span(base: str, parent: str, call: ModelCall) -> Span:
     """The call ends at its event and started `duration_ms` before."""
     start = call.timestamp - timedelta(milliseconds=call.duration_ms)
     message = call.message
-    tokens = tokens_of(message)
+    found = find_usage(message)
+    tokens = found.tokens if found else None
     attributes: dict[str, JsonValue] = {
         "gen_ai.operation.name": "chat",
         "gen_ai.response.model": message.get("model"),
         "gen_ai.response.id": message.get("id"),
         "gen_ai.response.finish_reasons": [message.get("stop_reason")],
-        "loomcore.cost_usd": float(call.cost_usd),
+        "loomcore.cost_usd": format(call.cost_usd, "f"),  # a string: no float price
         "loomcore.pricing_version": call.pricing_version,
     }
     if tokens is not None:

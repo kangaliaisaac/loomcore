@@ -13,7 +13,7 @@ from decimal import Decimal
 from functools import cache
 from importlib import resources
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field
 
 from loomcore.events import Event, JsonObject, ModelCall
 from loomcore.ports import ModelRequest
@@ -124,11 +124,21 @@ def _count(block: JsonObject, key: str, *, nullable: bool = False) -> int:
 
 
 def usage_of(message: JsonObject) -> Usage:
-    """The `model` and `usage` of a Messages API response. A response with no
-    cache breakdown counts its cache writes as the default five-minute ones."""
+    """The `model` and `usage` of a Messages API response; a `ValueError` when it
+    has none (the engine only sees real responses, so `TablePricing.cost` raises)."""
+    found = find_usage(message)
+    if found is None:
+        raise ValueError("the response has no `model` and `usage` to price")
+    return found
+
+
+def find_usage(message: JsonObject) -> Usage | None:
+    """The same, or None for a response with no `model` and `usage` (a scripted
+    fake's, in a log). A response that has them but malformed still raises. A
+    response with no cache breakdown counts its cache writes as five-minute ones."""
     model, usage = message.get("model"), message.get("usage")
     if not isinstance(model, str) or not isinstance(usage, dict):
-        raise ValueError("the response has no `model` and `usage` to price")
+        return None
     split = usage.get("cache_creation")
     if isinstance(split, dict):
         writes = (
@@ -178,10 +188,10 @@ def tally(events: Iterable[Event], table: PricingTable) -> dict[str, RunCost]:
         if not isinstance(event, ModelCall):
             continue
         before = runs.get(event.run_id, RunCost(0, Tokens(), Decimal(0)))
-        if tokens_of(event.message) is None:
+        usage = find_usage(event.message)
+        if usage is None:
             runs[event.run_id] = replace(before, unpriced=before.unpriced + 1)
             continue
-        usage = usage_of(event.message)
         runs[event.run_id] = RunCost(
             before.calls + 1,
             before.tokens + usage.tokens,
@@ -212,15 +222,3 @@ class TablePricing:
 
     def cost(self, message: JsonObject) -> tuple[Decimal, str]:
         return price(usage_of(message), self.table), self.table.version
-
-
-def tokens_of(message: JsonValue) -> Tokens | None:
-    """The tokens of a response, or None when it has no `model` and `usage` (a log
-    written by a scripted fake has none). A malformed `usage` still raises."""
-    if not isinstance(message, dict):
-        return None
-    if not isinstance(message.get("model"), str) or not isinstance(
-        message.get("usage"), dict
-    ):
-        return None
-    return usage_of(message).tokens

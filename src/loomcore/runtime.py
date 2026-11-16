@@ -15,10 +15,12 @@ from loomcore.observability.cost import TablePricing, vendored_table
 from loomcore.ports import ModelRequest, Pricing
 from loomcore.retry import Random
 
-# Characters per token: high for prose, low for dense text such as hashes and ids, so
-# the count is a heuristic. What a run is billed is read from the response's `usage`,
-# never from this count.
+# Characters per token. Three is high for prose and low for dense text such as hashes
+# and ids, so the context budget's count is a heuristic. Two is what a hash costs, so
+# the pre-call cost ceiling, which must not undercount, uses it. What a run is billed
+# is read from the response's `usage`, never from either count.
 _CHARS_PER_TOKEN = 3
+_PRICING_CHARS_PER_TOKEN = 2
 
 
 class SystemPorts(TypedDict):
@@ -36,14 +38,24 @@ class SystemPorts(TypedDict):
 def estimate_tokens(messages: Sequence[JsonObject]) -> int:
     """An offline count of the tokens in a list of messages, from their serialised
     length. It is a heuristic (see `_CHARS_PER_TOKEN`); a caller that relies on the
-    context budget or the cost ceiling passes an exact counter in its place."""
-    return len(json.dumps(messages, sort_keys=True)) // _CHARS_PER_TOKEN + 1
+    context budget passes an exact counter in its place."""
+    return _estimate(messages, _CHARS_PER_TOKEN)
 
 
 def estimate_request(request: ModelRequest) -> int:
-    return estimate_tokens(
-        [{"system": request.system}, *request.messages, {"tools": list(request.tools)}]
-    )
+    """The count the pre-call cost ceiling uses: two characters a token, so it does
+    not undercount a hash or an id. A caller who needs a tight ceiling passes an exact
+    counter to `TablePricing`."""
+    messages: list[JsonObject] = [
+        {"system": request.system},
+        *request.messages,
+        {"tools": list(request.tools)},
+    ]
+    return _estimate(messages, _PRICING_CHARS_PER_TOKEN)
+
+
+def _estimate(messages: Sequence[JsonObject], chars_per_token: int) -> int:
+    return len(json.dumps(messages, sort_keys=True)) // chars_per_token + 1
 
 
 def utc_now() -> datetime:

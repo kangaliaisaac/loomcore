@@ -80,6 +80,14 @@ def test_a_call_sends_the_request_and_returns_the_response_as_json() -> None:
     assert "stop_sequence" not in response  # None fields are dropped
 
 
+def test_every_call_carries_a_timeout() -> None:
+    client, seen = replying()
+    port.model(client)(request())
+    port.model(client, timeout=12.5)(request())
+    assert seen[0].extensions["timeout"]["read"] == 300.0
+    assert seen[1].extensions["timeout"]["read"] == 12.5
+
+
 def test_tools_are_sent_when_there_are_some() -> None:
     client, seen = replying()
     port.model(client)(request(tools=(TOOL,)))

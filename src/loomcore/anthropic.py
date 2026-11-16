@@ -15,20 +15,22 @@ from loomcore.ports import ModelCallError, ModelRequest
 from loomcore.retry import CallError
 
 _DETAIL_CHARS = 300  # the provider's message is kept to this much in a stop reason
+_TIMEOUT_SECONDS = 300.0  # one call; a timeout is retried by the driver's policy
 
 
 def model(
-    client: anthropic.Anthropic | None = None,
+    client: anthropic.Anthropic | None = None, *, timeout: float = _TIMEOUT_SECONDS
 ) -> Callable[[ModelRequest], JsonObject]:
     """A model port that calls the Messages API. The default client reads
     `ANTHROPIC_API_KEY`. The client's own retries are switched off, whichever client
     is passed: the driver's retry policy is the only layer, and a second one would
-    multiply it and sleep past the run's timeout check."""
+    multiply it and sleep past the run's timeout check. Each call has a `timeout`
+    in seconds (300 by default), because the SDK's own default is ten minutes."""
     api = (client or anthropic.Anthropic()).with_options(max_retries=0)
 
     def call(request: ModelRequest) -> JsonObject:
         try:
-            message = api.messages.create(**_params(request))
+            message = api.messages.create(timeout=timeout, **_params(request))
         except anthropic.APITimeoutError as error:
             raise ModelCallError(CallError("timeout")) from error
         except anthropic.APIConnectionError as error:

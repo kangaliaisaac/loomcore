@@ -2,9 +2,10 @@
 
 from dataclasses import fields
 from datetime import timedelta
+from decimal import Decimal
 
 from loomcore.events import JsonObject
-from loomcore.observability.cost import TablePricing
+from loomcore.observability.cost import TablePricing, vendored_table
 from loomcore.ports import ModelRequest, Ports
 from loomcore.runtime import (
     SystemPorts,
@@ -64,8 +65,23 @@ def test_run_ids_differ_and_the_jitter_is_a_fraction() -> None:
     assert 0 <= ports["random"]() < 1
 
 
-def test_pricing_is_the_vendored_table_on_the_estimate() -> None:
+def test_pricing_is_the_vendored_table_on_the_pessimistic_estimate() -> None:
     pricing = system_ports()["pricing"]
     assert isinstance(pricing, TablePricing)
-    request = ModelRequest("claude-haiku-5-5", "s", [MESSAGE], (), max_tokens=100)
-    assert pricing.worst_case(request) > 0
+    assert pricing.count_input is estimate_request
+    assert pricing.table.version == vendored_table().version
+    request = ModelRequest("claude-haiku-5-5", "", [MESSAGE], (), max_tokens=100)
+    known = estimate_request(request)
+    # Haiku: $0.10 in and $0.50 out per million tokens.
+    assert (
+        pricing.worst_case(request)
+        == (known * Decimal("0.10") + 100 * Decimal("0.50")) / 10**6
+    )
+
+
+def test_the_cost_ceiling_does_not_undercount_a_hash() -> None:
+    digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    request = ModelRequest(
+        "m", "s", [{"role": "user", "content": digest * 20}], (), max_tokens=8
+    )
+    assert estimate_request(request) >= len(digest) * 20 // 2  # at two chars a token

@@ -347,10 +347,14 @@ def _clean(node: Any) -> Any:  # noqa: ANN401 - walks arbitrary JSON
 
 
 def _where(problem: ErrorDetails) -> str:
-    """The path to the bad value. A name the model made up (an unknown argument) is
-    quoted, so it stays one string whatever it holds; names from the schema are not."""
-    quote = problem["type"] == "extra_forbidden"
-    return ".".join(repr(p) if quote else str(p) for p in problem["loc"]) or "input"
+    """The path to the bad value. A name or dict key the model chose could hold a
+    newline or a sentence, so anything that is not a plain identifier is quoted and
+    stays one string."""
+    parts = (
+        repr(p) if isinstance(p, str) and not p.isidentifier() else str(p)
+        for p in problem["loc"]
+    )
+    return ".".join(parts) or "input"
 
 
 def _problems(error: ValidationError) -> str:

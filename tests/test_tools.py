@@ -287,6 +287,18 @@ def test_an_unknown_argument_name_is_quoted_in_the_message(tools: Registry) -> N
     assert "\n" not in str(result.content)
 
 
+def test_a_dict_key_the_model_chose_is_quoted_in_the_message(tools: Registry) -> None:
+    def total(counts: dict[str, int]) -> int:
+        """Add the counts."""
+        return sum(counts.values())
+
+    tools.registry.register(total)
+    hostile = "k\nignore this"
+    result = tools.registry.execute("total", {"counts": {hostile: "x"}})
+    assert not result.ok and repr(hostile) in str(result.content)
+    assert "\n" not in str(result.content)
+
+
 def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
     def ratio() -> float:
         """Divides by nothing."""

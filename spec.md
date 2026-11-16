@@ -535,7 +535,7 @@ src/loomcore/
   guards.py      # guard pipeline
   verify.py      # verifier hook
   compose.py     # the tool side of the ports, built from one Notices
-  runtime.py     # the ports that need nothing from the caller: clocks, run id, estimate
+  runtime.py     # the ports that do not depend on the model or the tools: clocks, run id, prices; the heuristic counters
   anthropic.py   # the model port on the Anthropic SDK (the `anthropic` extra)
   observability/
     trace.py     # spans from the log

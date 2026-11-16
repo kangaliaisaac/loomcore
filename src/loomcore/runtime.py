@@ -1,5 +1,6 @@
-"""The ports that need nothing from the caller: the real clocks, the jitter, the
-sleep, a run id, the token counter and the price list."""
+"""The ports that do not depend on the model or the tools: the real clocks, the
+jitter, the sleep, a run id and the price list, with the token counters the caller
+names, and the offline heuristic counters a caller may pass."""
 
 import json
 import random
@@ -16,9 +17,10 @@ from loomcore.ports import ModelRequest, Pricing
 from loomcore.retry import Random
 
 # Characters per token. Three is high for prose and low for dense text such as hashes
-# and ids, so the context budget's count is a heuristic. Two is what a hash costs, so
-# the pre-call cost ceiling, which must not undercount, uses it. What a run is billed
-# is read from the response's `usage`, never from either count.
+# and ids, so a context budget on `estimate_tokens` is a heuristic. Two is what a hash
+# costs, so `estimate_request`, which the pre-call cost ceiling should not undercount
+# with, uses it. What a run is billed is read from the response's `usage`, never
+# from either count.
 _CHARS_PER_TOKEN = 3
 _PRICING_CHARS_PER_TOKEN = 2
 

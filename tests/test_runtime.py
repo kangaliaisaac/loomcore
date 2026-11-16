@@ -1,4 +1,4 @@
-"""The ports that need nothing from the caller."""
+"""The ports that do not depend on the model or the tools."""
 
 from collections.abc import Sequence
 from dataclasses import fields
@@ -24,7 +24,7 @@ def estimated() -> SystemPorts:
     return system_ports(count_tokens=estimate_tokens, count_request=estimate_request)
 
 
-def test_system_ports_are_the_ports_a_caller_has_no_say_in() -> None:
+def test_system_ports_fill_every_port_but_the_model_and_the_tools() -> None:
     from_the_caller = {"model", "tool", "read_only", "access", "notices"}
     assert set(SystemPorts.__annotations__) | from_the_caller == {
         f.name for f in fields(Ports)
@@ -89,10 +89,9 @@ def test_run_ids_differ_and_the_jitter_is_a_fraction() -> None:
     assert 0 <= ports["random"]() < 1
 
 
-def test_pricing_is_the_vendored_table_on_the_pessimistic_estimate() -> None:
+def test_pricing_is_the_vendored_table_on_the_request_count() -> None:
     pricing = estimated()["pricing"]
     assert isinstance(pricing, TablePricing)
-    assert pricing.count_input is estimate_request
     assert pricing.table.version == vendored_table().version
     request = ModelRequest("claude-haiku-5-5", "", [MESSAGE], (), max_tokens=100)
     known = estimate_request(request)

@@ -189,7 +189,7 @@
     "title": "Bring your own loop: components work without the driver",
     "spec": "1 The loop, 3",
     "acceptance": "a hand-written loop calls the registry, sandbox, guards and context store directly, with no driver, and completes a task",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f23",

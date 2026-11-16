@@ -212,7 +212,7 @@ def test_the_default_client_is_built_without_arguments_and_does_not_retry(
 
 
 def test_a_null_in_a_tool_input_is_kept() -> None:
-    reply = {
+    reply: JsonObject = {
         **MESSAGE,
         "content": [
             {"type": "tool_use", "id": "t1", "name": "t", "input": {"a": None, "b": 1}}

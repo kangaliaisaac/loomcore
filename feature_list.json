@@ -206,5 +206,13 @@
     "spec": "3.7, Untrusted results",
     "acceptance": "a tool's output is rendered between tags carrying the call's id, with the ladder's message after them; what the harness writes (a denial, not run, a critique, the registry's own messages) is not wrapped; a replay renders the same; an older log without the new fields renders as before",
     "passes": true
+  },
+  {
+    "id": "f27",
+    "card": "12",
+    "title": "Eviction bench: the context store's rule against furthest in future",
+    "spec": "3.5, 5",
+    "acceptance": "a string of requests is replayed with one token budget under the store's rule (pack, compact, carried drops and clears, an over window recording nothing) and under furthest in future; both fault counts are printed; for pages of one size furthest in future never faults more",
+    "passes": true
   }
 ]

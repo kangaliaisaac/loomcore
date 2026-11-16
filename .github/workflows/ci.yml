@@ -37,7 +37,7 @@ jobs:
         run: uv run --no-sync ruff format --check .
 
       - name: mypy
-        run: uv run --no-sync mypy src tests evals
+        run: uv run --no-sync mypy src tests evals bench
 
       - name: pytest
         run: uv run --no-sync pytest
@@ -45,6 +45,10 @@ jobs:
       # Its own step, so a failure names itself: the whole stack on a scripted model.
       - name: eval
         run: uv run --no-sync pytest evals
+
+      # The eviction bench's own checks (its numbers are printed by bench/eviction.py).
+      - name: bench
+        run: uv run --no-sync pytest bench
 
       # What a second repository sees: only the built wheel and its public names, with
       # its dependencies resolved fresh, not from the lock file (as a new user's are).

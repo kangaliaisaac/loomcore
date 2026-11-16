@@ -34,13 +34,18 @@ from loomcore import (
 MODEL = "claude-sonnet-5-5"
 
 
+CALLS: list[tuple[str, int, int]] = []  # what the registry ran, in order
+
+
 def multiply(a: int, b: int) -> str:
     """Multiply two whole numbers."""
+    CALLS.append(("multiply", a, b))
     return str(a * b)
 
 
 def add(a: int, b: int) -> str:
     """Add two whole numbers."""
+    CALLS.append(("add", a, b))
     return str(a + b)
 
 
@@ -103,7 +108,14 @@ def run(root: Path) -> None:
     events = read_events(session).events  # the log is on disk, not in the driver
     state = replay_events(events)
     assert state.finished == "finished" and state.turns == 3, state
-    assert [e.kind for e in events].count("tool_completed") == 3
+    # The scripted model finishes with "50" whatever the tools return, so check the
+    # tools themselves: each ran with the model's input, and its result is in the log.
+    assert CALLS == [("multiply", 6, 7), ("add", 42, 8)], CALLS
+    done = {e.tool_use_id: e for e in events if e.kind == "tool_completed"}
+    assert [(done[i].ok, done[i].content) for i in ("t1", "t2")] == [
+        (True, "42"),
+        (True, "50"),
+    ], done
     print(f"ok: {len(events)} events persisted and replayed to {state.finished}")
 
 

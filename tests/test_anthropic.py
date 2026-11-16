@@ -80,12 +80,20 @@ def test_a_call_sends_the_request_and_returns_the_response_as_json() -> None:
     assert "stop_sequence" not in response  # None fields are dropped
 
 
-def test_every_call_carries_a_timeout() -> None:
+def test_the_sdks_own_timeout_applies_unless_one_is_given() -> None:
     client, seen = replying()
     port.model(client)(request())
     port.model(client, timeout=12.5)(request())
-    assert seen[0].extensions["timeout"]["read"] == 300.0
+    assert seen[0].extensions["timeout"]["read"] == 600  # worked out by the SDK
     assert seen[1].extensions["timeout"]["read"] == 12.5
+
+
+def test_a_request_too_long_to_send_without_streaming_is_refused_by_the_sdk() -> None:
+    client, seen = replying()
+    huge = ModelRequest("claude-haiku-5-5", "s", [USER], (), max_tokens=64_000)
+    with pytest.raises(ValueError, match="Streaming is required"):
+        port.model(client)(huge)
+    assert seen == []  # nothing was sent, and it is not a retryable ModelCallError
 
 
 def test_tools_are_sent_when_there_are_some() -> None:
@@ -113,6 +121,9 @@ def test_a_prefix_that_is_the_whole_prompt_has_no_empty_block() -> None:
     ("headers", "retry_after"),
     [
         ({"retry-after": "3"}, 3.0),
+        ({"retry-after-ms": "1500"}, 1.5),
+        ({"retry-after-ms": "1500", "retry-after": "3"}, 1.5),
+        ({"retry-after-ms": "soon", "retry-after": "3"}, 3.0),
         ({}, None),
         ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
         ({"retry-after": "inf"}, None),

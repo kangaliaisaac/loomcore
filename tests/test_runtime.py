@@ -79,9 +79,11 @@ def test_pricing_is_the_vendored_table_on_the_pessimistic_estimate() -> None:
     )
 
 
-def test_the_cost_ceiling_does_not_undercount_a_hash() -> None:
+def test_the_cost_ceiling_counts_two_characters_a_token() -> None:
     digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
     request = ModelRequest(
         "m", "s", [{"role": "user", "content": digest * 20}], (), max_tokens=8
     )
-    assert estimate_request(request) >= len(digest) * 20 // 2  # at two chars a token
+    # At least a hash's length over two: the choice of two is an assumption about
+    # the tokenizer (spec 1), which this pins and does not measure.
+    assert estimate_request(request) >= len(digest) * 20 // 2

@@ -15,28 +15,29 @@ from loomcore.ports import ModelCallError, ModelRequest
 from loomcore.retry import CallError
 
 _DETAIL_CHARS = 300  # the provider's message is kept to this much in a stop reason
-_TIMEOUT_SECONDS = 300.0  # one call; a timeout is retried by the driver's policy
 
 
 def model(
-    client: anthropic.Anthropic | None = None, *, timeout: float = _TIMEOUT_SECONDS
+    client: anthropic.Anthropic | None = None, *, timeout: float | None = None
 ) -> Callable[[ModelRequest], JsonObject]:
     """A model port that calls the Messages API. The default client reads
     `ANTHROPIC_API_KEY`. The client's own retries are switched off, whichever client
     is passed: the driver's retry policy is the only layer, and a second one would
-    multiply it and sleep past the run's timeout check. Each call has a `timeout`
-    in seconds (300 by default), because the SDK's own default is ten minutes."""
+    multiply it and sleep past the run's timeout check. A `timeout` in seconds is
+    sent only when given: the SDK's own, worked out from `max_tokens`, otherwise
+    applies, and so does its refusal of a request too long to send without
+    streaming."""
     api = (client or anthropic.Anthropic()).with_options(max_retries=0)
 
     def call(request: ModelRequest) -> JsonObject:
         try:
-            message = api.messages.create(timeout=timeout, **_params(request))
+            message = api.messages.create(**_params(request, timeout))
         except anthropic.APITimeoutError as error:
             raise ModelCallError(CallError("timeout")) from error
         except anthropic.APIConnectionError as error:
             raise ModelCallError(CallError("connection")) from error
         except anthropic.APIStatusError as error:
-            retry_after = _seconds(error.response.headers.get("retry-after"))
+            retry_after = _retry_after(error.response.headers)
             failed = CallError("http", error.status_code, retry_after, _detail(error))
             raise ModelCallError(failed) from error
         response: JsonObject = message.model_dump(mode="json", exclude_none=True)
@@ -45,7 +46,7 @@ def model(
     return call
 
 
-def _params(request: ModelRequest) -> dict[str, Any]:
+def _params(request: ModelRequest, timeout: float | None) -> dict[str, Any]:
     params: dict[str, Any] = {
         "model": request.model,
         "max_tokens": request.max_tokens,
@@ -54,6 +55,8 @@ def _params(request: ModelRequest) -> dict[str, Any]:
     }
     if request.tools:
         params["tools"] = list(request.tools)
+    if timeout is not None:
+        params["timeout"] = timeout
     return params
 
 
@@ -79,14 +82,19 @@ def _detail(error: anthropic.APIStatusError) -> str:
     return (text if isinstance(text, str) else error.message)[:_DETAIL_CHARS]
 
 
-def _seconds(header: str | None) -> float | None:
-    """`retry-after` as seconds; the HTTP-date form is not read."""
+def _retry_after(headers: Mapping[str, str]) -> float | None:
+    """Seconds to wait: `retry-after-ms` if the provider sent it, else `retry-after`
+    (its HTTP-date form is not read). `x-should-retry` is not read."""
+    in_ms = _number(headers.get("retry-after-ms"))
+    return in_ms / 1000 if in_ms is not None else _number(headers.get("retry-after"))
+
+
+def _number(header: str | None) -> float | None:
+    """A finite, non-negative number, else None."""
     try:
-        seconds = None if header is None else float(header)
+        number = None if header is None else float(header)
     except ValueError:
         return None
     return (
-        seconds
-        if seconds is not None and math.isfinite(seconds) and seconds >= 0
-        else None
+        number if number is not None and math.isfinite(number) and number >= 0 else None
     )

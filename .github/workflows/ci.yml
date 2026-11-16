@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # The image the sandbox tests run in. tests/test_sandbox.py defaults to the same digest
       # for local runs: change both together.
@@ -43,7 +43,7 @@ jobs:
         run: uv run --no-sync pytest
 
   gitleaks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:

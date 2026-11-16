@@ -19,8 +19,9 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
 from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from loomcore.events import JsonObject
 from loomcore.sandbox import Refusal
@@ -28,13 +29,31 @@ from loomcore.sandbox import Refusal
 _LOG = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class Notice:
-    """An event a tool call caused (`sandbox_denied`, `note_written`); the driver
-    adds the call's `tool_use_id` and writes it."""
+class _Notice(BaseModel):
+    """An event a tool call caused; the driver adds the call's `tool_use_id` and
+    writes it. Each kind has its own fields, checked when the notice is built (a
+    misspelt field is an error here, not an event the schema rejects when written)."""
 
-    kind: Literal["sandbox_denied", "note_written"]
-    fields: JsonObject
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def event_fields(self) -> JsonObject:
+        """What the event carries besides its envelope and `tool_use_id`."""
+        return self.model_dump(exclude={"kind"})
+
+
+class SandboxDeniedNotice(_Notice):
+    kind: Literal["sandbox_denied"] = "sandbox_denied"
+    action: str
+    target: str
+    reason: str
+
+
+class NoteWrittenNotice(_Notice):
+    kind: Literal["note_written"] = "note_written"
+    path: str
+
+
+Notice = SandboxDeniedNotice | NoteWrittenNotice
 
 
 class Bucket:
@@ -90,10 +109,10 @@ class Notices:
             self._bucket.reset(token)
 
     def refused(self, refusal: Refusal) -> None:
-        self._add(Notice("sandbox_denied", dataclasses.asdict(refusal)))
+        self._add(SandboxDeniedNotice(**dataclasses.asdict(refusal)))
 
     def noted(self, path: str) -> None:
-        self._add(Notice("note_written", {"path": path}))
+        self._add(NoteWrittenNotice(path=path))
 
     def _add(self, notice: Notice) -> None:
         bucket = self._bucket.get()
@@ -102,12 +121,12 @@ class Notices:
                 "%s reported with no tool call collecting it and not logged "
                 "(outside a call, or to a Notices that is not the driver's): %s",
                 notice.kind,
-                notice.fields,
+                notice.event_fields(),
             )
             return
         if not bucket.add(notice):  # its call ended, or was abandoned, and was logged
             _LOG.warning(
                 "%s arrived after its tool call ended and is not logged: %s",
                 notice.kind,
-                notice.fields,
+                notice.event_fields(),
             )

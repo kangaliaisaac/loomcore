@@ -1,6 +1,6 @@
 """f19, the pre stage: a deny stops a call, an ask pauses the run (spec 3.7)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -8,12 +8,21 @@ from factories import calling, make
 from fakes import CAPS, Crash, World, log, reply, run_started, use, write_log
 from fakes import ref as run_ref
 
+from loomcore.conversation import call_hash
 from loomcore.eventlog import read_events
 from loomcore.events import ApprovalRequested, GuardDecision, JsonObject, ToolCompleted
-from loomcore.guards import Allow, Ask, Deny, Guards, PreDecision, ToolRequest
+from loomcore.guards import (
+    Allow,
+    Ask,
+    Deny,
+    Guards,
+    PostDecision,
+    PreDecision,
+    ToolRequest,
+)
 from loomcore.limits import Limits
 from loomcore.loop import Driver
-from loomcore.ports import Decision, Task
+from loomcore.ports import Decision, Task, ToolResult
 from loomcore.replay import RunState, unanswered_asks
 from loomcore.step import RunTool, step
 
@@ -347,3 +356,141 @@ def test_a_grant_on_the_second_tripped_call_resets_the_repeat_count(
     assert paused.status == "paused"
     done = drv.resume(paused.ref, Decision(granted=True, by="me"))
     assert (done.status, done.reason) == ("finished", "end_turn")
+
+
+@dataclass
+class Spy:
+    """Allows everything and keeps the state it was given for each call."""
+
+    pre_seen: dict[str, RunState] = field(default_factory=dict)
+    post_seen: dict[str, RunState] = field(default_factory=dict)
+
+    def check(self, request: ToolRequest, state: RunState) -> PreDecision:
+        self.pre_seen[request.tool_use_id] = state
+        return Allow()
+
+
+@dataclass
+class PostSpy:
+    spy: Spy
+
+    def check(
+        self, request: ToolRequest, result: ToolResult, state: RunState
+    ) -> PostDecision:
+        self.spy.post_seen[request.tool_use_id] = state
+        return Allow()
+
+
+def test_the_state_a_guard_sees_is_the_one_the_spec_names(tmp_path: Path) -> None:
+    """Pre guards judge before the turn's escalation and `tool_requested` lines; post
+    guards run after both but before any call of the turn has completed (spec 3.7)."""
+    world = World(
+        script=[
+            use(("a", "search"), q="x"),
+            use(
+                ("b", "search"), ("c", "search"), q="x"
+            ),  # b repeats a: the ladder trips
+            reply("ok"),
+        ],
+        read_only={"search"},
+    )
+    spy = Spy()
+    guards = Guards(pre=(spy,), post=(PostSpy(spy),))
+    result = world.driver(tmp_path, guards=guards).run(REPEATING)
+    assert result.status == "finished"
+    before = spy.pre_seen["b"]
+    assert before.rung == 0  # the escalation is written after the verdicts
+    assert (
+        dict(before.requested) == {}
+    )  # a has completed; b and c are not requested yet
+    assert before.pending_tools == ("b", "c")
+    after = spy.post_seen["b"]
+    assert after.rung == 1  # by the time the calls run, the ladder has spoken
+    assert dict(after.requested) == {"b": "search", "c": "search"}
+    assert after.pending_tools == ("b", "c")  # nothing of this turn has completed
+    assert spy.post_seen["c"].pending_tools == ("b", "c")  # not even b, for c
+
+
+def test_a_post_guard_sees_the_calls_of_an_earlier_wave_as_pending(
+    tmp_path: Path,
+) -> None:
+    """Two writes conflict, so they run in two waves; the state is not refreshed
+    between the waves, so the second call's guard still sees the first as pending."""
+    world = World(script=[use(("a", "write"), ("b", "write")), reply("ok")])
+    spy = Spy()
+    world.driver(tmp_path, guards=Guards(post=(PostSpy(spy),))).run(TASK)
+    assert world.tool_calls == ["a", "b"]  # a ran in the first wave, b in the second
+    assert spy.post_seen["b"].pending_tools == ("a", "b")
+
+
+def test_after_a_crash_between_two_waves_a_post_guard_sees_the_first_as_completed(
+    tmp_path: Path,
+) -> None:
+    """On a first pass every call of the turn is pending for the whole turn; on a
+    resume the state is rebuilt from the log, where the first wave has completed."""
+    args: JsonObject = {"q": "x"}
+    write_log(
+        tmp_path,
+        [
+            run_started(),
+            make("turn_started", 1, turn=1),
+            make("model_call", 2, message=use(("a", "read"), ("b", "read"))),
+            make(
+                "tool_requested",
+                3,
+                tool_use_id="a",
+                name="read",
+                input=args,
+                call_hash=call_hash("read", args),
+                wave=0,
+            ),
+            make(
+                "tool_requested",
+                4,
+                tool_use_id="b",
+                name="read",
+                input=args,
+                call_hash=call_hash("read", args),
+                wave=1,
+            ),
+            make("tool_completed", 5, tool_use_id="a"),
+        ],
+    )
+    world = World(script=[reply("ok")], read_only={"read"})
+    spy = Spy()
+    driver_ = world.driver(tmp_path, guards=Guards(post=(PostSpy(spy),)))
+    assert driver_.resume(run_ref()).status == "finished"
+    assert spy.post_seen["b"].pending_tools == (
+        "b",
+    )  # a had completed before the crash
+
+
+def test_after_a_crash_in_the_batch_a_pre_guard_sees_the_written_lines_as_requested(
+    tmp_path: Path,
+) -> None:
+    """A crash after the first `tool_requested` line leaves it in the log; on resume
+    the pre guard for the other call sees it as requested (spec 3.7)."""
+    args: JsonObject = {"q": "x"}
+    write_log(
+        tmp_path,
+        [
+            run_started(),
+            make("turn_started", 1, turn=1),
+            make("model_call", 2, message=use(("a", "read"), ("b", "read"))),
+            make(
+                "tool_requested",
+                3,
+                tool_use_id="a",
+                name="read",
+                input=args,
+                call_hash=call_hash("read", args),
+                wave=0,
+            ),
+        ],
+    )
+    world = World(script=[reply("ok")], read_only={"read"})
+    spy = Spy()
+    driver_ = world.driver(tmp_path, guards=Guards(pre=(spy,)))
+    assert driver_.resume(run_ref()).status == "finished"
+    assert dict(spy.pre_seen["b"].requested) == {"a": "read"}
+    assert "a" not in spy.pre_seen  # a was requested before the crash: not judged again

@@ -67,6 +67,17 @@ class KeepFiling:
 
 
 @dataclass(frozen=True)
+class AskOutsideAnswer:
+    """A pre guard that wants a human's yes before any other file is written."""
+
+    def check(self, request: ToolRequest, state: RunState) -> PreDecision:
+        path = request.input.get("path")
+        if request.name == "write_file" and path not in {"answer.md", "filing.txt"}:
+            return Ask(f"write {path}?")
+        return Allow()
+
+
+@dataclass(frozen=True)
 class HideKeys:
     """A post guard: a key never reaches the model."""
 
@@ -130,7 +141,7 @@ def run_loop(
     kit.registry.register(read_file, read_only=True)
     kit.registry.register(write_file, writes=("answer.md",))
     rules = Rules(root=root, image="img", commands=frozenset({"/bin/cat"}))
-    guards = Guards(pre=(KeepFiling(),), post=(HideKeys(),))
+    guards = Guards(pre=(KeepFiling(), AskOutsideAnswer()), post=(HideKeys(),))
     events: list[Event] = []
     for _turn in range(10):
         window = build_window(TASK, events, Carried(), None, lambda _m: 0)
@@ -178,10 +189,17 @@ def run_loop(
     raise RuntimeError("the model never finished")
 
 
+def cut_off(call_id: str, name: str, **args: JsonValue) -> JsonObject:
+    """A response `max_tokens` cut off in the middle of its tool call."""
+    return say(call_id, name, **args) | {"stop_reason": "max_tokens"}
+
+
 SCRIPT = [
     say("c1", "run", command=["cat", "filing.txt"]),  # a name, not an absolute path
     say("c2", "read_file", path="filing.txt"),
     say("c3", "write_file", path="filing.txt", content="oops"),  # the guard denies it
+    say("c3b", "write_file", path="scratch.txt", content="x"),  # a guard asks: no human
+    cut_off("c3c", "write_file", path="answer.md", content="12.5"),  # never runs
     say("c4", "write_file", path="answer.md", content="12.5% (net income / revenue)"),
     say("c5", finish.NAME, result="12.5%"),
 ]
@@ -209,6 +227,14 @@ def test_a_hand_written_loop_completes_a_task_with_no_driver(tmp_path: Path) -> 
     done = {e.tool_use_id: e for e in events if e.kind == "tool_completed"}
     assert not done["c1"].ok and "absolute path" in str(done["c1"].content)  # sandbox
     assert not done["c3"].ok and "the source" in str(done["c3"].content)  # pre guard
+    assert not done["c3b"].ok and "approval is not supported" in str(
+        done["c3b"].content
+    )
+    assert not (tmp_path / "scratch.txt").exists()  # an Ask is not an Allow
+    assert "c3c" not in done and "c3c" not in {  # the cut-off call is not a call
+        e.tool_use_id for e in events if e.kind == "tool_requested"
+    }
+    assert (tmp_path / "answer.md").read_text("utf-8").startswith("12.5%")
     assert done["c2"].ok and SECRET not in str(done["c2"].content)  # post guard
     assert "[key]" in str(done["c2"].content)
     assert SECRET not in json.dumps(seen)  # the model never saw it

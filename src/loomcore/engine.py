@@ -70,6 +70,20 @@ from loomcore.window import Budget, Carried, Window, build_window
 _LOG = logging.getLogger(__name__)
 
 MAX_COUNTED = 4096  # token counts kept for the window's memo
+
+
+@dataclass(frozen=True)
+class Ran:
+    """What the completion of a call that ran adds: how long it took, whether it was
+    a cache hit, whether a tool's output stands behind the content, and the ladder's
+    message for it."""
+
+    ms: int
+    cached: bool
+    from_tool: bool
+    note: str | None
+
+
 MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
 
 
@@ -552,8 +566,8 @@ class Run:
 
     def _completed(self, run: RunTool, screened: Screened, ms: int) -> list[Event]:
         """The post guards' decisions and then the call's completion. The log holds
-        what the guards left, never the raw result (spec 3.7); the ladder's note is
-        added after them, so it holds what the model sees."""
+        what the guards left, never the raw result (spec 3.7). The ladder's note is
+        kept in its own field, so it can be shown to the model outside the data."""
         events: list[Event] = [
             self.emit(
                 "guard_decision",
@@ -569,9 +583,8 @@ class Run:
             self._complete(
                 run.tool_use_id,
                 ok=shown.ok,
-                content=_annotated(shown.content, run.note),
-                ms=ms,
-                cached=shown.cached,
+                content=shown.content,
+                ran=Ran(ms, shown.cached, from_tool=shown.from_tool, note=run.note),
             )
         )
         return events
@@ -588,16 +601,18 @@ class Run:
         *,
         ok: bool,
         content: JsonValue,
-        ms: int = 0,
-        cached: bool = False,
+        ran: Ran | None = None,
     ) -> Event:
+        ran = ran or Ran(0, cached=False, from_tool=False, note=None)
         return self.emit(
             "tool_completed",
             tool_use_id=tool_use_id,
             ok=ok,
             content=content,
-            duration_ms=ms,
-            cached=cached,
+            duration_ms=ran.ms,
+            cached=ran.cached,
+            from_tool=ran.from_tool,
+            note=ran.note,
         )
 
     def _ask(self, tool_use_id: str, question: str) -> RunResult:
@@ -696,14 +711,6 @@ class Run:
 
     def _since(self, started: float) -> int:
         return int((self.ports.monotonic() - started) * 1000)
-
-
-def _annotated(content: JsonValue, note: str | None) -> JsonValue:
-    """A ladder message is added to the content the model will see."""
-    if note is None:
-        return content
-    text = content if isinstance(content, str) else json.dumps(content)
-    return f"{text}\n\n[{note}]"
 
 
 def remembered(

@@ -19,7 +19,7 @@ class PathRefusedError(Exception):
     """A path the workspace will not touch; `refusal` is what gets logged."""
 
     def __init__(self, refusal: Refusal) -> None:
-        super().__init__(f"{refusal.action} {refusal.target}: {refusal.reason}")
+        super().__init__(f"{refusal.action} {refusal.target!r}: {refusal.reason}")
         self.refusal = refusal
 
 

@@ -89,6 +89,10 @@ class ToolResult:
     ok: bool
     content: JsonValue
     cached: bool = False  # served from the registry's cache; the tool did not run
+    # False for what the registry itself writes to say how to fix the call (an unknown
+    # tool, invalid input, a timeout): the model reads it as an instruction, not as
+    # the tool's data (spec 3.7). A tool's own output and error text are data.
+    from_tool: bool = True
 
 
 class Pricing(Protocol):

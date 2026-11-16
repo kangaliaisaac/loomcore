@@ -25,7 +25,7 @@ from fakes import (
 from fakes import ref as run_ref
 
 from loomcore import ladder
-from loomcore.conversation import FORK_CONTINUE, call_hash
+from loomcore.conversation import FORK_CONTINUE, call_hash, mark_as_data
 from loomcore.engine import ResumeRefusedError
 from loomcore.eventlog import read_events
 from loomcore.events import (
@@ -48,9 +48,12 @@ from loomcore.loop import (
     SpendLogMissingError,
 )
 from loomcore.ports import Config, Decision, RunResult, Task, ToolResult
+from loomcore.prompt import DATA_RULE
 from loomcore.rewind import ForkRefusedError
 from loomcore.sandbox import Refusal
 from loomcore.spend import SpendLine, append_spend, read_spend
+from loomcore.tools import ToolRegistry
+from loomcore.workspace import FilesystemWorkspace
 
 TASK = Task("find it", CAPS)
 
@@ -339,6 +342,41 @@ def test_a_driver_refuses_ports_that_disagree_about_a_listed_tool(
         Driver(switching, ports, settings)  # nor the one a switch would bring
 
 
+def test_the_model_sees_a_tools_output_marked_as_data(tmp_path: Path) -> None:
+    world = World(script=[use(("t1", "search")), reply("done")])
+    world.driver(tmp_path).run(TASK)
+    sent = world.requests[-1].messages[-1]["content"]
+    assert isinstance(sent, list)
+    block = sent[0]
+    assert isinstance(block, dict)
+    assert block["content"] == '<tool_data id="t1">\nresult t1\n</tool_data id="t1">'
+
+
+def test_a_registrys_message_about_an_unknown_tool_reaches_the_model_unwrapped(
+    tmp_path: Path,
+) -> None:
+    """With the real registry in the driver: its own "fix the call" message is an
+    instruction, so it arrives with no data tags."""
+    (tmp_path / "work").mkdir()
+    registry = ToolRegistry(
+        FilesystemWorkspace(tmp_path / "work", on_refusal=lambda _refusal: None)
+    )
+    world = World(script=[use(("t1", "nope")), reply("done")])
+    ports = replace(world.ports(), tool=registry.execute)
+    settings = Settings(tmp_path / "s1.jsonl", tmp_path / "spend.jsonl")
+    Driver(CONFIG, ports, settings).run(TASK)
+    sent = world.requests[-1].messages[-1]["content"]
+    assert isinstance(sent, list) and isinstance(sent[0], dict)
+    text = str(sent[0]["content"])
+    assert text.startswith("Unknown tool") and "<tool_data" not in text
+
+
+def test_the_data_rule_names_the_tags_the_renderer_uses() -> None:
+    marked = mark_as_data("X", "")  # the tags the renderer really emits
+    opening, closing = marked.split("\n\n")
+    assert opening in DATA_RULE and closing in DATA_RULE
+
+
 # --- f08: forks ---------------------------------------------------------------
 
 
@@ -622,9 +660,7 @@ def test_a_crash_partway_through_the_batch_judges_the_whole_turn_on_resume(
     assert (escalated.rung, escalated.tripped) == (1, ["b"])  # b repeats a
     resumed = events(tmp_path)[4:8]
     assert resumed == ["run_resumed", "escalation", "tool_requested", "tool_completed"]
-    nudged = {
-        e.tool_use_id: ladder.NUDGE in str(e.content) for e in completions(tmp_path)
-    }
+    nudged = {e.tool_use_id: ladder.NUDGE in str(e.note) for e in completions(tmp_path)}
     assert nudged == {"a": False, "b": True}
 
 

@@ -216,9 +216,24 @@ def _reply(message: JsonObject, done: dict[str, ToolCompleted]) -> JsonObject | 
 
 def _result(completed: ToolCompleted) -> JsonObject:
     content = completed.content
+    text = content if isinstance(content, str) else json.dumps(content)
+    if completed.from_tool:
+        text = mark_as_data(completed.tool_use_id, text)
+    if completed.note is not None:  # the ladder speaks outside the data tags
+        text = f"{text}\n\n[{completed.note}]"
     return {
         "type": "tool_result",
         "tool_use_id": completed.tool_use_id,
-        "content": content if isinstance(content, str) else json.dumps(content),
+        "content": text,
         "is_error": not completed.ok,
     }
+
+
+def mark_as_data(tool_use_id: str, text: str) -> str:
+    """The text between tags that say it is data from a tool (spec 3.7). The tags
+    carry the call's id, which exists only once the model has made the call, so text
+    that was written earlier (a web page, a file) cannot hold the closing tag with
+    that id; `prompt.DATA_RULE` tells the model that data ends only at the closing
+    tag with the same id. The text is not changed, so a file that mentions the tag
+    is shown, and edited, as it is."""
+    return f'<tool_data id="{tool_use_id}">\n{text}\n</tool_data id="{tool_use_id}">'

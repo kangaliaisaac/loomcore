@@ -106,6 +106,13 @@ class ToolCompleted(_Envelope):
     content: JsonValue
     duration_ms: int
     cached: bool
+    # True when a tool's output stands behind `content` (a call that ran and was not
+    # replaced by a post guard's denial): the renderer marks it as data. False for
+    # what the harness writes (a denial, "not run", a critique). Absent in an older log.
+    from_tool: bool = False
+    # The ladder's message for this call, kept out of `content` so it is not wrapped
+    # as data: it is an instruction to the model.
+    note: str | None = None
 
 
 class GuardDecision(_Envelope):

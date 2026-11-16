@@ -69,6 +69,14 @@ def test_a_redacted_secret_is_in_neither_the_log_nor_a_request(tmp_path: Path) -
     )
 
 
+def test_a_result_that_a_tool_returned_is_marked_as_from_the_tool(
+    tmp_path: Path,
+) -> None:
+    world = World(script=[use(("a", "read")), reply("ok")])
+    run(world, tmp_path)
+    assert completed(tmp_path)["a"].from_tool is True
+
+
 def test_an_allowed_result_leaves_no_line(tmp_path: Path) -> None:
     world = World(script=[use(("a", "read")), reply("ok")])
     run(world, tmp_path, Scrub())
@@ -82,6 +90,7 @@ def test_a_post_deny_replaces_the_result_with_its_reason(tmp_path: Path) -> None
     run(world, tmp_path, Refuse(("a",)))
     done = completed(tmp_path)["a"]
     assert (done.ok, done.content, done.cached) == (False, "too large", True)
+    assert done.from_tool is False  # a guard's reason is not a tool's output
     [decision] = [e for e in events(tmp_path) if isinstance(e, GuardDecision)]
     assert (decision.stage, decision.decision, decision.reason) == (
         "post",
@@ -136,11 +145,16 @@ def test_the_ladders_note_is_added_after_the_guards(tmp_path: Path) -> None:
         "go", Limits.model_validate({**CAPS.model_dump(), "repeat_threshold": 2})
     )
     run(world, tmp_path, Scrub(), task=task)
-    nudged = completed(tmp_path)["c2"].content
-    assert isinstance(nudged, str)
-    assert "token=[redacted] ok" in nudged
-    assert ladder.NUDGE in nudged
+    done = completed(tmp_path)["c2"]
+    assert done.content == "token=[redacted] ok"
+    assert done.note is not None and ladder.NUDGE in done.note
     assert SECRET.encode() not in (tmp_path / "s1.jsonl").read_bytes()
+    # What the model reads: the data in its tags, the ladder's message after them.
+    sent = world.requests[-1].messages[-1]["content"]
+    assert isinstance(sent, list) and isinstance(sent[0], dict)
+    text = str(sent[0]["content"])
+    assert text.index("</tool_data") < text.index(ladder.NUDGE)
+    assert text.startswith('<tool_data id="c2">\ntoken=[redacted] ok\n</tool_data')
 
 
 class GuardBugError(Exception):

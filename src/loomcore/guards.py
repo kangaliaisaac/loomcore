@@ -123,7 +123,9 @@ def run_post(
                 decisions.append(decision)
             case Deny():
                 decisions.append(decision)
-                denied = ToolResult(False, decision.reason, cached=current.cached)
+                denied = ToolResult(
+                    False, decision.reason, cached=current.cached, from_tool=False
+                )
                 return Screened(denied, tuple(decisions))
             case _:
                 raise GuardError(f"a post guard returned {type(decision).__name__}")

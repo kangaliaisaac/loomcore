@@ -123,7 +123,12 @@ def test_a_post_deny_replaces_the_result_with_its_reason_and_stops() -> None:
         post=(Rewrites(Redact("clean", "r")), Rewrites(Deny("too big")), after)
     )
     screened = run_post(guards, REQUEST, ToolResult(True, "raw", cached=True), STATE)
-    assert screened.result == ToolResult(False, "too big", cached=True)  # not ok
+    assert screened.result == ToolResult(
+        False,
+        "too big",
+        cached=True,
+        from_tool=False,  # not ok, and the guard's words
+    )
     assert screened.decisions == (Redact("clean", "r"), Deny("too big"))
     assert after.saw == []
 

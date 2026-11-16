@@ -22,6 +22,7 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from pydantic import create_model as pydantic_model
+from pydantic_core import ErrorDetails
 
 from loomcore import finish
 from loomcore.conversation import call_hash
@@ -266,8 +267,11 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         value = tool.fn(**kwargs)
     except _FIXABLE as error:
-        # A refusal comes from the harness's own sandbox, not from the tool's logic.
-        own_words = not isinstance(error, PathRefusedError | CommandRefusedError)
+        # A refusal, and the fixed UTF-8 sentence, are the harness's words, not the
+        # tool's.
+        own_words = not isinstance(
+            error, PathRefusedError | CommandRefusedError | UnicodeError
+        )
         return ToolResult(
             False, f"{name} failed: {_fixable(error)}", from_tool=own_words
         )
@@ -342,8 +346,12 @@ def _clean(node: Any) -> Any:  # noqa: ANN401 - walks arbitrary JSON
     return cleaned
 
 
+def _where(problem: ErrorDetails) -> str:
+    """The path to the bad value. A name the model made up (an unknown argument) is
+    quoted, so it stays one string whatever it holds; names from the schema are not."""
+    quote = problem["type"] == "extra_forbidden"
+    return ".".join(repr(p) if quote else str(p) for p in problem["loc"]) or "input"
+
+
 def _problems(error: ValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(part) for part in e['loc']) or 'input'}: {e['msg']}"
-        for e in error.errors()
-    )
+    return "; ".join(f"{_where(e)}: {e['msg']}" for e in error.errors())

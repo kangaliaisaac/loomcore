@@ -1,8 +1,9 @@
 """The scripted three-step eval (spec section 5).
 
 A task in the shape of the capstones: read a small filing excerpt, compute one
-figure, write an answer that cites its source. Everything is real except the model,
-the clock and the monotonic clock: the driver, the tool registry on a filesystem
+figure, write an answer that cites its source. Everything is real except the ports that
+stand for the outside world (the model, both clocks, the token counter, the jitter,
+the sleep and the run ids): the driver, the tool registry on a filesystem
 workspace, the system-prompt builder, the vendored price table and the event log. It
 imports nothing from `tests/`, so it can be read, and run, on its own.
 
@@ -134,12 +135,9 @@ def count_request(request: ModelRequest) -> int:
 class Eval:
     """One run of the eval and everything a check looks at afterwards."""
 
-    root: Path
     session: Path
     result: RunResult
     model: ScriptedModel
-    kit: ToolKit
-    driver: Driver
     task: Task
 
 
@@ -162,7 +160,7 @@ def tools_and_config(kit: ToolKit) -> Config:
     )
 
 
-def driver_on(root: Path, model: ScriptedModel) -> tuple[Driver, ToolKit, Task, Path]:
+def driver_on(root: Path, model: ScriptedModel) -> tuple[Driver, Task]:
     """A driver with its files under `root`; only the model and the clocks are faked."""
     work = root / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -185,12 +183,12 @@ def driver_on(root: Path, model: ScriptedModel) -> tuple[Driver, ToolKit, Task, 
     spend = root / "spend.jsonl"
     driver = Driver(config, ports, Settings(session, spend))
     limits = Limits(run_cap=Decimal("1"), month_cap=Decimal("10"))
-    return driver, kit, Task(TASK, limits), session
+    return driver, Task(TASK, limits)
 
 
 def run_eval(root: Path) -> Eval:
     """Run the task to its end in `root`: the three canned steps."""
     model = ScriptedModel()
-    driver, kit, task, session = driver_on(root, model)
+    driver, task = driver_on(root, model)
     result = driver.run(task)
-    return Eval(root, session, result, model, kit, driver, task)
+    return Eval(root / "session.jsonl", result, model, task)

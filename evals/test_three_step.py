@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from three_step import (
     ANSWER,
-    FILING,
     ScriptedModel,
     canned_responses,
     driver_on,
@@ -39,10 +38,15 @@ def test_the_run_finishes_with_the_figure_and_writes_the_cited_answer(
         "finished",
         "12.5%",
     )
-    revenue, income = 2000, 250
-    assert f"{income / revenue:.1%}" == "12.5%"  # the figure the answer states
-    assert (tmp_path / "work" / "answer.md").read_text("utf-8") == ANSWER
-    assert "Revenue: 2,000" in FILING and "Net income: 250" in FILING
+    work = tmp_path / "work"
+    written = (work / "answer.md").read_text("utf-8")
+    assert written == ANSWER
+    figures = dict(
+        line.split(": ")
+        for line in (work / "filing.txt").read_text("utf-8").splitlines()[2:]
+    )  # the two lines the answer cites
+    margin = int(figures["Net income"]) / int(figures["Revenue"].replace(",", ""))
+    assert f"{margin:.1%}" in written  # the figure the run wrote is the right one
 
 
 def test_the_log_is_complete(events: tuple[Event, ...]) -> None:
@@ -88,15 +92,21 @@ def test_a_log_cut_after_step_two_resumes_to_the_same_result(tmp_path: Path) -> 
     shutil.copytree(tmp_path / "whole" / "work", cut / "work")  # what disk kept
     (cut / "session.jsonl").write_text("".join(lines[: last_write + 1]), "utf-8")
     model = ScriptedModel(script=canned_responses()[2:])  # only the last step is left
-    driver, _kit, _task, _session = driver_on(cut, model)
+    driver, _task = driver_on(cut, model)
     resumed = driver.resume(RunRef("session", "run-1"))
     assert (resumed.status, resumed.result) == ("finished", "12.5%")
-    assert len(model.requests) == 1
-    assert (cut / "work" / "answer.md").read_text("utf-8") == ANSWER
+    after = read_events(cut / "session.jsonl").events
+    assert after[-1].kind == "run_finished"
+    assert [e.tool_use_id for e in after if isinstance(e, ToolCompleted)] == [
+        "t1",
+        "t2",
+        "t3",
+    ]  # the resume only added the last
+    assert [r.messages for r in model.requests] == [whole.model.requests[2].messages]
 
 
 def test_the_cost_is_the_hand_computed_one_and_the_spans_are_stable(
-    events: tuple[Event, ...],
+    tmp_path: Path, events: tuple[Event, ...]
 ) -> None:
     # Sonnet 5.5 per million tokens: input 2, output 10, cache read 0.10.
     by_hand = (
@@ -110,6 +120,6 @@ def test_the_cost_is_the_hand_computed_one_and_the_spans_are_stable(
     assert run.usd == by_hand == Decimal("0.01265")
     assert run.tokens == Tokens(input=4500, output=330, cache_read=3500)
     assert run.calls == 3 and run.unpriced == 0
-    assert spans(events) == spans(events)
+    assert spans(events) == spans(read_events(tmp_path / "session.jsonl").events)
     kinds = [s.kind for s in spans(events)]
     assert kinds.count("model_call") == 3 and kinds.count("tool_call") == 2

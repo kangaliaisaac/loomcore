@@ -4,8 +4,9 @@ set -eu
 uv sync --locked
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
-uv run --no-sync mypy src tests
+uv run --no-sync mypy src tests evals
 uv run --no-sync pytest
+uv run --no-sync pytest evals
 gitleaks git --redact --no-banner
 python3 - <<'PY'
 import json

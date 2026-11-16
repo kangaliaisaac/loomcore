@@ -357,8 +357,9 @@ def _where(loc: tuple[int | str, ...]) -> str:
 
 
 def _name(part: str) -> str:
-    cut = part if len(part) <= _NAME_LIMIT else part[:_NAME_LIMIT] + "..."
-    return cut if part.isidentifier() and cut is part else repr(cut)
+    if len(part) > _NAME_LIMIT:
+        return repr(part[:_NAME_LIMIT] + "...")
+    return part if part.isidentifier() else repr(part)
 
 
 def _problems(error: ValidationError) -> str:

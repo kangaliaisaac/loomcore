@@ -303,6 +303,8 @@ def test_a_very_long_argument_name_is_cut_in_the_message(tools: Registry) -> Non
     tools.registry.register(read_file, read_only=True)
     result = tools.registry.execute("read_file", {"path": "a", "x" * 5000: 1})
     assert not result.ok and len(str(result.content)) < 500
+    assert "x" * 80 + "..." in str(result.content)
+    assert "x" * 81 not in str(result.content)
 
 
 def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
@@ -390,7 +392,7 @@ def test_the_registrys_own_messages_are_not_marked_as_a_tools_data(
     assert (missing.ok, missing.from_tool) == (False, True)  # the OS's words, a tool's
 
 
-def test_a_tools_own_error_guidance_is_the_tools_words_and_stays_data(
+def test_a_tools_own_error_guidance_is_marked_as_from_the_tool(
     tools: Registry,
 ) -> None:
     def picky(text: str) -> str:

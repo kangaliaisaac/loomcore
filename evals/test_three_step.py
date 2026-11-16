@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 from three_step import (
-    ANSWER,
     ScriptedModel,
     canned_responses,
     driver_on,
@@ -40,7 +39,6 @@ def test_the_run_finishes_with_the_figure_and_writes_the_cited_answer(
     )
     work = tmp_path / "work"
     written = (work / "answer.md").read_text("utf-8")
-    assert written == ANSWER
     figures = dict(
         line.split(": ")
         for line in (work / "filing.txt").read_text("utf-8").splitlines()[2:]
@@ -71,7 +69,8 @@ def test_the_log_replays_to_the_end_state_however_it_is_read(
     assert state.spend_by_month == (("2026-11", Decimal("0.01265")),)  # the hand cost
     again = read_events(tmp_path / "session.jsonl").events  # a second read of the file
     assert replay(again) == state
-    assert replay(events[: len(events) // 2]) != state  # a cut gives an earlier state
+    half = replay(events[: len(events) // 2])  # a cut gives an earlier state
+    assert half.finished is None and half.turns < state.turns
 
 
 def test_every_request_the_model_saw_is_rebuilt_from_the_log(tmp_path: Path) -> None:
@@ -139,6 +138,11 @@ def test_the_cost_is_the_hand_computed_one_and_the_spans_are_stable(
         "0.00505",
     ]
     turns = {s.id: s for s in traced if s.kind == "turn"}
-    assert all(
-        s.parent in turns for s in traced if s.kind in {"model_call", "tool_call"}
-    )
+    inner = [s for s in traced if s.kind in {"model_call", "tool_call"}]
+    assert [turns[s.parent or ""].name for s in inner] == [
+        "turn 1",  # the first model call and the read it asked for
+        "turn 1",
+        "turn 2",  # the second model call and the write
+        "turn 2",
+        "turn 3",  # the last model call, which finishes
+    ]

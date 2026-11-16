@@ -46,6 +46,10 @@ jobs:
       - name: eval
         run: uv run --no-sync pytest evals
 
+      # What a second repository sees: only the built wheel, its public names.
+      - name: second repository
+        run: ./scripts/second-repo.sh
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

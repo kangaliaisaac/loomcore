@@ -7,6 +7,7 @@ uv run --no-sync ruff format --check .
 uv run --no-sync mypy src tests evals
 uv run --no-sync pytest
 uv run --no-sync pytest evals
+./scripts/second-repo.sh
 gitleaks git --redact --no-banner
 python3 - <<'PY'
 import json

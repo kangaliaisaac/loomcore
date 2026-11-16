@@ -5,6 +5,7 @@
 		{ "name": "mypy", "command": "./.venv/bin/python", "args": ["-m", "mypy", "src", "tests", "evals"] },
 		{ "name": "pytest", "command": "./.venv/bin/python", "args": ["-m", "pytest", "-q"] },
 		{ "name": "eval", "command": "./.venv/bin/python", "args": ["-m", "pytest", "-q", "evals"] },
+		{ "name": "second-repo", "command": "./scripts/second-repo.sh", "args": [] },
 		{ "name": "gitleaks", "command": "gitleaks", "args": ["git", "--redact", "--no-banner"] }
 	],
 	"environment": { "path": ".venv/bin/python", "fix": "run `uv sync`" }

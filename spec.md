@@ -543,6 +543,9 @@ src/loomcore/
     pricing.json # the vendored price table
 tests/
 evals/           # the scripted three-step task, and its checks (own CI step)
+  second_repo.py # a second repository's view: public names only, run on the wheel
+scripts/
+  second-repo.sh # builds the wheel and runs evals/second_repo.py on it alone
 ```
 
 ## 5. Tests and the eval
@@ -553,4 +556,4 @@ The eval is a scripted three-step task driven by a fake model that replays canne
 
 ## 6. Done for v0.1
 
-A second repository can `import loomcore`, register a tool and run a multi-step task to completion, with the full event log persisted and replayable. Every component has its `Protocol` and tests, the scripted eval is green in CI, and the cost module prices a recorded log from tokens alone.
+A second repository can `import loomcore`, register a tool and run a multi-step task to completion, with the full event log persisted and replayable: `scripts/second-repo.sh` builds the wheel, installs only it into a throwaway environment and runs `evals/second_repo.py` there, which imports only the names at the top of `loomcore` (its `__all__`, each loaded on first use, so importing one component never loads the driver, which bring-your-own-loop depends on), registers two tools of its own, runs a three-step task on a scripted model with the real clocks and prices, and reads the log back from disk and replays it. It is its own CI step. Every component has its `Protocol` and tests, the scripted eval is green in CI, and the cost module prices a recorded log from tokens alone.

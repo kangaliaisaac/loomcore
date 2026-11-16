@@ -46,7 +46,8 @@ jobs:
       - name: eval
         run: uv run --no-sync pytest evals
 
-      # What a second repository sees: only the built wheel, its public names.
+      # What a second repository sees: only the built wheel and its public names, with
+      # its dependencies resolved fresh, not from the lock file (as a new user's are).
       - name: second repository
         run: ./scripts/second-repo.sh
 

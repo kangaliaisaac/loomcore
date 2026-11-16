@@ -71,8 +71,14 @@ class Script:
 
 def main() -> None:
     assert "site-packages" in (loomcore.__file__ or ""), "not the installed wheel"
-    root = Path(tempfile.mkdtemp(prefix="second-repo-"))
-    kit = tool_kit(root)
+    with tempfile.TemporaryDirectory(prefix="second-repo-") as tmp:
+        run(Path(tmp))
+
+
+def run(root: Path) -> None:
+    work = root / "work"  # what the tools can reach; the logs stay outside it
+    work.mkdir()
+    kit = tool_kit(work)
     kit.registry.register(multiply, read_only=True)
     kit.registry.register(add, read_only=True)
     prompt = build_prompt(

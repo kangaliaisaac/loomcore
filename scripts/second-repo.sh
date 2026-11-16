@@ -3,7 +3,8 @@
 # throwaway environment, and run evals/second_repo.py there with `python -I`, so
 # nothing from this checkout can be imported by accident.
 set -eu
+cd "$(dirname "$0")/.."
 dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 uv build --wheel --out-dir "$dir" --quiet
-uv run --isolated --no-project --quiet --with "$dir"/loomcore-*.whl python -I evals/second_repo.py
+uv run --isolated --no-project --quiet --python 3.15 --with "$dir"/loomcore-*.whl python -I evals/second_repo.py

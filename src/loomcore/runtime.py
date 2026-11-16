@@ -1,5 +1,6 @@
-"""The ports that need nothing from the caller: the real clocks, the jitter, the
-sleep, a run id, the token counter and the price list."""
+"""The ports that do not depend on the model or the tools: the real clocks, the
+jitter, the sleep, a run id and the price list, with the token counters the caller
+names, and the offline heuristic counters a caller may pass."""
 
 import json
 import random
@@ -16,9 +17,10 @@ from loomcore.ports import ModelRequest, Pricing
 from loomcore.retry import Random
 
 # Characters per token. Three is high for prose and low for dense text such as hashes
-# and ids, so the context budget's count is a heuristic. Two is what a hash costs, so
-# the pre-call cost ceiling, which must not undercount, uses it. What a run is billed
-# is read from the response's `usage`, never from either count.
+# and ids, so a context budget on `estimate_tokens` is a heuristic. Two is what a hash
+# costs, so `estimate_request`, which the pre-call cost ceiling should not undercount
+# with, uses it. What a run is billed is read from the response's `usage`, never
+# from either count.
 _CHARS_PER_TOKEN = 3
 _PRICING_CHARS_PER_TOKEN = 2
 
@@ -66,12 +68,18 @@ def new_run_id() -> str:
     return f"run-{uuid.uuid4().hex[:12]}"
 
 
-def system_ports() -> SystemPorts:
+def system_ports(
+    *, count_tokens: Counter, count_request: Callable[[ModelRequest], int]
+) -> SystemPorts:
     """The real clock, `time.monotonic`, `random.random`, `time.sleep`, a random run
-    id, `estimate_tokens` and the vendored price table priced on `estimate_request`."""
+    id, `count_tokens` as given, and the vendored price table priced on
+    `count_request`. The two counters have no default, so a spend cap is never made
+    soft by leaving something out: pass `estimate_tokens` and `estimate_request` for
+    an offline heuristic (the cost ceiling is then not a guaranteed bound), or exact
+    counters where a cap must hold (spec section 1)."""
     return SystemPorts(
-        pricing=TablePricing(vendored_table(), estimate_request),
-        count_tokens=estimate_tokens,
+        pricing=TablePricing(vendored_table(), count_request),
+        count_tokens=count_tokens,
         clock=utc_now,
         monotonic=time.monotonic,
         random=random.random,

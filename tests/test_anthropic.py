@@ -14,7 +14,7 @@ import loomcore.anthropic as port
 from loomcore.events import JsonObject
 from loomcore.ports import ModelCallError, ModelRequest
 from loomcore.retry import GiveUp, decide
-from loomcore.runtime import system_ports
+from loomcore.runtime import estimate_request, estimate_tokens, system_ports
 
 MESSAGE: JsonObject = {
     "id": "msg_1",
@@ -259,5 +259,6 @@ def test_the_core_does_not_import_the_sdk() -> None:
 
 def test_the_response_prices_from_its_usage() -> None:
     client, _ = replying()
-    cost, _version = system_ports()["pricing"].cost(port.model(client)(request()))
+    ports = system_ports(count_tokens=estimate_tokens, count_request=estimate_request)
+    cost, _version = ports["pricing"].cost(port.model(client)(request()))
     assert cost == Decimal("0.00000353")  # Haiku: 10 in, 5 out, 3 cached

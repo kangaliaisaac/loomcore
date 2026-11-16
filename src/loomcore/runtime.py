@@ -66,14 +66,18 @@ def new_run_id() -> str:
     return f"run-{uuid.uuid4().hex[:12]}"
 
 
-def system_ports() -> SystemPorts:
+def system_ports(
+    *, count_tokens: Counter, count_request: Callable[[ModelRequest], int]
+) -> SystemPorts:
     """The real clock, `time.monotonic`, `random.random`, `time.sleep`, a random run
-    id, `estimate_tokens` and the vendored price table priced on `estimate_request`.
-    Both counts are heuristics: the cost ceiling is not a guaranteed bound. Pass an
-    exact counter in their place where a cap must hold (spec section 1)."""
+    id, `count_tokens` as given, and the vendored price table priced on
+    `count_request`. The two counters have no default, so a spend cap is never made
+    soft by leaving something out: pass `estimate_tokens` and `estimate_request` for
+    an offline heuristic (the cost ceiling is then not a guaranteed bound), or exact
+    counters where a cap must hold (spec section 1)."""
     return SystemPorts(
-        pricing=TablePricing(vendored_table(), estimate_request),
-        count_tokens=estimate_tokens,
+        pricing=TablePricing(vendored_table(), count_request),
+        count_tokens=count_tokens,
         clock=utc_now,
         monotonic=time.monotonic,
         random=random.random,

@@ -25,6 +25,9 @@ class CallError:
     kind: Literal["http", "connection", "timeout"]
     status: int | None = None  # for "http"
     retry_after: float | None = None  # seconds, from the `retry-after` header
+    detail: str = (
+        ""  # the provider's own message, so a stop says why, not only a status
+    )
 
 
 @dataclass(frozen=True)
@@ -62,11 +65,14 @@ def decide(
     if not retryable(error):
         return GiveUp(f"not retryable: {_describe(error)}")
     if attempt >= policy.max_attempts:
-        return GiveUp(f"gave up after {policy.max_attempts} retries")
+        return GiveUp(
+            f"gave up after {policy.max_attempts} retries: {_describe(error)}"
+        )
     ceiling = min(policy.cap, policy.base * 2.0 ** min(attempt, _MAX_DOUBLINGS))
     jittered = random() * ceiling
     return Delay(max(jittered, error.retry_after or 0.0))
 
 
 def _describe(error: CallError) -> str:
-    return f"HTTP {error.status}" if error.kind == "http" else error.kind
+    what = f"HTTP {error.status}" if error.kind == "http" else error.kind
+    return f"{what}: {error.detail}" if error.detail else what

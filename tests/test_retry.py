@@ -63,6 +63,20 @@ def test_it_gives_up_after_max_attempts() -> None:
     assert "2 retries" in result.reason
 
 
+def test_a_give_up_names_the_last_error_and_its_message() -> None:
+    error = CallError("http", 529, detail="overloaded")
+    never_retried = CallError("http", 400, detail="prompt is too long")
+    assert decide(5, error, never) == GiveUp(
+        "gave up after 5 retries: HTTP 529: overloaded"
+    )
+    assert decide(0, never_retried, never) == GiveUp(
+        "not retryable: HTTP 400: prompt is too long"
+    )
+    assert decide(5, CallError("timeout"), never) == GiveUp(
+        "gave up after 5 retries: timeout"
+    )
+
+
 def test_retry_after_above_the_cap_is_honoured_not_capped() -> None:
     policy = RetryPolicy(base=1.0, cap=8.0, max_attempts=5)
     assert decide(0, http(429, retry_after=60.0), lambda: 0.1, policy) == Delay(60.0)

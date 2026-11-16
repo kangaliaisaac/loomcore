@@ -14,6 +14,8 @@ from loomcore.events import JsonObject
 from loomcore.ports import ModelCallError, ModelRequest
 from loomcore.retry import CallError
 
+_DETAIL_CHARS = 300  # the provider's message is kept to this much in a stop reason
+
 
 def model(
     client: anthropic.Anthropic | None = None,
@@ -27,14 +29,14 @@ def model(
     def call(request: ModelRequest) -> JsonObject:
         try:
             message = api.messages.create(**_params(request))
-        except anthropic.APITimeoutError:
-            raise ModelCallError(CallError("timeout")) from None
-        except anthropic.APIConnectionError:
-            raise ModelCallError(CallError("connection")) from None
+        except anthropic.APITimeoutError as error:
+            raise ModelCallError(CallError("timeout")) from error
+        except anthropic.APIConnectionError as error:
+            raise ModelCallError(CallError("connection")) from error
         except anthropic.APIStatusError as error:
-            status = error.status_code
             retry_after = _seconds(error.response.headers.get("retry-after"))
-            raise ModelCallError(CallError("http", status, retry_after)) from None
+            failed = CallError("http", error.status_code, retry_after, _detail(error))
+            raise ModelCallError(failed) from error
         response: JsonObject = message.model_dump(mode="json", exclude_none=True)
         return response
 
@@ -65,6 +67,14 @@ def _system(request: ModelRequest) -> str | list[Mapping[str, Any]]:
     if rest:
         blocks.append({"type": "text", "text": rest})
     return blocks
+
+
+def _detail(error: anthropic.APIStatusError) -> str:
+    """The provider's own message, else the SDK's, cut to a stop reason's length."""
+    body = error.body
+    inner = body.get("error") if isinstance(body, dict) else None
+    text = inner.get("message") if isinstance(inner, dict) else None
+    return (text if isinstance(text, str) else error.message)[:_DETAIL_CHARS]
 
 
 def _seconds(header: str | None) -> float | None:

@@ -13,6 +13,7 @@ import pytest
 import loomcore.anthropic as port
 from loomcore.events import JsonObject
 from loomcore.ports import ModelCallError, ModelRequest
+from loomcore.retry import GiveUp, decide
 from loomcore.runtime import system_ports
 
 MESSAGE: JsonObject = {
@@ -120,6 +121,38 @@ def test_an_http_error_carries_its_status_and_retry_after(
     assert (caught.value.error.kind, caught.value.error.status) == ("http", 429)
     assert caught.value.error.retry_after == retry_after
     assert len(seen) == 1  # the client does not retry: the driver's policy does
+
+
+def test_an_http_error_keeps_the_providers_message_and_its_cause() -> None:
+    def refuse(sent: httpx2.Request) -> httpx2.Response:
+        error = {"type": "invalid_request_error", "message": "prompt is too long"}
+        return httpx2.Response(400, json={"type": "error", "error": error})
+
+    with pytest.raises(ModelCallError) as caught:
+        port.model(client_on(refuse))(request())
+    assert caught.value.error.detail == "prompt is too long"
+    assert isinstance(caught.value.__cause__, anthropic.APIStatusError)
+    verdict = decide(0, caught.value.error, lambda: 0.5)
+    assert verdict == GiveUp("not retryable: HTTP 400: prompt is too long")
+
+
+def test_a_reply_that_is_not_the_apis_error_json_falls_back_to_the_sdks_text() -> None:
+    def refuse(sent: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(502, text="bad gateway")
+
+    with pytest.raises(ModelCallError) as caught:
+        port.model(client_on(refuse))(request())
+    assert "bad gateway" in caught.value.error.detail
+
+
+def test_a_long_message_is_cut() -> None:
+    def refuse(sent: httpx2.Request) -> httpx2.Response:
+        error = {"type": "invalid_request_error", "message": "x" * 1000}
+        return httpx2.Response(400, json={"type": "error", "error": error})
+
+    with pytest.raises(ModelCallError) as caught:
+        port.model(client_on(refuse))(request())
+    assert len(caught.value.error.detail) == 300
 
 
 @pytest.mark.parametrize(

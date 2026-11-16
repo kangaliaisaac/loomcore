@@ -7,9 +7,10 @@ and wraps each tool call in `collecting()`, which opens a bucket held in a
 `ContextVar`; the driver writes the bucket in a `finally`, so what a call caused is
 logged whether the tool returns or breaks. Whether a worker thread inherits the
 context depends on the interpreter build: run it under
-`contextvars.copy_context().run` and it shares the caller's bucket. Nothing ties
-the `Notices` given to the workspace and the sandbox to the driver's, so one that
-reports with no bucket open logs a warning instead of dropping the notice quietly.
+`contextvars.copy_context().run` and it shares the caller's bucket. `compose.tool_kit`
+builds the workspace and the registry on one `Notices` and hands back the four ports
+that belong together; a `Notices` that is not the driver's still reports with no
+bucket open, which logs a warning instead of dropping the notice quietly.
 """
 
 import dataclasses

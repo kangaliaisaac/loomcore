@@ -165,6 +165,8 @@ An extension plugs into a seam that already exists and never changes the core. E
 | A stop policy | the escalation ladder, custom stop conditions |
 | An alternative driver reusing the core | bring your own loop |
 
+**Bring your own loop.** The components work without the driver: none of `tools`, `guards`, `sandbox`, `workspace`, `window`, `replay`, `compose` or `conversation` imports `loop`, `engine` or `step`, and each takes what it needs as arguments. A hand-written loop calls `ToolRegistry.execute`, `run_pre` and `run_post`, `sandbox.evaluate`, the workspace and `build_window` itself. The state a guard asks for is the `RunState` that `replay` folds from the events the loop keeps, so no driver type is needed; the loop builds those events (the same `parse_event` forms) and owns its ordering, limits and stopping. `tests/test_own_loop.py` runs such a loop of about forty lines to a result, with a pre guard, a post guard and the sandbox's rules each acting once, and checks (by parsing its own imports, and by importing the components in a fresh interpreter) that no driver module is involved. What a driver adds, and a hand-written loop must do for itself, is the spend and time limits, the escalation ladder, resume and the single writer of the log.
+
 **Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. 
 
 **Named interfaces only, not built.** Each is a `Protocol` with a docstring and no implementation. The links are the public work each one is named after:

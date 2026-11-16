@@ -7,6 +7,7 @@ driver (`loop`, `engine`, `step`): a test parses this file to check it.
 """
 
 import ast
+import itertools
 import json
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from loomcore.conversation import call_hash
 from loomcore.events import Event, JsonObject, parse_event
 from loomcore.guards import (
     Allow,
+    Ask,
     Deny,
     Guards,
     PostDecision,
@@ -32,7 +34,7 @@ from loomcore.guards import (
     run_pre,
 )
 from loomcore.ports import ToolResult
-from loomcore.replay import RunState, content_blocks, replay
+from loomcore.replay import RunState, content_blocks, replay, tool_use_ids
 from loomcore.sandbox import Refusal, Request, Rules, evaluate
 from loomcore.window import Carried, build_window
 from loomcore.workspace import Workspace
@@ -77,9 +79,10 @@ class HideKeys:
 
 
 def say(call_id: str, name: str, **args: JsonValue) -> JsonObject:
-    """A scripted model response that makes one tool call."""
+    """A scripted model response: a line of text, then one tool call."""
+    text: JsonObject = {"type": "text", "text": f"Calling {name}."}
     block: JsonObject = {"type": "tool_use", "id": call_id, "name": name, "input": args}
-    return {"content": [block], "stop_reason": "tool_use"}
+    return {"content": [text, block], "stop_reason": "tool_use"}
 
 
 def log(kind: str, seq: int, **fields: JsonValue) -> Event:
@@ -97,18 +100,24 @@ def log(kind: str, seq: int, **fields: JsonValue) -> Event:
 
 def act(kit: ToolKit, rules: Rules, guards: Guards, events: list[Event]) -> ToolResult:
     """Judge, run and screen the call the model made last; the guards see the state
-    the log so far folds to."""
+    the log so far folds to. This loop has no human to ask, so an `Ask` is a denial."""
     last = events[-1]
     assert last.kind == "tool_requested"
     request = ToolRequest(last.tool_use_id, last.name, last.input, last.call_hash)
     verdict = run_pre(guards, request, replay(events))
-    if isinstance(verdict, Deny):
+    if isinstance(verdict, Ask):
+        result = ToolResult(False, "approval is not supported here", from_tool=False)
+    elif isinstance(verdict, Deny):
         result = ToolResult(False, verdict.reason, from_tool=False)
-    elif request.name == "run":  # the sandbox's rules, without a container
+    elif request.name == "run":  # the sandbox's rules; this loop has no container
         command = tuple(str(part) for part in request.input["command"])  # type: ignore[union-attr]
         refused = evaluate(rules, Request(command, rules.root, frozenset()))
-        reason = refused.reason if isinstance(refused, Refusal) else "allowed"
-        result = ToolResult(reason == "allowed", reason, from_tool=False)
+        reason = (
+            refused.reason
+            if isinstance(refused, Refusal)
+            else "allowed by the rules, but this loop has no container to run it in"
+        )
+        result = ToolResult(False, reason, from_tool=False)
     else:
         result = kit.registry.execute(request.name, request.input)
     return run_post(guards, request, result, replay(events)).result
@@ -136,7 +145,8 @@ def run_loop(
                 pricing_version="none",
             )
         )
-        for block in content_blocks(message):
+        calls = set(tool_use_ids(message))  # a call cut off by max_tokens is not one
+        for block in (b for b in content_blocks(message) if b.get("id") in calls):
             args = block["input"]
             assert isinstance(args, dict)
             name, use_id = str(block["name"]), str(block["id"])
@@ -203,7 +213,9 @@ def test_a_hand_written_loop_completes_a_task_with_no_driver(tmp_path: Path) -> 
     assert "[key]" in str(done["c2"].content)
     assert SECRET not in json.dumps(seen)  # the model never saw it
     assert len(seen) == len(SCRIPT)  # one window per model call, each one longer
-    assert [len(m) for m in seen] == sorted(len(m) for m in seen)
+    lengths = [len(m) for m in seen]
+    assert all(a < b for a, b in itertools.pairwise(lengths))
+    assert "[key]" in json.dumps(seen[2])  # the redacted result is what it read
 
 
 def test_the_loop_imports_none_of_the_driver() -> None:

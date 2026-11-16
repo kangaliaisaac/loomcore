@@ -209,7 +209,8 @@ def tally(events: Iterable[Event], table: PricingTable) -> dict[str, RunCost]:
 @dataclass(frozen=True)
 class TablePricing:
     """The driver's `Pricing` port, backed by the table. `count_input` is the
-    edge's token count of a request (spec 3.5): it is never estimated here."""
+    edge's token count of a request (spec 3.5): this class does not estimate; the
+    default ports' `count_input` does, and says so (spec 1, Real ports)."""
 
     table: PricingTable
     count_input: Callable[[ModelRequest], int]

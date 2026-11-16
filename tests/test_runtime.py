@@ -29,9 +29,16 @@ def test_a_longer_history_counts_more_tokens() -> None:
     assert 0 < estimate_tokens([MESSAGE]) < estimate_tokens(longer)
 
 
-def test_the_estimate_errs_high_for_english_text() -> None:
-    text = "The quarterly report shows revenue grew while costs held steady. " * 20
-    assert estimate_tokens([{"role": "user", "content": text}]) > len(text) // 5
+def test_the_estimate_is_high_for_prose_and_low_for_dense_text() -> None:
+    prose = "The quarterly report shows revenue grew while costs held steady. " * 20
+    assert estimate_tokens([{"role": "user", "content": prose}]) > len(prose) // 4
+    # A hash is about two characters a token, so the heuristic undercounts it; the
+    # spec says so and tells a caller who relies on the budget to pass its own.
+    digest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    assert (
+        estimate_tokens([{"role": "user", "content": digest * 20}])
+        < len(digest) * 20 // 2
+    )
 
 
 def test_a_request_counts_its_system_prompt_messages_and_tools() -> None:

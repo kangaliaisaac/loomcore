@@ -106,6 +106,9 @@ def test_a_prefix_that_is_the_whole_prompt_has_no_empty_block() -> None:
         ({"retry-after": "3"}, 3.0),
         ({}, None),
         ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
+        ({"retry-after": "inf"}, None),
+        ({"retry-after": "nan"}, None),
+        ({"retry-after": "-1"}, None),
     ],
 )
 def test_an_http_error_carries_its_status_and_retry_after(
@@ -149,7 +152,10 @@ def test_the_default_client_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_the_core_does_not_import_the_sdk() -> None:
     code = (
-        "import sys, loomcore, loomcore.loop, loomcore.compose, loomcore.runtime\n"
+        "import importlib, pkgutil, sys, loomcore\n"
+        "for m in pkgutil.walk_packages(loomcore.__path__, 'loomcore.'):\n"
+        "    if m.name != 'loomcore.anthropic':\n"
+        "        importlib.import_module(m.name)\n"
         "sys.exit('anthropic' in sys.modules)"
     )
     done = subprocess.run([sys.executable, "-I", "-c", code], check=False)

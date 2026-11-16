@@ -4,6 +4,7 @@ The core never imports this module or the SDK: it sees only the `ModelRequest ->
 response` function `model` returns.
 """
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -69,6 +70,11 @@ def _system(request: ModelRequest) -> str | list[Mapping[str, Any]]:
 def _seconds(header: str | None) -> float | None:
     """`retry-after` as seconds; the HTTP-date form is not read."""
     try:
-        return None if header is None else float(header)
+        seconds = None if header is None else float(header)
     except ValueError:
         return None
+    return (
+        seconds
+        if seconds is not None and math.isfinite(seconds) and seconds >= 0
+        else None
+    )

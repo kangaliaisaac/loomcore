@@ -307,6 +307,7 @@ anthropic = [
 [package.dev-dependencies]
 dev = [
     { name = "anthropic" },
+    { name = "httpx2" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pytest" },
@@ -323,6 +324,7 @@ provides-extras = ["anthropic"]
 [package.metadata.requires-dev]
 dev = [
     { name = "anthropic", specifier = ">=2.8.0" },
+    { name = "httpx2", specifier = ">=2.16.2" },
     { name = "hypothesis" },
     { name = "mypy" },
     { name = "pytest" },

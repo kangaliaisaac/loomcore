@@ -15,9 +15,9 @@ from loomcore.observability.cost import TablePricing, vendored_table
 from loomcore.ports import ModelRequest, Pricing
 from loomcore.retry import Random
 
-# Characters per token, rounded to err high: the context budget and the cost ceiling
-# then err towards stopping early. What a run is billed is read from the response's
-# `usage`, never from this count.
+# Characters per token: high for prose, low for dense text such as hashes and ids, so
+# the count is a heuristic. What a run is billed is read from the response's `usage`,
+# never from this count.
 _CHARS_PER_TOKEN = 3
 
 
@@ -35,8 +35,8 @@ class SystemPorts(TypedDict):
 
 def estimate_tokens(messages: Sequence[JsonObject]) -> int:
     """An offline count of the tokens in a list of messages, from their serialised
-    length. It is an estimate: the spec's "counted at the edge" is met by a caller
-    that passes an exact counter in its place."""
+    length. It is a heuristic (see `_CHARS_PER_TOKEN`); a caller that relies on the
+    context budget or the cost ceiling passes an exact counter in its place."""
     return len(json.dumps(messages, sort_keys=True)) // _CHARS_PER_TOKEN + 1
 
 

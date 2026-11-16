@@ -25,9 +25,8 @@ class CallError:
     kind: Literal["http", "connection", "timeout"]
     status: int | None = None  # for "http"
     retry_after: float | None = None  # seconds, from the `retry-after` header
-    detail: str = (
-        ""  # the provider's own message, so a stop says why, not only a status
-    )
+    # The provider's own message, so a stop says why and not only the status.
+    detail: str = ""
 
 
 @dataclass(frozen=True)

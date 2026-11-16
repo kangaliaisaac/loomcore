@@ -68,7 +68,9 @@ def new_run_id() -> str:
 
 def system_ports() -> SystemPorts:
     """The real clock, `time.monotonic`, `random.random`, `time.sleep`, a random run
-    id, `estimate_tokens` and the vendored price table priced on `estimate_request`."""
+    id, `estimate_tokens` and the vendored price table priced on `estimate_request`.
+    Both counts are heuristics: the cost ceiling is not a guaranteed bound. Pass an
+    exact counter in their place where a cap must hold (spec section 1)."""
     return SystemPorts(
         pricing=TablePricing(vendored_table(), estimate_request),
         count_tokens=estimate_tokens,

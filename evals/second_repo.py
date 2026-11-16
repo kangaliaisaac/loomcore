@@ -24,6 +24,8 @@ from loomcore import (
     Settings,
     Task,
     build_prompt,
+    estimate_request,
+    estimate_tokens,
     finish,
     read_events,
     replay_events,
@@ -95,7 +97,8 @@ def run(root: Path) -> None:
     )
     schemas = tuple(schema.to_json() for schema in kit.registry.schemas())
     config = Config(MODEL, prompt.text, (*schemas, finish.SCHEMA))
-    ports = Ports(model=Script(), **kit.tool_ports(), **system_ports())
+    system = system_ports(count_tokens=estimate_tokens, count_request=estimate_request)
+    ports = Ports(model=Script(), **kit.tool_ports(), **system)
     session = root / "session.jsonl"
     driver = Driver(config, ports, Settings(session, root / "spend.jsonl"))
     result = driver.run(

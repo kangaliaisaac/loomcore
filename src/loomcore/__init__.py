@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from loomcore.prompt import DATA_RULE, PromptParts
     from loomcore.prompt import build as build_prompt
     from loomcore.replay import replay as replay_events
-    from loomcore.runtime import system_ports
+    from loomcore.runtime import estimate_request, estimate_tokens, system_ports
 
 # name -> (module, attribute); no attribute means the module itself.
 _EXPORTS: dict[str, tuple[str, str | None]] = {
@@ -38,6 +38,8 @@ _EXPORTS: dict[str, tuple[str, str | None]] = {
     "Task": ("loomcore.ports", "Task"),
     "ToolKit": ("loomcore.compose", "ToolKit"),
     "build_prompt": ("loomcore.prompt", "build"),
+    "estimate_request": ("loomcore.runtime", "estimate_request"),
+    "estimate_tokens": ("loomcore.runtime", "estimate_tokens"),
     "finish": ("loomcore.finish", None),
     "read_events": ("loomcore.eventlog", "read_events"),
     "replay_events": ("loomcore.replay", "replay"),
@@ -58,6 +60,8 @@ __all__ = [
     "Task",
     "ToolKit",
     "build_prompt",
+    "estimate_request",
+    "estimate_tokens",
     "finish",
     "read_events",
     "replay_events",

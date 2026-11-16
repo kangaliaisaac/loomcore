@@ -7,11 +7,12 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from loomcore.notices import Notice, Notices
+from loomcore.compose import tool_kit
+from loomcore.notices import Notice
 from loomcore.ports import ToolResult
 from loomcore.sandbox import CommandRefusedError, Refusal
-from loomcore.tools import ToolError, ToolRegistry
-from loomcore.workspace import FilesystemWorkspace, PathRefusedError, Workspace
+from loomcore.tools import ToolError
+from loomcore.workspace import PathRefusedError, Workspace
 
 
 class Point(BaseModel):
@@ -26,11 +27,10 @@ class Registry:
     def __init__(self, root: Path) -> None:
         root.mkdir()
         self.workspace_root = root
-        self.notices = Notices()
-        self.workspace = FilesystemWorkspace(
-            root, on_refusal=self.notices.refused, on_note=self.notices.noted
-        )
-        self.registry = ToolRegistry(self.workspace)
+        kit = tool_kit(root)
+        self.notices = kit.notices
+        self.workspace = kit.workspace
+        self.registry = kit.registry
 
     def run(
         self,

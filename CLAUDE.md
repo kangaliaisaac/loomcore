@@ -11,6 +11,7 @@ uv run --no-sync ruff format --check .
 uv run --no-sync mypy src tests evals  # strict
 uv run --no-sync pytest
 uv run --no-sync pytest evals    # the scripted three-step eval
+./scripts/second-repo.sh         # the built wheel, imported as a second repository would
 ./init.sh                        # sync, run all gates, print the next unfinished feature
 ```
 

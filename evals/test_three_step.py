@@ -46,7 +46,7 @@ def test_the_run_finishes_with_the_figure_and_writes_the_cited_answer(
         for line in (work / "filing.txt").read_text("utf-8").splitlines()[2:]
     )  # the two lines the answer cites
     margin = int(figures["Net income"]) / int(figures["Revenue"].replace(",", ""))
-    assert f"{margin:.1%}" in written  # the figure the run wrote is the right one
+    assert f"{margin:.1%}" in written  # the answer and the filing agree
 
 
 def test_the_log_is_complete(events: tuple[Event, ...]) -> None:
@@ -65,7 +65,10 @@ def test_the_log_replays_to_the_end_state_however_it_is_read(
     tmp_path: Path, events: tuple[Event, ...]
 ) -> None:
     state = replay(events)
-    assert state.finished == "finished"
+    assert state.finished == "finished" and state.turns == 3
+    assert state.pending_tools == () and state.open_approvals == ()
+    assert state.event_count == len(events)
+    assert state.spend_by_month == (("2026-11", Decimal("0.01265")),)  # the hand cost
     again = read_events(tmp_path / "session.jsonl").events  # a second read of the file
     assert replay(again) == state
     assert replay(events[: len(events) // 2]) != state  # a cut gives an earlier state
@@ -120,6 +123,22 @@ def test_the_cost_is_the_hand_computed_one_and_the_spans_are_stable(
     assert run.usd == by_hand == Decimal("0.01265")
     assert run.tokens == Tokens(input=4500, output=330, cache_read=3500)
     assert run.calls == 3 and run.unpriced == 0
-    assert spans(events) == spans(read_events(tmp_path / "session.jsonl").events)
-    kinds = [s.kind for s in spans(events)]
-    assert kinds.count("model_call") == 3 and kinds.count("tool_call") == 2
+    traced = spans(read_events(tmp_path / "session.jsonl").events)
+    assert [(s.kind, s.name) for s in traced if s.kind != "turn"] == [
+        ("run", "run"),
+        ("model_call", "chat claude-sonnet-5-5"),
+        ("tool_call", "execute_tool read_file"),
+        ("model_call", "chat claude-sonnet-5-5"),
+        ("tool_call", "execute_tool write_file"),
+        ("model_call", "chat claude-sonnet-5-5"),
+    ]  # no span for the finish call
+    calls = [s for s in traced if s.kind == "model_call"]
+    assert [s.attributes["loomcore.cost_usd"] for s in calls] == [
+        "0.003",
+        "0.0046",
+        "0.00505",
+    ]
+    turns = {s.id: s for s in traced if s.kind == "turn"}
+    assert all(
+        s.parent in turns for s in traced if s.kind in {"model_call", "tool_call"}
+    )

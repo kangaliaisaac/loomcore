@@ -33,7 +33,7 @@ The event log comes first because everything else reads or writes it, and the lo
 ## Choices to keep
 
 - `pricing.json` is a vendored, versioned table of public per-token prices; cost is always derived from recorded tokens.
-- Token counters are chosen by the caller (`system_ports` has no default); `runtime` offers offline heuristics. An exact counter on the provider's count endpoint is wanted later, not scheduled in this plan; a cap is a hard ceiling only while such a counter answers, and what it does when the endpoint fails (fall back to a heuristic, or fail closed) is decided when it is written.
+- Token counters are chosen by the caller (`system_ports` has no default); `runtime` offers offline heuristics. An exact `count_request` on the provider's count endpoint is wanted later and is not scheduled in this plan. A spend cap is a hard ceiling only with an exact counter; spec 3.5 already requires a counter to retry or fall back to a local count and never raise, so any fail-closed behaviour would need a spec change first.
 - The anthropic SDK stays behind the `ModelCall` port. Core code never imports it; tests use a scripted fake.
 - No feature is added that the spec does not name. The named-only interfaces (planner-executor, script actions, model routing, sub-agents, best-of-N, tree search, direct routing) stay `Protocol`s with a docstring and no implementation.
 - Spec open items (the wording and test gaps listed in the spec PR) are fixed in the step that implements the rule, not in a separate spec pass.

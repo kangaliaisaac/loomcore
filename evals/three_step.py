@@ -123,7 +123,8 @@ class Clock:
 
 
 def count_tokens(messages: Sequence[JsonObject]) -> int:
-    """A deterministic stand-in for the edge's counter: serialised length over four."""
+    """A deterministic stand-in for the edge's counter: serialised length over four.
+    A separate stand-in, so the eval does not move when the runtime heuristic does."""
     return len(json.dumps(messages, sort_keys=True)) // 4 + 1
 
 

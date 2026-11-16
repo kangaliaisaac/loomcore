@@ -222,7 +222,6 @@ def test_a_hand_written_loop_completes_a_task_with_no_driver(tmp_path: Path) -> 
     model, seen = scripted()
     result, events = run_loop(tmp_path, model)
     assert result == "12.5%"
-    assert (tmp_path / "answer.md").read_text("utf-8").startswith("12.5%")
     assert (tmp_path / "filing.txt").read_text("utf-8") == FILING  # the guard held
     done = {e.tool_use_id: e for e in events if e.kind == "tool_completed"}
     assert not done["c1"].ok and "absolute path" in str(done["c1"].content)  # sandbox

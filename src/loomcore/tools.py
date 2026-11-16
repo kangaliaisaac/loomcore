@@ -22,7 +22,6 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 from pydantic import create_model as pydantic_model
-from pydantic_core import ErrorDetails
 
 from loomcore import finish
 from loomcore.conversation import call_hash
@@ -269,11 +268,11 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     except _FIXABLE as error:
         # A refusal, and the fixed UTF-8 sentence, are the harness's words, not the
         # tool's.
-        own_words = not isinstance(
+        from_tool = not isinstance(
             error, PathRefusedError | CommandRefusedError | UnicodeError
         )
         return ToolResult(
-            False, f"{name} failed: {_fixable(error)}", from_tool=own_words
+            False, f"{name} failed: {_fixable(error)}", from_tool=from_tool
         )
     try:
         return ToolResult(True, _JSON.validate_python(value))
@@ -346,16 +345,21 @@ def _clean(node: Any) -> Any:  # noqa: ANN401 - walks arbitrary JSON
     return cleaned
 
 
-def _where(problem: ErrorDetails) -> str:
+_NAME_LIMIT = 80  # a name the model chose is cut here, so it cannot flood the message
+
+
+def _where(loc: tuple[int | str, ...]) -> str:
     """The path to the bad value. A name or dict key the model chose could hold a
     newline or a sentence, so anything that is not a plain identifier is quoted and
-    stays one string."""
-    parts = (
-        repr(p) if isinstance(p, str) and not p.isidentifier() else str(p)
-        for p in problem["loc"]
-    )
+    stays one string, and a long one is cut."""
+    parts = (_name(p) if isinstance(p, str) else str(p) for p in loc)
     return ".".join(parts) or "input"
 
 
+def _name(part: str) -> str:
+    cut = part if len(part) <= _NAME_LIMIT else part[:_NAME_LIMIT] + "..."
+    return cut if part.isidentifier() and cut is part else repr(cut)
+
+
 def _problems(error: ValidationError) -> str:
-    return "; ".join(f"{_where(e)}: {e['msg']}" for e in error.errors())
+    return "; ".join(f"{_where(e['loc'])}: {e['msg']}" for e in error.errors())

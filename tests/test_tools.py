@@ -299,6 +299,12 @@ def test_a_dict_key_the_model_chose_is_quoted_in_the_message(tools: Registry) ->
     assert "\n" not in str(result.content)
 
 
+def test_a_very_long_argument_name_is_cut_in_the_message(tools: Registry) -> None:
+    tools.registry.register(read_file, read_only=True)
+    result = tools.registry.execute("read_file", {"path": "a", "x" * 5000: 1})
+    assert not result.ok and len(str(result.content)) < 500
+
+
 def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
     def ratio() -> float:
         """Divides by nothing."""

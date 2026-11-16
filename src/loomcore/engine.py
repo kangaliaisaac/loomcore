@@ -70,6 +70,7 @@ from loomcore.window import Budget, Carried, Window, build_window
 _LOG = logging.getLogger(__name__)
 
 MAX_COUNTED = 4096  # token counts kept for the window's memo
+MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
 
 
 @dataclass(frozen=True)
@@ -82,9 +83,6 @@ class Ran:
     cached: bool
     from_tool: bool
     note: str | None
-
-
-MAX_TOGETHER = 8  # calls of one wave running at once; the rest of the wave queues
 
 
 class ResumeRefusedError(Exception):

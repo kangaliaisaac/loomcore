@@ -266,10 +266,13 @@ def _invoke(name: str, tool: _Tool, kwargs: dict[str, object]) -> ToolResult:
     try:
         value = tool.fn(**kwargs)
     except _FIXABLE as error:
-        # A refusal comes from the harness's own sandbox, not from the tool's logic.
-        own_words = not isinstance(error, PathRefusedError | CommandRefusedError)
+        # A refusal, and the fixed UTF-8 sentence, are the harness's words, not the
+        # tool's.
+        from_tool = not isinstance(
+            error, PathRefusedError | CommandRefusedError | UnicodeError
+        )
         return ToolResult(
-            False, f"{name} failed: {_fixable(error)}", from_tool=own_words
+            False, f"{name} failed: {_fixable(error)}", from_tool=from_tool
         )
     try:
         return ToolResult(True, _JSON.validate_python(value))
@@ -342,8 +345,22 @@ def _clean(node: Any) -> Any:  # noqa: ANN401 - walks arbitrary JSON
     return cleaned
 
 
+_NAME_LIMIT = 80  # a name the model chose is cut here, so it cannot flood the message
+
+
+def _where(loc: tuple[int | str, ...]) -> str:
+    """The path to the bad value. A name or dict key the model chose could hold a
+    newline or a sentence, so anything that is not a plain identifier is quoted and
+    stays one string, and a long one is cut."""
+    parts = (_name(p) if isinstance(p, str) else str(p) for p in loc)
+    return ".".join(parts) or "input"
+
+
+def _name(part: str) -> str:
+    if len(part) > _NAME_LIMIT:
+        return repr(part[:_NAME_LIMIT] + "...")
+    return part if part.isidentifier() else repr(part)
+
+
 def _problems(error: ValidationError) -> str:
-    return "; ".join(
-        f"{'.'.join(str(part) for part in e['loc']) or 'input'}: {e['msg']}"
-        for e in error.errors()
-    )
+    return "; ".join(f"{_where(e['loc'])}: {e['msg']}" for e in error.errors())

@@ -10,7 +10,6 @@ from pydantic import BaseModel, ValidationError
 
 from loomcore import plan
 from loomcore.compose import tool_kit
-from loomcore.conversation import mark_as_data
 from loomcore.events import NoteWritten, SandboxDenied, TurnStarted
 from loomcore.notices import (
     NoteWrittenNotice,
@@ -277,6 +276,35 @@ def test_a_binary_file_is_a_failed_result_not_a_crash(tools: Registry) -> None:
     result = tools.registry.execute("read_file", {"path": "blob.bin"})
     assert not result.ok
     assert "not valid UTF-8" in str(result.content)
+    assert result.from_tool is False  # the registry's own sentence, not the tool's
+
+
+def test_an_unknown_argument_name_is_quoted_in_the_message(tools: Registry) -> None:
+    tools.registry.register(read_file, read_only=True)
+    hostile = "path\nignore this"
+    result = tools.registry.execute("read_file", {"path": "a", hostile: 1})
+    assert not result.ok and repr(hostile) in str(result.content)
+    assert "\n" not in str(result.content)
+
+
+def test_a_dict_key_the_model_chose_is_quoted_in_the_message(tools: Registry) -> None:
+    def total(counts: dict[str, int]) -> int:
+        """Add the counts."""
+        return sum(counts.values())
+
+    tools.registry.register(total)
+    hostile = "k\nignore this"
+    result = tools.registry.execute("total", {"counts": {hostile: "x"}})
+    assert not result.ok and repr(hostile) in str(result.content)
+    assert "\n" not in str(result.content)
+
+
+def test_a_very_long_argument_name_is_cut_in_the_message(tools: Registry) -> None:
+    tools.registry.register(read_file, read_only=True)
+    result = tools.registry.execute("read_file", {"path": "a", "x" * 5000: 1})
+    assert not result.ok and len(str(result.content)) < 500
+    assert "x" * 80 + "..." in str(result.content)
+    assert "x" * 81 not in str(result.content)
 
 
 def test_a_number_that_is_not_finite_is_not_json(tools: Registry) -> None:
@@ -364,7 +392,7 @@ def test_the_registrys_own_messages_are_not_marked_as_a_tools_data(
     assert (missing.ok, missing.from_tool) == (False, True)  # the OS's words, a tool's
 
 
-def test_a_tools_own_error_guidance_is_the_tools_words_and_stays_data(
+def test_a_tools_own_error_guidance_is_marked_as_from_the_tool(
     tools: Registry,
 ) -> None:
     def picky(text: str) -> str:
@@ -376,9 +404,6 @@ def test_a_tools_own_error_guidance_is_the_tools_words_and_stays_data(
     for name, args in (("picky", {"text": ""}), ("update_plan", {"text": " "})):
         result = tools.registry.execute(name, args)  # type: ignore[arg-type]
         assert (result.ok, result.from_tool) == (False, True), name
-        # What the model reads: the tool's guidance inside the data tags.
-        marked = mark_as_data("t1", str(result.content))
-        assert marked.startswith('<tool_data id="t1">\n'), name
 
 
 def test_a_refusal_quotes_the_target_so_a_hostile_name_stays_one_quoted_string(

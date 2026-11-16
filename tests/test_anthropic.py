@@ -170,17 +170,60 @@ def test_a_transport_failure_is_a_connection_or_timeout_error(
     assert caught.value.error.kind == kind
 
 
-def test_the_default_client_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    made: list[int] = []
-    real = client_on(lambda sent: httpx2.Response(200, json=MESSAGE))
+def test_a_client_that_retries_is_made_not_to() -> None:
+    seen: list[httpx2.Request] = []
 
-    def fake(*, max_retries: int) -> anthropic.Anthropic:
-        made.append(max_retries)
-        return real
+    def overloaded(sent: httpx2.Request) -> httpx2.Response:
+        seen.append(sent)
+        return httpx2.Response(429, json={"type": "error", "error": {}})
+
+    retrying = anthropic.Anthropic(
+        api_key="test",
+        max_retries=2,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(overloaded)),
+    )
+    with pytest.raises(ModelCallError):
+        port.model(retrying)(request())
+    assert len(seen) == 1
+    assert retrying.max_retries == 2  # the caller's own client is left as it was
+
+
+def test_the_default_client_is_built_without_arguments_and_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    seen: list[httpx2.Request] = []
+
+    def overloaded(sent: httpx2.Request) -> httpx2.Response:
+        seen.append(sent)
+        return httpx2.Response(429, json={"type": "error", "error": {}})
+
+    real = anthropic.Anthropic
+
+    def fake() -> anthropic.Anthropic:
+        return real(
+            http_client=httpx2.Client(transport=httpx2.MockTransport(overloaded))
+        )
 
     monkeypatch.setattr(anthropic, "Anthropic", fake)
-    port.model()(request())
-    assert made == [0]
+    with pytest.raises(ModelCallError):
+        port.model()(request())
+    assert len(seen) == 1
+
+
+def test_a_null_in_a_tool_input_is_kept() -> None:
+    reply = {
+        **MESSAGE,
+        "content": [
+            {"type": "tool_use", "id": "t1", "name": "t", "input": {"a": None, "b": 1}}
+        ],
+        "stop_reason": "tool_use",
+    }
+    client = client_on(lambda sent: httpx2.Response(200, json=reply))
+    content = port.model(client)(request())["content"]
+    assert content == [
+        {"type": "tool_use", "id": "t1", "name": "t", "input": {"a": None, "b": 1}}
+    ]
 
 
 def test_the_core_does_not_import_the_sdk() -> None:

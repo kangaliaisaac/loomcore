@@ -21,10 +21,10 @@ def model(
     client: anthropic.Anthropic | None = None,
 ) -> Callable[[ModelRequest], JsonObject]:
     """A model port that calls the Messages API. The default client reads
-    `ANTHROPIC_API_KEY` and does not retry: the driver's retry policy does, so a
-    client's own retries would multiply it. A client passed in should do the same
-    (`max_retries=0`)."""
-    api = client or anthropic.Anthropic(max_retries=0)
+    `ANTHROPIC_API_KEY`. The client's own retries are switched off, whichever client
+    is passed: the driver's retry policy is the only layer, and a second one would
+    multiply it and sleep past the run's timeout check."""
+    api = (client or anthropic.Anthropic()).with_options(max_retries=0)
 
     def call(request: ModelRequest) -> JsonObject:
         try:

@@ -87,11 +87,13 @@ Every component below works without the driver: a user may call the registry, th
 **Ports** (the only places that touch the world, injected into the driver):
 
 ```python
-ModelCall = Callable[[ModelRequest], ModelResponse]       # wraps the Anthropic SDK; tests use a scripted fake
+ModelCall = Callable[[ModelRequest], ModelResponse]       # `loomcore.anthropic.model` wraps the SDK; tests use a scripted fake
 Clock = Callable[[], datetime]                            # wall-clock UTC
 Monotonic = Callable[[], float]                           # durations
 Random = Callable[[], float]                              # jitter; tests pass a fixed one
 ```
+
+**Real ports.** `loomcore.runtime.system_ports()` returns the ports that need nothing from the caller, as a dict to pass with `**`: the UTC clock, `time.monotonic`, `random.random`, `time.sleep`, a random run id, the vendored price table, and `estimate_tokens` as `count_tokens`. The estimate is the serialised length over three, which errs high so the context budget and the cost ceiling err towards stopping early; what a run is billed always comes from the response's `usage`. A caller that wants an exact count passes its own counter in its place. `loomcore.anthropic.model(client=None)` is the model port on the Anthropic SDK, installed with `loomcore[anthropic]`. It sends the request (the cache marker after `cache_prefix`, the tools when there are any), returns the response as JSON with its empty fields dropped, and raises `ModelCallError` with a `CallError` for a status (with its `retry-after` seconds when the header is a number), a connection failure or a timeout. Its default client does not retry, because the driver's retry policy does; a client passed in should be built with `max_retries=0` too. Nothing else in the package imports the SDK, and a test imports the core in a fresh interpreter to show it.
 
 The driver also takes the tool port `(name, input) → ToolResult` (a failure the model can fix comes back as `ok=false`; any other exception is a bug in the tool and stops the run; the timeout is the registry's, §3.2: 60 seconds by default), `read_only(name) → bool`, `access(name) → Access` (what the tool declared, for the schedule, §3.2), `count_tokens(messages) → int` (the token count of a list of messages, counted at the edge; §3.5), `notices` (the `Notices` whose methods the workspace and the sandbox report to, §3.2), `sleep(seconds)`, `new_run_id()`, and a `Pricing` (`worst_case(request)`, `cost(message) → (usd, pricing_version)`; the vendored table arrives with the cost component). The model port raises `ModelCallError(CallError)` when a call fails; the retry policy reads it. The driver is built from a `Config` (model, system prompt, tool schemas), whose digest is the one in `run_started`, and refuses a spend log whose directory does not exist, because a mistyped path would read as empty. It logs the spend-log path it uses and every spend line it cannot read.
 
@@ -533,6 +535,8 @@ src/loomcore/
   guards.py      # guard pipeline
   verify.py      # verifier hook
   compose.py     # the tool side of the ports, built from one Notices
+  runtime.py     # the ports that need nothing from the caller: clocks, run id, estimate
+  anthropic.py   # the model port on the Anthropic SDK (the `anthropic` extra)
   observability/
     trace.py     # spans from the log
     cost.py      # tokens to dollars, per call and per run

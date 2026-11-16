@@ -20,7 +20,7 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-        args: [src, tests]
+        args: [src, tests, evals]
       - id: gitleaks
         name: gitleaks (staged changes)
         entry: gitleaks git --pre-commit --staged --redact --verbose

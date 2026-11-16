@@ -181,7 +181,7 @@
     "title": "Scripted three-step eval in CI",
     "spec": "5",
     "acceptance": "a fake model replays canned responses; the run reaches finished with a complete, replayable log",
-    "passes": false
+    "passes": true
   },
   {
     "id": "f24",

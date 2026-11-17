@@ -67,6 +67,7 @@ max-statements = 30
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004"]   # tests may use bare literals; annotations stay (mypy is strict)
 "evals/**" = ["PLR2004"]   # the same for the eval's checks
+"bench/**" = ["PLR2004"]   # and the bench's
 
 [tool.mypy]
 strict = true

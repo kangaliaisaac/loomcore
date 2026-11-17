@@ -207,14 +207,15 @@ def _sent(message: JsonObject) -> list[JsonValue]:
 
 def _reply(message: JsonObject, done: dict[str, ToolCompleted]) -> JsonObject | None:
     results: list[JsonValue] = [
-        _result(done[i]) for i in tool_use_ids(message) if i in done
+        tool_result(done[i]) for i in tool_use_ids(message) if i in done
     ]
     if message.get("stop_reason") == "max_tokens":
         results.append({"type": "text", "text": CONTINUE})
     return {"role": "user", "content": results} if results else None
 
 
-def _result(completed: ToolCompleted) -> JsonObject:
+def tool_result(completed: ToolCompleted) -> JsonObject:
+    """The `tool_result` block the model is shown for a completed call."""
     content = completed.content
     text = content if isinstance(content, str) else json.dumps(content)
     if completed.from_tool:

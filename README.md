@@ -139,7 +139,7 @@ What CI checks on every change, and the one number the library measures about it
 
 ## Design
 
-[intent.md](intent.md) says what `loomcore` is for and what it will not do. [spec.md](spec.md) is the contract: the loop, the event log, the eight components and the tests that prove them. The sources for each named interface are linked from the spec.
+[docs/why-the-harness.md](docs/why-the-harness.md) is a short write-up of why the harness, not the model, is the engineering. [intent.md](intent.md) says what `loomcore` is for and what it will not do. [spec.md](spec.md) is the contract: the loop, the event log, the eight components and the tests that prove them. The sources for each named interface are linked from the spec.
 
 ## References
 

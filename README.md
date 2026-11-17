@@ -5,12 +5,13 @@ A small Python library that is an agent harness: the loop, tools, sandbox, conte
 - [`loomcore`](#loomcore)
   - [What it is](#what-it-is)
   - [How to use it](#how-to-use-it)
+  - [What it measures](#what-it-measures)
   - [How not to use it](#how-not-to-use-it)
   - [Design](#design)
   - [References](#references)
   - [Licence](#licence)
 
-**Status: pre-release.** The design is written down ([intent.md](intent.md), [spec.md](spec.md)); the code is being built one component at a time. Nothing below is installable yet, and the usage notes describe what the library is for, not an API you can import today.
+**Status: v0.1.** The eight components in [spec.md](spec.md) are built and tested, a scripted eval runs the whole stack in CI, and a second project can install the built wheel and run a task (CI does that on every change). It needs Python 3.15 or later, and it is not on PyPI: install it from the `v0.1.0` tag on GitHub, which builds from source.
 
 ## What it is
 
@@ -25,14 +26,103 @@ It is built first for four projects that import it (`filingstrawl`, `finanalyst`
 
 ## How to use it
 
-When it ships, the shape of use is:
+Install it with the Anthropic model port (the one dependency of the core is `pydantic`; the SDK is an extra):
 
-1. Write ordinary typed Python functions and register them as tools; their type hints become the schema the model sees. Say which are `read_only`: only those are re-run without asking if a run is resumed after a crash.
+```bash
+pip install "loomcore[anthropic] @ git+https://github.com/kangaliaisaac/loomcore@v0.1.0"
+export ANTHROPIC_API_KEY=...   # in your shell, never in a file
+```
+
+A hello-agent: two tools, a three-step task (`6 * 7`, then `+ 8`, then finish), a run capped at five cents. It is the file [`examples/hello_agent.py`](examples/hello_agent.py), and a test runs it on a scripted model so this text cannot drift from it.
+
+<!-- hello-agent:start -->
+```python
+"""A hello-agent: two tools, a three-step task, and a run capped at five cents."""
+
+from decimal import Decimal
+from pathlib import Path
+
+from loomcore import (
+    DATA_RULE,
+    Config,
+    Driver,
+    Limits,
+    Ports,
+    PromptParts,
+    Settings,
+    Task,
+    build_prompt,
+    estimate_request,
+    estimate_tokens,
+    finish,
+    system_ports,
+    tool_kit,
+)
+from loomcore.anthropic import model
+
+
+def multiply(a: int, b: int) -> str:
+    """Multiply two whole numbers."""
+    return str(a * b)
+
+
+def add(a: int, b: int) -> str:
+    """Add two whole numbers."""
+    return str(a + b)
+
+
+Path("work").mkdir(exist_ok=True)
+kit = tool_kit(Path("work"))
+kit.registry.register(multiply, read_only=True)
+kit.registry.register(add, read_only=True)
+schemas = kit.registry.schemas()
+prompt = build_prompt(
+    PromptParts(
+        role="You do arithmetic with your tools.",
+        rules=(
+            "When you have the answer, call finish with the number alone.",
+            DATA_RULE,
+        ),
+        tools=tuple(schemas),
+    )
+)
+tools = (*(schema.to_json() for schema in schemas), finish.SCHEMA)
+config = Config(
+    "claude-haiku-5-5", prompt.text, tools, cache_prefix=len(prompt.stable_text)
+)
+counters = system_ports(count_tokens=estimate_tokens, count_request=estimate_request)
+ports = Ports(model=model(), **kit.tool_ports(), **counters)
+driver = Driver(config, ports, Settings(Path("session.jsonl"), Path("spend.jsonl")))
+limits = Limits(run_cap=Decimal("0.05"), month_cap=Decimal("1"))
+result = driver.run(Task("What is 6 * 7, plus 8?", limits))
+print(result.status, result.limit or result.result)
+```
+<!-- hello-agent:end -->
+
+It prints `finished 50` (a model that answers in plain text instead of calling `finish` ends the run too, with its text as the result, which is why the example's rules tell it to call `finish`; a run that hits a limit prints `paused` and the limit, for example `paused run_cap`) and leaves `session.jsonl`, the event log (every model call with its usage, every tool call and result, the limits, the end), and `spend.jsonl`, the spend ledger: one line per model call, shared by every run that points at it, and what `month_cap` is checked against (so a second run from the same directory adds to it). It also leaves a `session.lock` and the `work/` folder the tools use. Read the log back with `loomcore.read_events` and replay it with `loomcore.replay_events`; price it from its recorded tokens with `loomcore.observability.cost`.
+
+What to notice in the setup after the two tools:
+
+- **You pass the world in.** The model, the clocks and the token counters are arguments to `Ports`; `system_ports` fills the ones that need nothing from you. The two token counters have no default, so you choose them: here the offline estimates (the cost ceiling is then approximate; pass exact counters where a cap must hold).
+- **Tools are ordinary typed functions.** Their type hints and docstrings become the schema the model sees. `read_only=True` says a tool may be re-run without asking if a run is resumed after a crash.
+- **The caps have no default.** `run_cap` and `month_cap` are required; a run that reaches a limit pauses with the reason named, and `resume` continues it with the limits you choose.
+
+The shape of use, beyond the example:
+
+1. Write ordinary typed Python functions and register them as tools. Say which are `read_only`: only those are re-run without asking if a run is resumed after a crash.
 2. Give a run its limits and a task, and let the driver run it. Turns, time and output size have defaults; the two budget caps have none, so you give each a value or say explicitly that it is unlimited. Every step lands in the event log.
 3. Read the log to see what happened, and price it from the recorded token counts. A run that reaches a limit or needs an approval pauses; `resume` continues it. Rewinding forks a run from an earlier clean point; the fork starts its own turn, time and per-run spend counts, and only the monthly cap spans runs.
-4. Use a single component without the driver if you already have a loop. The registry, the sandbox, the guards and the context store are designed to be called from your own code.
+4. Use a single component without the driver if you already have a loop. The registry, the sandbox, the guards and the context store are designed to be called from your own code; importing one never loads the driver.
 
-A short hello-agent example, about twenty lines, will be added here with the driver. [spec.md](spec.md) is the contract for every piece.
+[spec.md](spec.md) is the contract for every piece.
+
+## What it measures
+
+What CI checks on every change, and the one number the library measures about itself. None of it is a claim about a model's quality.
+
+- **The scripted three-step eval** (`pytest evals`) runs the whole stack, with only the outside-world ports faked (the model, the clocks, the token counter, the jitter, the sleep and the run ids): a task in the shape of a small analysis (read a filing excerpt, compute a figure, write a cited answer, finish). It must finish with the right result and a complete log that replays to the same state, rebuilds every request the model saw, resumes from a cut, and prices to the hand-worked cost.
+- **The second-repository check** builds the wheel, installs only it in a throwaway environment and runs a task on it.
+- **The eviction bench** (`python bench/eviction.py`) scores how well the context store chooses what to keep when a window outgrows its budget, against furthest in future (CLRS 15.4), an offline baseline that knows the whole future (the best possible only when pages are one size and every page fits in the budget; for mixed sizes, as here, the best possible is NP-hard). On a seeded synthetic workload (an agent that keeps coming back to a few files: 300 requests, 36 of them first asks, a 20,000-token budget) the store's rule faults on 201 of the 264 repeat requests and furthest in future on 44. That gap is real but not all policy quality: furthest in future clears nothing and keeps no placeholders, so it has the whole budget, and a hit does not refresh a page's age, so the store clears the pages an agent keeps coming back to first. The workload is a stand-in, not a measured run; `python bench/eviction.py BUDGET LOG` scores a real log, with the limits stated in [spec.md](spec.md).
 
 ## How not to use it
 
@@ -44,7 +134,7 @@ A short hello-agent example, about twenty lines, will be added here with the dri
 - **Rewind restores conversation state, not files.** What the old run wrote to the workspace after the fork point is still on disk, and the fork starts from that workspace.
 - **A tool timeout abandons the call; it does not kill it.** Python cannot stop a running thread, so a timed-out tool may keep running and write late. A tool that writes should run through the sandbox, which kills its container on timeout.
 - **One writer per session file.** Do not point two processes at the same session; the second waits or fails.
-- **Among the optional extras, version 0.1 ships a plan tool (the model's latest plan is written to a file and kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, so do not expect them to run.
+- **Among the optional extras, version 0.1 ships a plan tool (the model's latest plan is written to a file and kept in context, not a planner) and verify-then-reflect.** Planner-executor, script actions, model routing, sub-agents, best-of-N, tree search and direct routing are named interfaces with no implementation, and so is the summariser (a model call that shrinks a window clearing could not): when a window is still over budget after clearing, the lowest-value exchanges (older and larger first) are dropped, not summarised. Do not expect them to run.
 - **No UI, hosted service or database.** Persistence is a JSONL file.
 
 ## Design

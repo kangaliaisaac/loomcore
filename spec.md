@@ -171,7 +171,7 @@ An extension plugs into a seam that already exists and never changes the core. E
 
 **Built in v0.1:** the escalation ladder, `finish` and graceful stop, the plan tool, verify then reflect, rewind, bring-your-own-loop. 
 
-**Named interfaces only, not built.** Each is a `Protocol` with a docstring and no implementation. The links are the public work each one is named after:
+**Named interfaces only, not built.** Each is named in this spec and not in code: no `Protocol` exists for it yet. The links are the public work each one is named after:
 
 - `PlannerExecutor`: plan once, run the tools with no model call in between, then one call to combine the results. 
   - Xu et al., [ReWOO: Decoupling Reasoning from Observations for Efficient Augmented Language Models](https://arxiv.org/abs/2305.18323).
@@ -544,6 +544,8 @@ src/loomcore/
 tests/
 evals/           # the scripted three-step task, and its checks (own CI step)
   second_repo.py # a second repository's view: public names only, run on the wheel
+examples/
+  hello_agent.py # the README's hello-agent (a test runs it and checks the README shows it)
 bench/           # the eviction experiment and its checks (own CI step)
   eviction.py    # scores the context store's rule (pack, compact) against furthest in future
 scripts/

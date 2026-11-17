@@ -8,7 +8,7 @@ A small Python agent harness: the loop, tools, sandbox, context, guardrails and 
 uv sync                          # create .venv from the lock file
 uv run --no-sync ruff check .    # lint
 uv run --no-sync ruff format --check .
-uv run --no-sync mypy src tests evals bench  # strict
+uv run --no-sync mypy src tests evals bench examples  # strict
 uv run --no-sync pytest
 uv run --no-sync pytest evals    # the scripted three-step eval
 uv run --no-sync pytest bench     # the eviction bench's checks; `python bench/eviction.py` prints its numbers

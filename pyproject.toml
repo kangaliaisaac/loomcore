@@ -1,6 +1,6 @@
 [project]
 name = "loomcore"
-version = "0.0.0"
+version = "0.1.0"
 description = "A small Python agent harness: the loop, tools, sandbox, context, guardrails and an append-only event log around a model."
 readme = "README.md"
 license = "MIT"

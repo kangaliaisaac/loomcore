@@ -12,6 +12,7 @@ from charts import (
     eviction_chart,
     eviction_score,
     files,
+    rounded_points,
 )
 
 ROOT = Path(__file__).parent.parent
@@ -52,6 +53,14 @@ def test_the_charts_ask_for_the_system_sans_and_not_only_the_measuring_font() ->
     for svg in files().values():
         assert SANS in svg
         assert MEASURED_FONT not in svg
+
+
+def test_a_short_or_empty_bar_stays_above_the_baseline_and_inside_its_width() -> None:
+    for top in (0.0, 3.0, 201.0):
+        vertices = rounded_points(0, 1, top, 0.6, 7.7)
+        assert min(y for _, y in vertices) >= 0.0
+        assert max(y for _, y in vertices) <= top
+        assert all(0.0 <= x <= 1.0 for x, _ in vertices)
 
 
 def test_the_readme_shows_both_charts_with_their_numbers_and_version() -> None:

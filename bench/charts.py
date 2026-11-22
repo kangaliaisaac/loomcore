@@ -64,26 +64,44 @@ def eviction_score() -> Score:
     return score(seeded_workload(), SEEDED_BUDGET)
 
 
+BAR_CODES = (
+    DrawPath.MOVETO,
+    DrawPath.LINETO,
+    DrawPath.CURVE3,
+    DrawPath.CURVE3,
+    DrawPath.LINETO,
+    DrawPath.CURVE3,
+    DrawPath.CURVE3,
+    DrawPath.LINETO,
+    DrawPath.CLOSEPOLY,
+)
+
+
+def rounded_points(
+    x0: float, x1: float, top: float, rx: float, ry: float
+) -> list[tuple[float, float]]:
+    """The corners and curve controls of a bar from 0 to `top`, rounded at the top.
+
+    The rounding never takes more than the bar has: a short or empty bar stays above
+    the baseline and inside its own width.
+    """
+    rx, ry = min(rx, (x1 - x0) / 2), min(ry, top)
+    return [
+        (x0, 0.0),
+        (x0, top - ry),
+        (x0, top),
+        (x0 + rx, top),
+        (x1 - rx, top),
+        (x1, top),
+        (x1, top - ry),
+        (x1, 0.0),
+        (x0, 0.0),
+    ]
+
+
 def rounded_top(x0: float, x1: float, top: float, rx: float, ry: float) -> DrawPath:
     """A bar from 0 to `top`: square at the baseline, rounded at the data end."""
-    move, line, curve, close = (
-        DrawPath.MOVETO,
-        DrawPath.LINETO,
-        DrawPath.CURVE3,
-        DrawPath.CLOSEPOLY,
-    )
-    points = [
-        ((x0, 0.0), move),
-        ((x0, top - ry), line),
-        ((x0, top), curve),
-        ((x0 + rx, top), curve),
-        ((x1 - rx, top), line),
-        ((x1, top), curve),
-        ((x1, top - ry), curve),
-        ((x1, 0.0), line),
-        ((x0, 0.0), close),
-    ]
-    return DrawPath([p for p, _ in points], [c for _, c in points])
+    return DrawPath(rounded_points(x0, x1, top, rx, ry), BAR_CODES)
 
 
 def draw_bars(ax: Axes, theme: Theme, values: Sequence[int]) -> None:

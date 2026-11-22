@@ -548,6 +548,8 @@ examples/
   hello_agent.py # the README's hello-agent (a test runs it and checks the README shows it)
 bench/           # the eviction experiment and its checks (own CI step)
   eviction.py    # scores the context store's rule (pack, compact) against furthest in future
+  charts.py      # draws docs/charts/*.svg from the bench's numbers (`make charts`; a test fails on drift)
+docs/charts/     # the committed charts, a light and a dark file each
 scripts/
   second-repo.sh # builds the wheel and runs evals/second_repo.py on it alone
 ```

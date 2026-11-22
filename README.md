@@ -4,6 +4,9 @@ A small Python library that is an agent harness: the loop, tools, sandbox, conte
 
 - [`loomcore`](#loomcore)
   - [What it is](#what-it-is)
+  - [Where it fits](#where-it-fits)
+  - [Architecture](#architecture)
+  - [The key mechanism: one turn, and the escalation ladder](#the-key-mechanism-one-turn-and-the-escalation-ladder)
   - [How to use it](#how-to-use-it)
   - [What it measures](#what-it-measures)
   - [How not to use it](#how-not-to-use-it)
@@ -23,6 +26,125 @@ An agent is a model plus a harness. The model reasons; the harness runs the loop
 - eight components, each usable without the driver: system-prompt builder, tool registry, sandbox boundary, filesystem workspace, context store, self-verification hook, guardrails with a human-approval seam, and observability with token-based cost.
 
 It is built first for four projects that import it (`filingstrawl`, `finanalyst`, `harnessbench` and `streamsense`), and for anyone who wants to wire a model to a few tools and get a run that ends on purpose, with a log they can read.
+
+## Where it fits
+
+Your code gives `loomcore` a task, tools and limits. It runs the loop between a model and those tools, stops when the model finishes or a limit is reached, and writes every step to a log. The shaded box is `loomcore`; everything else is yours or a service you choose.
+
+```mermaid
+flowchart LR
+    you["Your code<br/>a task, tools, limits"] --> lc["loomcore<br/>the loop, its limits and its log"]
+    lc <-->|"model port"| model["A model<br/>(an Anthropic adapter is included)"]
+    lc <-->|"tool port: name, input → result"| tools["Your tools<br/>run inside the sandbox boundary"]
+    lc -->|"pauses on a limit or an approval"| human["A person<br/>approves, or resumes with new limits"]
+    human -->|"decision, limits"| lc
+    lc --> log[("session.jsonl<br/>append-only event log")]
+    lc --> spend[("spend.jsonl<br/>spend ledger")]
+    log --> after["Replay, resume, rewind, fork,<br/>and token and cost reports"]
+
+    classDef lg fill:#dbeafe,stroke:#1d4ed8,color:#111827
+    class lc lg
+```
+
+## Architecture
+
+The core is one pure function, `step(state, event)`, that returns a new state and the effects to perform. A thin driver feeds it events, performs the effects through ports (the only places that touch the world) and appends every result to the log. The run's state is a fold over that log, which is why a run can be replayed or resumed. The eight components sit beside the core, and each works without the driver.
+
+```mermaid
+flowchart TB
+    subgraph core["The core: pure, no I/O"]
+        step["step(state, event)<br/>returns the new state and effects"]
+        state["RunState<br/>a fold over the log"]
+    end
+    driver["Driver<br/>feeds events, performs effects,<br/>appends every result"]
+    log[("Event log<br/>append-only JSONL")]
+    driver -->|"event"| step
+    step -->|"effects: call the model, run tools,<br/>ask a human, stop"| driver
+    driver -->|"append"| log
+    log -->|"fold"| state
+    state --> step
+
+    subgraph ports["Ports: the only places that touch the world"]
+        model["model call"]
+        toolport["tool call"]
+        world["clock, timers, randomness,<br/>run ids, token counter, pricing"]
+    end
+    driver --> ports
+
+    subgraph parts["Eight components, each usable without the driver"]
+        prompt["System-prompt builder"]
+        registry["Tool registry"]
+        sandbox["Sandbox boundary"]
+        workspace["Filesystem workspace"]
+        context["Context store"]
+        verify["Self-verification hook"]
+        guards["Guardrails and human-approval seam"]
+        obs["Observability and cost"]
+    end
+    driver -.->|"uses"| parts
+
+    classDef lg fill:#dbeafe,stroke:#1d4ed8,color:#111827
+    class step,state,driver lg
+```
+
+## The key mechanism: one turn, and the escalation ladder
+
+One turn of the loop, as the log records it. The driver packs the context window, calls the model, and judges the calls the model asked for before any runs. A guard can deny a call or ask a person; an allowed call runs, and its result passes the post guards before it is logged. A claim that the task is finished goes to the verifier.
+
+```mermaid
+sequenceDiagram
+    participant D as Driver
+    participant S as step (pure)
+    participant M as Model port
+    participant G as Guards
+    participant T as Tool port
+    participant L as Event log
+
+    D->>L: turn_started
+    D->>L: context_packed, when the window changed
+    D->>S: event
+    S-->>D: effect: call the model
+    D->>M: request (system prompt, tools, window)
+    M-->>D: reply and its usage
+    D->>L: model_call (usage, cost)
+    D->>S: the reply
+    Note over S: the repeat detector judges the turn's calls,<br/>and the ladder may climb
+    S-->>D: effect: the calls the model asked for
+    D->>L: tool_requested, one line per call
+    D->>G: run_pre(call)
+    alt a guard denies
+        G-->>D: deny
+        D->>L: guard_decision, tool_completed with ok=false
+    else a guard asks
+        G-->>D: ask
+        D->>L: approval_requested, run_paused (awaiting approval)
+    else allowed
+        D->>T: run the tool, inside the sandbox boundary
+        T-->>D: result
+        D->>G: run_post(result)
+        D->>L: tool_completed
+    end
+    Note over D,S: next: another turn, a pause on a limit, or run_finished<br/>(a finish claim goes to the verifier first)
+```
+
+The escalation ladder is what happens when the model repeats itself. When identical calls reach the threshold (three of the last ten by default), the run climbs one rung for that turn. The rung belongs to the run, never goes down, and is logged as an `escalation` event.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "Rung 0<br/>no repeats" as R0
+    state "Rung 1<br/>nudge: a short corrective message" as R1
+    state "Rung 2<br/>switch strategy: a different<br/>prompt or tool set" as R2
+    state "Rung 3<br/>ask a human" as R3
+    state "Stuck<br/>stop with the best partial result" as R4
+
+    [*] --> R0: run starts
+    R0 --> R1: identical calls repeat
+    R1 --> R2: they repeat again
+    R2 --> R3: they repeat again
+    R3 --> R4: they repeat again, even after an approval
+    R4 --> [*]: run_finished, reason stuck
+```
 
 ## How to use it
 

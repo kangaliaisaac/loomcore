@@ -19,6 +19,7 @@ dev = [
     "anthropic>=2.8.0",
     "httpx2>=2.16.2",
     "hypothesis",
+    "matplotlib>=3.11.2",
     "mypy",
     "pytest",
     "ruff",

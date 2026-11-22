@@ -38,8 +38,8 @@ flowchart LR
     lc <-->|"tool port: name, input → result"| tools["Your tools<br/>run inside the sandbox boundary"]
     lc -->|"pauses on a limit or an approval"| human["A person<br/>approves, or resumes with new limits"]
     human -->|"decision, limits"| lc
-    lc --> log[("session.jsonl<br/>append-only event log")]
-    lc --> spend[("spend.jsonl<br/>spend ledger")]
+    lc --> log[("Event log<br/>append-only, one JSONL file per session")]
+    lc --> spend[("Spend ledger<br/>JSONL")]
     log --> after["Replay, resume, rewind, fork,<br/>and token and cost reports"]
 
     classDef lg fill:#dbeafe,stroke:#1d4ed8,color:#111827
@@ -108,20 +108,25 @@ sequenceDiagram
     M-->>D: reply and its usage
     D->>L: model_call (usage, cost)
     D->>S: the reply
-    Note over S: the repeat detector judges the turn's calls,<br/>and the ladder may climb
+    Note over S: the repeat detector judges the turn's calls,<br/>and works out the ladder's rung (not yet logged)
     S-->>D: effect: the calls the model asked for
-    D->>L: tool_requested, one line per call
-    D->>G: run_pre(call)
-    alt a guard denies
-        G-->>D: deny
-        D->>L: guard_decision, tool_completed with ok=false
-    else a guard asks
-        G-->>D: ask
+    D->>G: run_pre(each call)
+    G-->>D: allow, deny or ask, per call
+    D->>L: guard_decision, for each deny and ask
+    D->>L: escalation, if a rung was reached
+    D->>L: tool_requested, one line per call, written together
+    opt a guard denied a call
+        D->>L: tool_completed with ok=false (the call never runs)
+    end
+    opt a guard asked
         D->>L: approval_requested, run_paused (awaiting approval)
-    else allowed
+        Note over D,L: nothing runs while a question is open
+    end
+    loop each allowed call
         D->>T: run the tool, inside the sandbox boundary
         T-->>D: result
         D->>G: run_post(result)
+        D->>L: guard_decision (post), when a guard redacts or denies
         D->>L: tool_completed
     end
     Note over D,S: next: another turn, a pause on a limit, or run_finished<br/>(a finish claim goes to the verifier first)
@@ -135,7 +140,7 @@ stateDiagram-v2
     state "Rung 0<br/>no repeats" as R0
     state "Rung 1<br/>nudge: a short corrective message" as R1
     state "Rung 2<br/>switch strategy: a different<br/>prompt or tool set" as R2
-    state "Rung 3<br/>ask a human" as R3
+    state "Rung 3<br/>ask a human: the run pauses<br/>until the question is answered" as R3
     state "Stuck<br/>stop with the best partial result" as R4
 
     [*] --> R0: run starts

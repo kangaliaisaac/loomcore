@@ -112,8 +112,8 @@ sequenceDiagram
     S-->>D: effect: the calls the model asked for
     D->>G: run_pre(each call)
     G-->>D: allow, deny or ask, per call
-    D->>L: guard_decision, for each deny and ask
     D->>L: escalation, if a rung was reached
+    D->>L: guard_decision, for each deny and ask
     D->>L: tool_requested, one line per call, written together
     opt a guard denied a call
         D->>L: tool_completed with ok=false (the call never runs)

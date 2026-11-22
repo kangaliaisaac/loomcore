@@ -71,7 +71,7 @@ def test_the_example_runs_a_three_step_task_and_leaves_a_replayable_log(
         reply(3, finish.NAME, result="50"),
     ]
     run_example(tmp_path, monkeypatch, scripted(replies, seen))
-    assert capsys.readouterr().out.strip() == "finished 50"
+    assert capsys.readouterr().out.strip() == "finished finished 50"
     events = read_events(tmp_path / "session.jsonl").events
     assert [e.kind for e in events].count("tool_completed") == 3  # two tools and finish
     done = {e.tool_use_id: e for e in events if e.kind == "tool_completed"}
@@ -92,7 +92,15 @@ def test_a_model_that_answers_in_plain_text_ends_the_run_with_its_text(
 ) -> None:
     replies = [text_reply(1, "6 * 7 + 8 = 50")]
     run_example(tmp_path, monkeypatch, scripted(replies, []))
-    assert capsys.readouterr().out.strip() == "finished 6 * 7 + 8 = 50"
+    assert capsys.readouterr().out.strip() == "finished end_turn 6 * 7 + 8 = 50"
+
+
+def test_a_run_that_ends_on_an_error_says_so_instead_of_looking_like_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    replies = [{**text_reply(1, "no answer"), "stop_reason": "mystery"}]
+    run_example(tmp_path, monkeypatch, scripted(replies, []))
+    assert capsys.readouterr().out.startswith("finished error ")
 
 
 def test_the_readme_shows_the_example_file_as_it_is() -> None:

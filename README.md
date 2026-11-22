@@ -33,7 +33,7 @@ pip install "loomcore[anthropic] @ git+https://github.com/kangaliaisaac/loomcore
 export ANTHROPIC_API_KEY=...   # in your shell, never in a file
 ```
 
-A hello-agent: two tools, a three-step task (`6 * 7`, then `+ 8`, then finish), a run capped at five cents. It is the file [`examples/hello_agent.py`](examples/hello_agent.py), and a test runs it on a scripted model so this text cannot drift from it.
+A hello-agent: two tools, a three-step task (`6 * 7`, then `+ 8`, then finish), a run capped at five cents. It is the file [`examples/hello_agent.py`](examples/hello_agent.py), and a test runs it on a scripted model and checks that the code below is that file.
 
 <!-- hello-agent:start -->
 ```python
@@ -95,11 +95,11 @@ ports = Ports(model=model(), **kit.tool_ports(), **counters)
 driver = Driver(config, ports, Settings(Path("session.jsonl"), Path("spend.jsonl")))
 limits = Limits(run_cap=Decimal("0.05"), month_cap=Decimal("1"))
 result = driver.run(Task("What is 6 * 7, plus 8?", limits))
-print(result.status, result.limit or result.result)
+print(result.status, result.reason, result.limit or result.result)
 ```
 <!-- hello-agent:end -->
 
-It prints `finished 50` (a model that answers in plain text instead of calling `finish` ends the run too, with its text as the result, which is why the example's rules tell it to call `finish`; a run that hits a limit prints `paused` and the limit, for example `paused run_cap`) and leaves `session.jsonl`, the event log (every model call with its usage, every tool call and result, the limits, the end), and `spend.jsonl`, the spend ledger: one line per model call, shared by every run that points at it, and what `month_cap` is checked against (so a second run from the same directory adds to it). It also leaves a `session.lock` and the `work/` folder the tools use. Read the log back with `loomcore.read_events` and replay it with `loomcore.replay_events`; price it from its recorded tokens with `loomcore.observability.cost`.
+It prints the status, why the run ended, and the result: `finished finished 50` (a model that answers in plain text instead of calling `finish` ends the run too, printing `finished end_turn` and its text, which is why the example's rules tell it to call `finish`; a run that hits a limit prints `paused limit run_cap`; a run that ends on an error prints `finished error` and the message) and leaves `session.jsonl`, the event log (every model call with its usage, every tool call and result, the limits, the end), and `spend.jsonl`, the spend ledger: one line per model call, shared by every run that points at it, and what `month_cap` is checked against (so a second run from the same directory adds to it). It also leaves a `session.lock` and the `work/` folder the tools use. Read the log back with `loomcore.read_events` and replay it with `loomcore.replay_events`; price it from its recorded tokens with `loomcore.observability.cost`.
 
 What to notice in the setup after the two tools:
 

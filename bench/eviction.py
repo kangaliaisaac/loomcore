@@ -84,6 +84,7 @@ from loomcore.limits import Limits
 _DEFAULTS = Limits.model_fields  # the fractions at which compaction starts and stops
 COMPACT_AT: float = _DEFAULTS["compact_at"].default
 COMPACT_TO: float = _DEFAULTS["compact_to"].default
+SEEDED_BUDGET = 20_000  # tokens: the budget the seeded workload is scored at
 
 
 # Calls the driver treats specially: `finish` ends the run and the plan's exchange is
@@ -375,7 +376,7 @@ def report(result: Score, budget: int, source: str) -> str:
 
 def main(argv: Sequence[str]) -> None:
     if not argv:
-        budget = 20_000
+        budget = SEEDED_BUDGET
         print(report(score(seeded_workload(), budget), budget, "seeded workload"))
         return
     budget = int(argv[0])

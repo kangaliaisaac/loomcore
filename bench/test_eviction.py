@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from eviction import (
+    SEEDED_BUDGET,
     Ref,
     completed,
     log_task_tokens,
@@ -147,8 +148,9 @@ def test_a_page_is_the_size_of_the_drivers_item_and_its_cleared_form() -> None:
 
 def test_the_seeded_workload_is_the_same_every_time_and_has_a_gap() -> None:
     assert seeded_workload() == seeded_workload()
-    result = score(seeded_workload(), 20_000)
+    result = score(seeded_workload(), SEEDED_BUDGET)
     assert result.compulsory == 36
+    assert result.avoidable == 264
     assert (result.policy, result.furthest) == (201, 44)  # from the rules above
     assert result.furthest < result.policy
 

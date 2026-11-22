@@ -124,6 +124,13 @@ What CI checks on every change, and the one number the library measures about it
 - **The second-repository check** builds the wheel, installs only it in a throwaway environment and runs a task on it.
 - **The eviction bench** (`python bench/eviction.py`) scores how well the context store chooses what to keep when a window outgrows its budget, against furthest in future (CLRS 15.4), an offline baseline that knows the whole future (the best possible only when pages are one size and every page fits in the budget; for mixed sizes, as here, the best possible is NP-hard). On a seeded synthetic workload (an agent that keeps coming back to a few files: 300 requests, 36 of them first asks, a 20,000-token budget) the store's rule faults on 201 of the 264 repeat requests and furthest in future on 44. That gap is real but not all policy quality: furthest in future clears nothing and keeps no placeholders, so it has the whole budget, and a hit does not refresh a page's age, so the store clears the pages an agent keeps coming back to first. The workload is a stand-in, not a measured run; `python bench/eviction.py BUDGET LOG` scores a real log, with the limits stated in [spec.md](spec.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/charts/eviction-dark.svg">
+  <img alt="Bar chart: on 264 repeat requests, the context store's rule faults 201 times and furthest in future 44 times." src="docs/charts/eviction-light.svg" width="720">
+</picture>
+
+*The eviction bench's seeded workload (seed 0): faults of the context store's rule (201) and of furthest in future (44) out of 264 repeat requests, lower is better. Data: `bench/eviction.py` at `loomcore` 0.1.0, drawn by `make charts`, which redraws every chart in `docs/charts/` from the bench. The workload is synthetic, so this is a stand-in for the store's behaviour, not a measured run.*
+
 ## How not to use it
 
 - **It is not a framework.** There is no agent DSL, no dependency-injection container and no global state. You pass things in. It is a library you call, not a runtime that calls you.

@@ -60,5 +60,5 @@ A second repository can `import loomcore`, register a tool and run a multi-step 
 - every component has a contract and a test;
 - a scripted three-step task runs as an eval in CI;
 - token and cost accounting is native to the library;
-- the `README` carries a hello-agent example of about twenty lines;
+- the `README` carries a hello-agent example that a test runs, so the text cannot drift from the code;
 - a short write-up says why the harness, not the model, is the engineering.

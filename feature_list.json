@@ -196,8 +196,8 @@
     "card": "12",
     "title": "Hello-agent example and write-up",
     "spec": "6",
-    "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion",
-    "passes": false
+    "acceptance": "a second repository can import loomcore, register a tool and run a multi-step task to completion; the README's hello-agent is a tested file; docs/why-the-harness.md says why the harness, not the model, is the engineering",
+    "passes": true
   },
   {
     "id": "f26",

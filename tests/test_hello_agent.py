@@ -100,7 +100,20 @@ def test_a_run_that_ends_on_an_error_says_so_instead_of_looking_like_success(
 ) -> None:
     replies = [{**text_reply(1, "no answer"), "stop_reason": "mystery"}]
     run_example(tmp_path, monkeypatch, scripted(replies, []))
-    assert capsys.readouterr().out.startswith("finished error ")
+    out = capsys.readouterr().out
+    assert out.startswith("finished error ")
+    assert "unknown stop_reason: 'mystery'" in out
+
+
+def test_a_run_that_spends_past_its_cap_pauses_and_names_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    costly: JsonObject = {
+        **reply(1, "multiply", a=6, b=7),
+        "usage": {"input_tokens": 5_000_000, "output_tokens": 20},
+    }
+    run_example(tmp_path, monkeypatch, scripted([costly], []))
+    assert capsys.readouterr().out.strip() == "paused limit run_cap"
 
 
 def test_the_readme_shows_the_example_file_as_it_is() -> None:
